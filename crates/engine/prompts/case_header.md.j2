@@ -1,0 +1,19 @@
+## Case
+
+- Title: {{ case.title }}
+- Owner: {{ case.owner or "unknown" }}
+- Created: {{ case.created_at }}
+- Current time: {{ now }}
+- Activation {{ usage.activations }} of at most {{ budgets.max_activations }}
+
+## Goal
+
+{{ case.goal }}
+
+## Notes
+
+{% for note in notes %}
+- {{ note.key }}: {{ note.value }}
+{% else %}
+No notes yet.
+{% endfor %}

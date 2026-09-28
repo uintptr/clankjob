@@ -1,0 +1,34 @@
+[package]
+name = "clankjob-server"
+description = "The clankjob server: REST API, configuration and process lifecycle."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "clankjob"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clankjob-core.workspace = true
+clankjob-engine.workspace = true
+clankjob-llm-openai.workspace = true
+clankjob-storage.workspace = true
+humantime-serde.workspace = true
+rouille.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

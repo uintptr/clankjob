@@ -1,0 +1,4 @@
+allow-unwrap-in-tests = true
+allow-indexing-slicing-in-tests = true
+# ".." keeps clippy's default list of identifiers allowed in docs without backticks.
+doc-valid-idents = ["OpenAI", "OpenRouter", "SQLite", ".."]

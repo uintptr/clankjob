@@ -1,0 +1,20 @@
+[package]
+name = "clankjob-llm-openai"
+description = "LLM provider adapter for OpenAI-compatible Chat Completions APIs."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+clankjob-core.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+rouille.workspace = true
+
+[lints]
+workspace = true

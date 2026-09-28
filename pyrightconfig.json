@@ -1,0 +1,11 @@
+{
+    "reportImplicitOverride": false,
+    "reportUnusedCallResult": false,
+    "reportAny": false,
+    "reportUnannotatedClassAttribute": false,
+    "reportExplicitAny": false,
+    "reportImplicitRelativeImport": false,
+    "reportPrivateLocalImportUsage": false,
+    "reportUnusedImport": false,
+    "extraPaths": ["tools", "tools/fleet"]
+}

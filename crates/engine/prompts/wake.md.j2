@@ -1,0 +1,22 @@
+{% if wake.reason == "created" %}
+The case was just created. Start working on the goal.
+{% elif wake.reason == "human_message" %}
+The owner sent you a message:
+
+{{ wake.text }}
+{% elif wake.reason == "human_answer" %}
+The owner answered your question "{{ wake.question }}":
+
+{{ wake.answer }}
+{% elif wake.reason == "condition_fired" %}
+You were woken up because the condition `{{ wake.kind }}` fired.
+{% for detail in wake.details %}
+- {{ detail | tojson }}
+{% endfor %}
+{% elif wake.reason == "timed_out" %}
+You were woken up because the wait for `{{ wake.kind }}` timed out before it happened.
+{% elif wake.reason == "manual" %}
+The owner woke you up. Review the situation and decide what to do next.
+{% endif %}
+
+(Time: {{ now }})
