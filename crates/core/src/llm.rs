@@ -44,6 +44,9 @@ pub enum Message {
     User {
         /// Message text.
         text: String,
+        /// Images shown with the text, for models that can see them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageData>,
     },
     /// A previous LLM turn.
     Assistant(AssistantMessage),
@@ -54,6 +57,15 @@ pub enum Message {
         /// Result, usually JSON text.
         content: String,
     },
+}
+
+/// An image sent to the LLM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageData {
+    /// Media type, e.g. `image/png`.
+    pub media_type: String,
+    /// The image bytes, base64 encoded.
+    pub base64: String,
 }
 
 /// A request for the next LLM turn.
@@ -85,6 +97,42 @@ pub struct CompletionResponse {
     pub message: AssistantMessage,
     /// Tokens consumed.
     pub usage: TokenUsage,
+}
+
+/// A model an LLM endpoint offers, as reported by the provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// Model id to put in requests, e.g. `openai/gpt-4.1-mini`.
+    pub id: String,
+    /// Human-readable name, if the provider gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Maximum context size in tokens, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    /// US dollars per million input tokens, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+    /// US dollars per million output tokens, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
+}
+
+impl ModelInfo {
+    /// A model known only by its id.
+    #[must_use]
+    pub fn from_id<S>(id: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Self {
+            id: id.into(),
+            name: None,
+            context_length: None,
+            input_price: None,
+            output_price: None,
+        }
+    }
 }
 
 /// Why a completion failed.
@@ -120,6 +168,23 @@ pub trait LlmProvider: Send + Sync {
     /// Returns [`LlmError::Retryable`] for transient failures and [`LlmError::Fatal`]
     /// otherwise.
     fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError>;
+
+    /// Models this endpoint offers that can call tools, when the provider can say so.
+    ///
+    /// The default returns an empty list, meaning "unknown". Blocks on the network, so
+    /// call it from a background thread, never from a request handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`LlmError`] if the provider cannot be reached or answers badly.
+    fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        Ok(Vec::new())
+    }
+
+    /// Whether the model can be shown images. Off unless the provider says so.
+    fn supports_images(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

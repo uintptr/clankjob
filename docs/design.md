@@ -1,6 +1,6 @@
 # Clankjob — Design Document
 
-**Status:** Draft · **Date:** 2026-09-28
+**Status:** Draft, partly built (see §0) · **Updated:** 2026-09-29
 
 Clankjob is a platform for running **long-lived, LLM-driven tasks** ("cases") that
 can work for a while, go to sleep, wake themselves up when something happens (or
@@ -9,13 +9,40 @@ when a timer fires), and continue until they are done.
 The platform is split into:
 
 - **Server**: a Rust REST API built on [rouille](https://github.com/tomaka/rouille),
-  plus the case engine, scheduler and plugin host.
-- **Client**: a web app that creates, monitors and steers cases and configures plugins.
+  plus the case engine, scheduler and (planned) plugin host.
+- **Web client**: a single-page app, compiled into the server binary, that creates,
+  monitors and steers cases.
 
 All capabilities that reach outside the core, such as email or Discord, are **plugins**.
 The core never needs to be rewritten to add one. When a case needs a person, it can be
 answered from the web client **or** from any chat plugin (Discord first); whichever
 answer arrives first wins.
+
+______________________________________________________________________
+
+## 0. Implementation status
+
+This document describes both what exists and what is planned. Sections and features are
+marked **(built)**, **(partly built)** or **(planned)**.
+
+| Area                                                                     | Status                | Where     |
+| ------------------------------------------------------------------------ | --------------------- | --------- |
+| Case engine: activations, sleep and wake, crash-safe resume, budgets     | Built                 | §4–§6     |
+| Core tools, `core.timer`, `core.human_input`                             | Built                 | §5.1      |
+| Context rebuilding, notes, prompt templates, profiles, hot reload        | Built                 | §7.1–§7.4 |
+| Compaction of long transcripts                                           | Planned               | §7.3      |
+| Instructions (always in context) and files (read on demand)              | Built                 | §7.5      |
+| OpenAI-compatible LLM adapter, model discovery, images for vision models | Built                 | §8        |
+| Questions to the owner, answered from the web client                     | Built                 | §10.1     |
+| Approvals, delivery to chat channels, first-answer-wins across channels  | Planned (milestone 3) | §9.7, §10 |
+| Plugin host, plugin instances, external plugin protocol                  | Planned (milestone 4) | §9        |
+| Email plugin                                                             | Planned               | §11       |
+| Discord plugin                                                           | Built, not yet wired  | §12       |
+| REST API                                                                 | Partly built          | §14       |
+| Web client                                                               | Built                 | §15       |
+| SQLite storage                                                           | Built                 | §16       |
+| `public_url`, CORS, CSP, body limits                                     | Built                 | §17.3     |
+| Docker image and compose file                                            | Planned               | §18       |
 
 ______________________________________________________________________
 
@@ -33,7 +60,7 @@ persisted, and it can **suspend itself on a wait condition** and be resumed late
 
 - Cases that run for hours, days or weeks, surviving server restarts.
 - **Sleeping is free.** A sleeping case uses no LLM tokens. Checking whether it should
-  wake up is done by cheap, deterministic plugin code, not by the model.
+  wake up is done by cheap, deterministic code, not by the model.
 - Extensibility through plugins that each provide their own configuration, tools and
   wait conditions.
 - Provider-agnostic LLM access.
@@ -55,12 +82,15 @@ ______________________________________________________________________
 
 | Term                | Meaning                                                                                                                                                                 |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Case**            | A long-running task with a goal, e.g. _"Get a quote from ACME for 200 widgets and summarize it."_ Has a state, a transcript and a set of enabled plugin instances.      |
+| **Case**            | A long-running task with a goal, e.g. _"Get a quote from ACME for 200 widgets and summarize it."_ Has a state, a transcript, instructions and files.                    |
 | **Activation**      | One awake period of a case: the case is loaded, the LLM ↔ tool loop runs, and the activation ends when the case sleeps, asks a human, completes or fails.               |
-| **Event**           | An immutable, append-only record of something that happened to a case: user message, LLM message, tool call, tool result, wake-up, check result, state change.          |
-| **Transcript**      | The ordered list of events that gets turned into LLM context (possibly compacted).                                                                                      |
-| **Wait condition**  | What a sleeping case is waiting for: a plugin-defined condition (e.g. `reply_received`), a check interval, and a timeout.                                               |
-| **Plugin**          | Compiled-in code that implements the `Plugin` trait. It exposes a config schema, tools, wait-condition kinds, and optionally a human channel.                           |
+| **Event**           | An immutable, append-only record of something that happened to a case: a wake-up, an LLM turn, a tool result, a state change.                                           |
+| **Transcript**      | The ordered list of events that gets turned into LLM context.                                                                                                           |
+| **Wait condition**  | What a sleeping case is waiting for: a condition kind (`core.timer`, or a plugin's, e.g. `reply_received`), its parameters, and an optional timeout.                    |
+| **Instruction**     | Short owner-written text that steers a case, always in its system prompt (§7.5).                                                                                        |
+| **Case file**       | A PDF, image or text file added to a running case, read by the agent on demand (§7.5).                                                                                  |
+| **Profile**         | A reusable prompt snippet, chosen per case, appended to the system prompt (§7.4).                                                                                       |
+| **Plugin**          | Code that extends the core with configuration, tools, wait-condition kinds, and optionally a human channel: compiled in, or an external process (§9).                   |
 | **Plugin instance** | A plugin plus a concrete configuration, e.g. the `email` plugin configured for `support@example.com`. A plugin can have many instances.                                 |
 | **Tool**            | A function the LLM can call. It comes either from the core (`sleep`, `complete`, …) or from a plugin instance (`support_mail.send_email`).                              |
 | **Owner**           | The person running a case. Human requests and notifications go to them.                                                                                                 |
@@ -73,17 +103,17 @@ ______________________________________________________________________
 
 ```
 ┌───────────────────────────┐
-│        Web client         │  SPA: cases, timeline, approvals, plugin config
+│        Web client         │  cases, timeline, inbox, instructions, files, prompts
 └─────────────┬─────────────┘
-              │ HTTPS / JSON (REST)
+              │ HTTPS / JSON (REST), same origin
 ┌─────────────▼──────────────────────────────────────────────────────┐
 │ Server process (Rust)                                              │
 │                                                                    │
 │  ┌──────────────────────┐        ┌───────────────────────────┐     │
-│  │ REST API (rouille)   │───────▶│ Case service              │     │
-│  │ thread per request   │        │ create / cancel / wake /  │     │
-│  └──────────────────────┘        │ human input / approvals   │     │
-│                                  └─────────────┬─────────────┘     │
+│  │ REST API (rouille)   │───────▶│ Engine operations         │     │
+│  │ thread per request   │        │ create / message / answer │     │
+│  │ + embedded web UI    │        │ wake / cancel / files     │     │
+│  └──────────────────────┘        └─────────────┬─────────────┘     │
 │                                                │ enqueue           │
 │  ┌──────────────────────┐        ┌─────────────▼─────────────┐     │
 │  │ Scheduler thread     │───────▶│ Work queue (DB-backed)    │     │
@@ -95,56 +125,60 @@ ______________________________________________________________________
 │             │                    └───┬──────────────┬────────┘     │
 │             │                        │              │              │
 │  ┌──────────▼────────────────────────▼───┐   ┌──────▼──────────┐   │
-│  │ Plugin host                           │   │ LLM provider    │   │
-│  │ registry · instances · tools · checks │   │ (trait object)  │   │
+│  │ Plugin host (planned)                 │   │ LLM provider    │   │
+│  │ registry · instances · tools · checks │   │ + model catalog │   │
 │  └──────────┬────────────────────────────┘   └──────┬──────────┘   │
 │             │                                       │              │
 │  ┌──────────▼───────────────────────────────────────▼───────────┐  │
-│  │ Storage: SQLite (rusqlite), WAL mode — Postgres later        │  │
+│  │ Storage: SQLite (rusqlite, WAL) · file bytes in data/files/  │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 └───────────────┬───────────────────────────────────┬────────────────┘
                 │ IMAP/SMTP · Discord REST          │ HTTPS
      Mail server · Discord API                LLM provider API
 ```
 
+The channel pollers, delivery dispatcher and plugin host are planned; everything else in
+the diagram is built.
+
 ### 3.1 Why this shape
 
 - **rouille is synchronous.** It runs one thread per request with no async runtime.
-  The whole server follows the same model: blocking I/O, `std::thread`, and
-  `crossbeam-channel` or DB-backed queues. Blocking crates fit naturally: `rusqlite`,
-  `imap`, `lettre` (sync transport), and `ureq` for HTTP to the LLM.
+  The whole server follows the same model: blocking I/O, `std::thread`, mutexes and
+  condition variables, and DB-backed queues. Blocking crates fit naturally: `rusqlite`,
+  `ureq` for HTTP to the LLM, and later `imap` and `lettre` (sync transport).
 - **API threads never run the LLM.** Requests only read or write state and enqueue work.
   Long-running activations happen on the worker pool, so the API stays responsive.
 - **The DB is the source of truth for runtime state.** The queue, leases, wait
   conditions and transcripts all live in the database, so a crash or restart loses
-  nothing (see §17). Configuration (server settings, plugin instances, prompts) lives in files
-  next to the container instead (§9.4, §18).
-- **External plugins are child processes.** Python plugins run as long-lived processes
-  owned by the plugin host and are called over stdio (§9.8). The host treats them exactly
-  like compiled-in plugins.
+  nothing (see §17). Configuration (server settings, plugin instances, prompts) lives in
+  files next to the server instead (§9.4, §18).
+- **External plugins are child processes** (planned). Python plugins run as long-lived
+  processes owned by the plugin host and are called over stdio (§9.8). The host treats
+  them exactly like compiled-in plugins.
 
-### 3.2 Crate layout (suggested)
+### 3.2 Repository layout
 
 ```
 crates/
-  core/            # domain types and traits (LlmProvider, later Plugin); no I/O
-  engine/          # activation loop, scheduler, worker pool, prompt templates
-  storage/         # rusqlite repositories, migrations
-  server/          # rouille routes, auth, JSON mapping, main()
-  llm-openai/      # OpenAI-compatible adapter (first provider)
-  plugin-host/     # plugin directory loading, config files, ProcessPlugin (stdio JSON-RPC)
-  plugin-email/    # IMAP/SMTP plugin (builtin)
-  plugin-discord/  # Discord human channel (builtin)
-web/               # web client
+  core/          # domain types and traits (LlmProvider, …); no I/O          (built)
+  storage/       # rusqlite repositories, embedded migrations                (built)
+  engine/        # activation loop, scheduler, workers, prompts, files       (built)
+  llm-openai/    # OpenAI-compatible adapter                                 (built)
+  server/        # rouille routes, config, CORS, model catalog, main()       (built)
+  plugin-host/   # plugin loading, config files, ProcessPlugin               (planned)
+  plugin-email/  # IMAP/SMTP plugin, compiled in                             (planned)
+plugin/
+  discord/       # Discord human channel, an external Python plugin          (built)
+web/             # the web client, embedded in the server binary             (built)
 docs/
 ```
 
-Plugins depend on `core`, never the other way round. `server` wires the registry
-together through cargo features (`--features plugin-email`).
+Plugins depend on `core`, never the other way round. The repository's `plugin/` directory
+is what gets mounted as `/plugins` in a container (§18).
 
 ______________________________________________________________________
 
-## 4. Case lifecycle
+## 4. Case lifecycle (built)
 
 ```
             create
@@ -159,100 +193,108 @@ ______________________________________________________________________
          ▼              ▼              ▼               ▼              │
     ┌──────────┐ ┌─────────────────┐ ┌───────────┐ ┌────────┐         │
     │ sleeping │ │waiting_for_human│ │ completed │ │ failed │         │
-    └────┬─────┘ └───────┬─────────┘ └───────────┘ └────────┘         │
-         │ condition     │ human replies /                            │
-         │ fired or      │ approval decided                           │
-         │ timed out     │                                            │
-         └───────────────┴──────────── enqueue activation ────────────┘
+    └────┬─────┘ └───────┬─────────┘ └─────┬─────┘ └───┬────┘         │
+         │ condition     │ answered        │ message, file,           │
+         │ fired / timed │ / message /     │ instruction change       │
+         │ out / manual  │ file / …        │ (reopens the case)       │
+         └───────────────┴─────────────────┴──── enqueue activation ──┘
 
    any non-terminal state ── cancel ──▶ cancelled
 ```
 
-| From                | Event                                                                                     | To                    |
-| ------------------- | ----------------------------------------------------------------------------------------- | --------------------- |
-| `pending`           | worker claims the case                                                                    | `running`             |
-| `running`           | LLM calls `sleep`                                                                         | `sleeping`            |
-| `running`           | LLM calls `ask_human`, or a tool requires approval (§10)                                  | `waiting_for_human`   |
-| `running`           | LLM calls `complete`                                                                      | `completed`           |
-| `running`           | LLM calls `fail`, a budget is exhausted, or an unrecoverable error occurs                 | `failed`              |
-| `sleeping`          | a wait condition fires or times out, or a manual wake is requested                        | `pending` → `running` |
-| `waiting_for_human` | the human request is answered (web or any channel), or an `also_wait_for` condition fires | `pending` → `running` |
-| any non-terminal    | cancel                                                                                    | `cancelled`           |
+| From                | Event                                                                                            | To                    |
+| ------------------- | ------------------------------------------------------------------------------------------------ | --------------------- |
+| `pending`           | a worker claims the case                                                                         | `running`             |
+| `running`           | the LLM calls `sleep`                                                                            | `sleeping`            |
+| `running`           | the LLM calls `ask_human`, answers twice without a tool call, or (planned) a tool needs approval | `waiting_for_human`   |
+| `running`           | the LLM calls `complete`                                                                         | `completed`           |
+| `running`           | the LLM calls `fail`, a budget is exhausted, or the LLM fails for good                           | `failed`              |
+| `running`           | the LLM is unavailable (retryable errors); retried later                                         | `pending`             |
+| `sleeping`          | a wait condition fires or times out, or a manual wake                                            | `pending` → `running` |
+| `waiting_for_human` | the question is answered, or an `also_wait_for` condition fires or times out                     | `pending` → `running` |
+| any but `cancelled` | a message, a file, or an instruction change                                                      | `pending` → `running` |
+| any non-terminal    | cancel                                                                                           | `cancelled`           |
 
-Terminal states: `completed`, `failed`, `cancelled`. A human can still post a message to
-a `completed` or `failed` case to **reopen** it (it goes back to `pending`).
+Terminal states: `completed`, `failed`, `cancelled`. A message, a new file or an
+instruction change **reopens** a `completed` or `failed` case. A cancelled case cannot
+be reopened.
 
 ______________________________________________________________________
 
-## 5. Activation loop
+## 5. Activation loop (built)
 
 An activation is one run of the agent loop for one case, executed by a worker thread.
+Every step is committed before the next one starts, and the event log is re-read at
+each step, so a crashed activation resumes exactly where it stopped.
 
 ```
-fn run_activation(case_id):
-    case   = storage.load_case(case_id)
-    ctx    = build_context(case)           # §7
-    tools  = core_tools() + tools_of(case.enabled_plugin_instances)
-
+fn run_activation(case):
     loop:
-        check budgets (§5.2) → fail case if exhausted
-        resp = llm.complete(ctx.messages, tools)
-        record event(llm_message, resp)
-
-        if resp has no tool calls:
-            # The model produced text without deciding what to do next.
-            # Nudge once; if it happens again, treat it as ask_human.
-            ...
-        for call in resp.tool_calls:
-            match call.name:
-                "sleep"     → register wait conditions, state = sleeping, END
-                "ask_human" → create human request (§10), state = waiting_for_human, END
-                "complete"  → store result, state = completed, END
-                "fail"      → store reason, state = failed, END
-                "note_*"    → update case notes
-                plugin tool → plugin_host.call_tool(instance, tool, args)
-                               (may need approval → human request, waiting_for_human, END)
-            record event(tool_call, tool_result)
-            append tool result to ctx
+        stop if the case is no longer running (cancelled) or the server is shutting down
+        events = the case's full event log
+        if the last LLM turn has tool calls without results:
+            run them (one transaction each); stop if one suspends or finishes the case
+            continue                         # never ask the LLM twice for the same turn
+        fail the case if a budget is exhausted (§5.2)
+        request = system prompt + transcript rebuilt from events (§7.1)
+        response = llm.complete(request)     # retried on retryable errors (§17.2)
+        record llm_message and token usage
+        if the response has no tool calls:
+            first time: record a nudge ("call a tool")
+            second time in a row: ask the owner, using the LLM's text as the question
 ```
 
-### 5.1 Core tools
+When a call suspends or finishes the case (`sleep`, `ask_human`, `complete`, `fail`),
+the remaining calls of the same turn are recorded as "not run" in the same transaction,
+so they are never picked up later.
 
-| Tool                       | Arguments                                                 | Effect                                                                                                                                    |
-| -------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `sleep`                    | `conditions: [WaitCondition]`, `reason: string`           | Suspends the case until **any** condition fires or times out.                                                                             |
-| `ask_human`                | `question`, `timeout?`, `also_wait_for?: [WaitCondition]` | Creates a human request and suspends the case until it is answered from any channel, or until an `also_wait_for` condition fires (§10.2). |
-| `complete`                 | `summary: string`, `result: json?`                        | Finishes the case successfully.                                                                                                           |
-| `fail`                     | `reason: string`                                          | Finishes the case as failed.                                                                                                              |
-| `note_set` / `note_delete` | `key`, `value`                                            | Maintains durable case notes (§7.2).                                                                                                      |
+### 5.1 Core tools (built)
+
+| Tool          | Arguments                                                 | Effect                                                                                                             |
+| ------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `sleep`       | `conditions: [WaitCondition]`, `reason`                   | Suspends the case until **any** condition fires or times out.                                                      |
+| `ask_human`   | `question`, `timeout?`, `also_wait_for?: [WaitCondition]` | Creates a question for the owner and suspends until it is answered, or an `also_wait_for` condition fires (§10.2). |
+| `complete`    | `summary`, `result?` (any JSON)                           | Finishes the case successfully.                                                                                    |
+| `fail`        | `reason`                                                  | Finishes the case as failed.                                                                                       |
+| `note_set`    | `key`, `value`                                            | Saves a durable note (§7.2).                                                                                       |
+| `note_delete` | `key`                                                     | Deletes a note.                                                                                                    |
+| `read_file`   | `file`, `offset?`, `max_chars?`                           | Reads a case file's text in chunks (§7.5). Offered only when the case has files.                                   |
+| `view_image`  | `file`                                                    | Shows an image file to the model (§7.5). Offered only when the case has files and the model has `vision = true`.   |
 
 A `WaitCondition` as seen by the LLM:
 
 ```json
 {
-    "kind": "support_mail.reply_received",
-    "params": { "thread_ref": "msg-7f3a@clankjob.local" },
-    "check_every": "1h",
+    "kind": "core.timer",
+    "params": { "after": "2h" },
     "timeout": "3d"
 }
 ```
 
-The core also provides a built-in `timer` condition (`{"kind": "core.timer", "params": {"at": "2026-10-01T09:00:00Z"}}`) for "come back later" without any plugin.
+`core.timer` takes exactly one of `after` (a duration such as `"2h"`) or `at` (an RFC 3339
+time). It is the only kind the LLM can request today; plugin kinds such as
+`support_mail.reply_received` (with a `check_every` interval) come with the plugin host.
+`core.human_input` is internal: `ask_human` creates it, and it cannot be requested
+directly.
 
-### 5.2 Budgets
+### 5.2 Budgets (built)
 
-Budgets protect against runaway loops and runaway cost.
+Budgets protect against runaway loops and runaway cost. Defaults come from the server
+config and can be overridden per case.
 
-- **Per activation:** max LLM turns (default 30), max tool calls (default 50), max
-  wall-clock time (default 15 min).
-- **Per case:** max total tokens / estimated cost, max activations (wake-ups that
-  reach the LLM), max age.
-- A budget being exhausted moves the case to `failed` with reason `budget_exceeded`.
-  A human can raise the budget and reopen it.
+| Budget                     | Default   | Checked                               |
+| -------------------------- | --------- | ------------------------------------- |
+| `max_activations`          | 20        | when an activation starts             |
+| `max_turns_per_activation` | 30        | before each LLM call                  |
+| `max_total_tokens`         | 2 000 000 | before each LLM call (input + output) |
+
+An exhausted budget fails the case with a `budget exceeded: …` reason. Sending the case a
+message reopens it. Planned: per-activation tool-call and wall-clock limits, a maximum
+case age, and a cost budget in dollars (which needs per-model prices).
 
 ______________________________________________________________________
 
-## 6. Scheduler & wake-ups
+## 6. Scheduler & wake-ups (partly built)
 
 This is the part that makes cases "sleep for free".
 
@@ -260,59 +302,64 @@ This is the part that makes cases "sleep for free".
 
 When a case sleeps, each condition becomes a row in `wait_conditions`:
 
-| column                  | notes                                                       |
-| ----------------------- | ----------------------------------------------------------- |
-| `id`, `case_id`         |                                                             |
-| `instance_name`         | `NULL` for `core.timer`                                     |
-| `kind`, `params` (JSON) | e.g. `reply_received`, `{thread_ref}`                       |
-| `check_every`           | seconds; clamped to plugin min/max (e.g. email ≥ 5 min)     |
-| `next_check_at`         | when the scheduler should run `check()` next                |
-| `deadline_at`           | `created_at + timeout`                                      |
-| `cursor` (JSON)         | plugin-owned state between checks (e.g. last seen IMAP UID) |
-| `status`                | `active` / `fired` / `timed_out` / `cancelled`              |
-| `lease_until`           | set while a scheduler check is in progress                  |
+| column                  | notes                                                              |
+| ----------------------- | ------------------------------------------------------------------ |
+| `id`, `case_id`         |                                                                    |
+| `kind`, `params` (JSON) | e.g. `core.timer`, `{"after": "2h"}`                               |
+| `next_check_at`         | when the scheduler should evaluate it next; `NULL` if never polled |
+| `deadline_at`           | when it times out; `NULL` for no timeout                           |
+| `status`                | `active` / `fired` / `timed_out` / `cancelled`                     |
+| `created_at`            |                                                                    |
+
+Planned with the plugin host: `instance_name`, `check_every` (clamped to the plugin's
+limits, e.g. email ≥ 5 min), a plugin-owned `cursor` (e.g. the last IMAP UID seen) and
+`lease_until` for checks in progress.
 
 ### 6.2 Scheduler tick
 
-A dedicated scheduler thread wakes every `tick` (default 15 s):
+A dedicated scheduler thread wakes every 15 s (and whenever work is signalled), takes up
+to 100 active conditions whose check time or deadline has passed, and fires each one:
 
 ```
-due = SELECT * FROM wait_conditions
-      WHERE status = 'active'
-        AND (next_check_at <= now OR deadline_at <= now)
-        AND (lease_until IS NULL OR lease_until < now)
-      ORDER BY next_check_at LIMIT 100
-for each cond (claimed by setting lease_until = now + 5 min):
-    if now >= cond.deadline_at:
-        fire(cond, TimedOut)
-        continue
-    result = plugin_host.check(cond.instance, cond.kind, cond.params, cond.cursor)
-    match result:
-        Pending { cursor }       → update cursor, next_check_at = now + check_every
-        Fired { events, cursor } → fire(cond, events)
-        Error(e)                 → record check_error event, backoff next_check_at
-                                   (exponential, capped at check_every × 4);
-                                   after N consecutive errors, wake the case with
-                                   a `check_failing` event so the LLM/human can react.
+for each due condition:
+    if its deadline passed first      → fire(cond, TimedOut)
+    else if kind == core.timer        → fire(cond, Fired)
+    else (plugin kinds, planned)      → result = plugin_host.check(cond.instance, cond.kind,
+                                                                   cond.params, cond.cursor)
+        Pending { cursor }            → update cursor, next_check_at = now + check_every
+        Fired { events, cursor }      → fire(cond, events)
+        Error(e)                      → back off (exponential, capped at check_every × 4);
+                                         after N consecutive errors, wake the case so the
+                                         LLM or the owner can react
 
-fire(cond, payload):
-    in one transaction:
-        mark this condition fired/timed_out, cancel the case's other active conditions,
-        append wake events (with payload) to the case,
-        set case state = pending, enqueue activation
+fire(cond, payload), in one transaction:
+    mark the condition fired / timed out (no-op if another condition already won)
+    append a wake event, cancel the case's other conditions, close its open questions
+    set the case pending and enqueue it
 ```
 
-Plugin checks run on a small **check pool** (separate from the activation workers),
-so a slow IMAP server can't block timers or other cases.
+Planned: plugin checks run on a small **check pool**, separate from the activation
+workers, so a slow IMAP server can't block timers or other cases. Because of the tick,
+a short timer fires up to 15 s late.
 
-### 6.3 Other wake sources
+### 6.3 Other wake sources (built)
 
-- **Manual wake:** `POST /cases/{id}/wake` cancels active conditions and enqueues an
-  activation with a `manual_wake` event.
-- **Human input:** a human request answered from the web client or a chat channel, or
-  an unsolicited message posted to the case (§10).
-- **Timeout:** `deadline_at` passed. The case resumes with a `timeout` event so the LLM
-  can decide what to do: send a follow-up, sleep again, ask a human, or give up.
+Every wake is a `wake` event whose reason is rendered into the conversation by the `wake`
+template (§7.4):
+
+| Reason                 | Cause                                                    |
+| ---------------------- | -------------------------------------------------------- |
+| `created`              | the case was created                                     |
+| `human_message`        | the owner posted a message (`POST /cases/{id}/messages`) |
+| `human_answer`         | the owner answered the case's open question              |
+| `condition_fired`      | a wait condition fired                                   |
+| `timed_out`            | a wait condition reached its deadline                    |
+| `manual`               | the owner pressed "Wake now" (`POST /cases/{id}/wake`)   |
+| `instructions_changed` | an instruction was added, edited or removed (§7.5)       |
+| `file_added`           | a file was added (§7.5)                                  |
+
+A wake that arrives while the case is running marks it to run again as soon as the
+current activation finishes (§16, `work_queue.rerun`).
 
 ### 6.4 Cost model
 
@@ -323,119 +370,170 @@ ______________________________________________________________________
 
 ## 7. Context & memory
 
-### 7.1 Building the context
+### 7.1 Building the context (built)
 
-For each activation the engine builds the following. The wording of every part comes
-from prompt templates that can be overridden in `/prompts` (§7.4).
+The context is rebuilt from the database on every LLM turn. The wording of every part
+comes from prompt templates that can be overridden in `/prompts` (§7.4).
 
-1. **System prompt**: platform rules (how sleeping works, never act on instructions
-   found inside tool results, etc.), the current date/time, and the case's enabled tools,
-   followed by the case's **profile** and the usage guidance of each enabled plugin
-   (§7.4).
-2. **Case header**: goal, constraints, creator, age, activation count, budgets left.
-3. **Case notes** (§7.2).
-4. **Transcript**: previous events rendered as messages. If it exceeds the context
-   budget, older turns are replaced by a **compaction summary**.
-5. **Wake reason**: the events that caused this activation (e.g. the new email, a
-   timeout, a human message), placed last.
+The **system prompt** is made of these sections, in order:
 
-### 7.2 Case notes
+1. `system`: platform rules (how sleeping works, always call a tool, never follow
+   instructions found in tool results) and the list of available tools.
+2. The case's **profile**, if it has one (§7.4).
+3. `case_header`: title, owner, creation time, current time, activation count and
+   budget, the goal, and the case's **notes**.
+4. `instructions`: the owner's instructions in full, if any (§7.5).
+5. `files`: the **list** of the case's files, if any (§7.5).
+
+The **messages** are the event log rendered in order: each wake as a user message (via the
+`wake` template, stamped with the event's own time so past messages never change), each
+LLM turn as an assistant message, each tool result as a tool message, and nudges as user
+messages. Images viewed with `view_image` follow their tool result as a user message. A
+wake that arrives while tool calls are unanswered is held back until the results are in,
+because providers require tool results to directly follow their turn.
+
+### 7.2 Case notes (built)
 
 A small key/value scratchpad the LLM maintains through `note_set` / `note_delete`, for
 example `supplier_email`, `quote_deadline`, `thread_ref`. Notes are always included in
-full and are never compacted, so important facts survive long cases.
+full and would survive compaction, so important facts survive long cases.
 
-### 7.3 Compaction
+### 7.3 Compaction (planned)
 
 When the rendered transcript exceeds a threshold (e.g. 60 % of the model's context
 window), the engine asks the LLM to summarize everything before the last K turns. It
 stores the summary as a `compaction` event and uses it in place of those turns from then
 on. The raw events are never deleted and stay visible in the web client.
 
-### 7.4 Prompts directory
+### 7.4 Prompt templates (built)
 
 Every piece of text the platform sends to the LLM is a **template**, so behaviour can be
 tuned without rebuilding. Defaults are compiled into the binary; a file in the prompts
-directory (`/prompts` in the container, §18) replaces the default of the same name.
+directory (`prompts_dir` in the config, `/prompts` in a container) replaces the default of
+the same name.
 
 ```
 /prompts/
-  system.md              platform rules and how to use the core tools
-  case_header.md         goal, owner, age, budgets left, notes
-  compaction.md          instructions for summarizing older turns (§7.3)
-  nudge.md               sent when the LLM answers without calling a tool (§5)
-  wake.md                how the wake reason is presented (reply, timeout, human answer, …)
+  system.md          platform rules and the tool list
+  case_header.md     title, owner, times, budget, goal, notes
+  instructions.md    how the owner's instructions are presented (§7.5)
+  files.md           how the list of case files is presented (§7.5)
+  wake.md            how each wake reason is presented (§6.3)
+  nudge.md           sent when the LLM answers without calling a tool (§5)
   profiles/
-    quotes.md            e.g. "you are negotiating quotes from tradespeople; always …"
-    support.md
-  plugins/
-    email.md             overrides the guidance shipped by the email plugin
+    quotes.md        e.g. "you negotiate quotes with tradespeople for {{ case.owner }}"
 ```
 
-- **Templates** use `minijinja` (Jinja2 syntax). Each template gets a documented set of
-  variables: `case` (title, goal, owner, created_at, activation count), `now`, `tools`,
-  `notes`, `budgets`, and for `wake.md` the wake events. An unknown variable is an error
-  at load time, not an empty string at run time.
-- **Profiles** are optional behaviour packs. A case chooses one with `profile: "quotes"`
-  when it is created (§14.1), or gets `default_profile` from the server config. The
-  profile is appended to the system prompt.
-- **Plugin guidance.** A plugin can ship a `prompt.md` in its own directory (§9.3) with
-  advice on using its tools (e.g. "quote the original thread when replying"). It is added
-  to the system prompt only for cases that enable that plugin.
-  `/prompts/plugins/<id>.md` overrides it.
-- **Loading and reload.** Prompts are read at startup and on reload (§9.4), and each
-  template is compiled and rendered once with sample data. A file that fails is reported
-  (log and web client) and the previous version, or the built-in default, stays in use.
-  A bad prompt file never stops the server.
-- **Effect on running cases.** The context is rebuilt on every activation (§7.1), so a
-  prompt change applies to every case from its next activation, including cases that
-  are already sleeping.
-- **Traceability.** Each activation records the content hash of every prompt it used
-  (`activations.prompt_hashes`), so a change in behaviour can be traced back to a prompt
-  edit.
+- **Templates** use `minijinja` (Jinja2 syntax) with strict undefined variables. The
+  variables are `now`, `case` (title, goal, owner, created_at), `budgets`, `usage`,
+  `notes`, `tools`, `instructions`, `files`, and `wake` for the wake template.
+- **Profiles** are optional behaviour packs. A case chooses one with `"profile": "quotes"`
+  when it is created, or gets `default_profile` from the server config. The profile is
+  rendered after the system template.
+- **Loading and reload.** Prompts are read at startup and on reload (`SIGHUP` or
+  `POST /admin/reload`), and each template is rendered against sample data covering every
+  variable (every wake reason, for `wake`). A file that fails is reported (log, and
+  `GET /prompts`) and the previous version, or the built-in default, stays in use. A bad
+  prompt file never stops the server.
+- **Effect on running cases.** The context is rebuilt on every turn, so a prompt change
+  applies to every case from its next turn, including cases that are asleep.
+- **Traceability.** Each activation records the SHA-256 of every template it used
+  (`activations.prompt_hashes`), so a change in behaviour can be traced to a prompt edit.
+- **Plugin guidance (planned).** A plugin can ship a `prompt.md` with advice on using its
+  tools, added only for cases that enable that plugin; `/prompts/plugins/<id>.md`
+  overrides it.
+
+### 7.5 Instructions and files (built)
+
+The owner gives a case two kinds of material, kept apart on purpose because the system
+prompt is resent with **every** LLM turn:
+
+|               | Instructions                                                                  | Files                                                               |
+| ------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| What          | Short markdown or text written to steer the case: tone, constraints, contacts | Material that arrives: PDFs, images, emails, text, CSVs             |
+| When          | At creation, so the first run follows them; added, edited or removed later    | Only while the case runs                                            |
+| In the prompt | Always, in full (`instructions` template)                                     | Never; only listed by name, kind, size and pages (`files` template) |
+| Read how      | Already in context                                                            | On demand: `read_file` (chunks) and `view_image`                    |
+| Limits        | 10 per case, 20 000 characters each, 50 000 in total                          | 20 MB per file, 20 files and 100 MB per case                        |
+| Stored        | `instructions` table (editable)                                               | Bytes in `data/files/<id>`, metadata and extracted text in `files`  |
+
+Every change is an event: adding, editing or removing an instruction wakes the case with
+`instructions_changed`, and adding a file wakes it with `file_added`. Plugins will add
+files the same way, e.g. email attachments.
+
+**Files.** Their kind is detected from the bytes, never the name or the client's claim:
+
+- PDF (`%PDF-`): the text layer is extracted at upload with `pdf-extract`, and pages
+  counted with `lopdf`. A scanned PDF has no text layer and is kept, marked unreadable.
+- Images: PNG, JPEG, GIF and WebP, by their magic bytes.
+- Text: anything that is valid UTF-8 without NUL bytes.
+- Anything else is refused with an explanation.
+
+The bytes are written first (write, then rename), then the row and the wake event go in
+one transaction; if it fails, the bytes are removed again.
+
+**Reading files.** `read_file(file, offset?, max_chars?)` returns up to 20 000 characters
+(at most 40 000) with `next_offset` while there is more. A file is found by id, exact name,
+or name ignoring case. `view_image(file)` attaches the image as a user message right after
+the tool results; only the four most recent images stay in the conversation, since images
+are resent too. `view_image` exists only when the case's LLM has `vision = true`;
+otherwise images are listed as unreadable for the current model.
+
+Both come from the owner and are treated as the owner's information. Files from third
+parties (email attachments) will need to be marked as such.
 
 ______________________________________________________________________
 
-## 8. LLM provider abstraction
+## 8. LLM providers (built)
 
 ```rust
 pub trait LlmProvider: Send + Sync {
-    fn id(&self) -> &str;
-    fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, LlmError>;
-    fn count_tokens(&self, req: &CompletionRequest) -> Option<u32> { None }
+    /// Model used when a case does not name one.
+    fn default_model(&self) -> &str;
+    /// One completion; blocks until the provider answers.
+    fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError>;
+    /// Tool-capable models the endpoint offers, when it can say (default: unknown).
+    fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> { Ok(Vec::new()) }
+    /// Whether the model can be shown images (default: no).
+    fn supports_images(&self) -> bool { false }
 }
 
 pub struct CompletionRequest {
     pub model: String,
     pub system: String,
-    pub messages: Vec<Message>,       // role + content blocks (text, tool_call, tool_result)
-    pub tools: Vec<ToolSpec>,         // name, description, JSON Schema for args
-    pub max_output_tokens: u32,
-    pub temperature: Option<f32>,
+    pub messages: Vec<Message>,     // User { text, images } | Assistant | Tool { tool_call_id, content }
+    pub tools: Vec<ToolSpec>,       // name, description, JSON Schema of the arguments
 }
 
 pub struct CompletionResponse {
-    pub content: Vec<ContentBlock>,   // text and/or tool calls (normalized)
-    pub stop_reason: StopReason,
-    pub usage: Usage,                 // input/output tokens for budgets
+    pub message: AssistantMessage,  // text and/or tool calls, normalized
+    pub usage: TokenUsage,          // input and output tokens, for budgets
 }
 ```
 
-- Adapters (`llm-*` crates) translate between this normalized format and each provider's
-  wire format using a blocking HTTP client (`ureq`).
-- Tool names are sanitized by the adapter if a provider forbids characters such as `.`,
-  and mapped back on the way in.
-- The provider and model are chosen in server config, with an optional per-case override.
-- **First adapter: OpenAI-compatible Chat Completions** (`POST {base_url}/chat/completions`
-  with `tools` / `tool_calls`). One adapter covers OpenAI and any server that speaks the
-  same API (Ollama, vLLM, LM Studio, OpenRouter, …); only `base_url`, `api_key` and
-  `model` change. Other native adapters come later behind the same trait.
-- `LlmError` distinguishes retryable errors (rate limit, 5xx, timeout: retried with
-  backoff inside the activation) from fatal ones (auth, invalid request: the case fails).
+- **OpenAI-compatible Chat Completions** is the one adapter (`crates/llm-openai`, blocking
+  `ureq`). It covers OpenAI, OpenRouter, Ollama, vLLM, LM Studio and anything speaking the
+  same API; only `base_url`, `api_key` and `model` change. Images are sent as `image_url`
+  parts carrying `data:` URLs. Tool arguments that come back as invalid JSON are kept as a
+  string so the tool can report the error to the LLM.
+- **Errors.** `LlmError::Retryable` (429, 408, 409, 5xx, network) and `LlmError::Fatal`
+  (other 4xx, unparsable responses). See §17.2 for what happens next.
+- **Choosing the model.** Each `[llm.<name>]` in the config is one endpoint with a default
+  `model`. A case picks an LLM by name (`default_llm` otherwise) and may override the
+  model with any id.
+- **Model catalog.** A background thread calls each LLM's `{base_url}/models` at startup
+  and every hour (`discover_models`, on by default). When the provider says which models
+  support tools (OpenRouter does), only those are kept, with their prices per million
+  tokens and context size. `GET /api/v1/llms` offers the default model, then the config's
+  `models` suggestions, then the discovered ones. The catalog is never fetched from a
+  request thread, and a failed refresh keeps the previous list.
+- **Vision.** `vision = true` on an LLM enables `view_image` for its cases (§7.5).
+- Planned: tool-name sanitizing for providers that forbid `.` (needed for namespaced
+  plugin tools, §9.6), and other native adapters behind the same trait.
 
 ______________________________________________________________________
 
-## 9. Plugin system
+## 9. Plugin system (planned, milestone 4)
 
 ### 9.1 Principles
 
@@ -501,27 +599,32 @@ pub enum CheckResult {
 ```
 
 `InstanceCtx` gives the plugin its resolved config (secret references already replaced
-by their values, §9.4), the instance's key/value store, and a logger. `CaseCtx` gives it the case id and a scoped key/value store. For example,
-the email plugin uses it to remember which Message-IDs this case sent.
+by their values, §9.4), the instance's key/value store, and a logger. `CaseCtx` gives it
+the case id and a scoped key/value store; for example, the email plugin uses it to
+remember which Message-IDs this case sent.
 
 ### 9.3 Plugin directory & manifest
 
 Every plugin lives in its own self-contained sub-directory of the plugins directory
-(`/plugins` in the container, §18). The directory holds the plugin's manifest, its
-configuration and, for external plugins, its code:
+(`plugin/` in the repository, `/plugins` in a container, §18). The directory holds the
+plugin's manifest, its configuration and, for external plugins, its code:
 
 ```
 /plugins/
-  email/                       built-in plugin: manifest + config only
+  email/                       compiled-in plugin: manifest + config only
     plugin.toml
     config.toml
-  discord/
+  discord/                     external Python plugin (exists: plugin/discord)
+    plugin.toml
+    config.toml                git-ignored; config.example.toml is the template
+    schema.json
+    discord_plugin.py
+    test_discord_plugin.py
+    README.md
+  weather/                     another external plugin, for illustration
     plugin.toml
     config.toml
-  weather/                     external Python plugin
-    plugin.toml
-    config.toml
-    schema.json                config schema
+    schema.json
     plugin.py
     requirements.txt           optional
     prompt.md                  optional usage guidance for the LLM (§7.4)
@@ -553,9 +656,9 @@ min_interval = "15m"
 [human_channel]                # optional: the plugin implements HumanChannel (§10.3)
 ```
 
-- **`runtime = "builtin"`**: the plugin's code is compiled into the server (email,
-  Discord), registered by id in a static registry. The directory only enables it and
-  holds its configuration; tools, schemas and conditions come from the code.
+- **`runtime = "builtin"`**: the plugin's code is compiled into the server (e.g. email),
+  registered by id in a static registry. The directory only enables it and holds its
+  configuration; tools, schemas and conditions come from the code.
 - **`runtime = "python"` / `"exec"`**: an **external plugin**. The host wraps it in a
   `ProcessPlugin` adapter that implements the same `Plugin` trait by talking to a child
   process (§9.8). Tools, wait conditions and the config schema come from the manifest.
@@ -587,9 +690,9 @@ username = "joe@example.com"
 password = { env = "YAHOO_APP_PASSWORD" }      # or from an environment variable
 ```
 
-1. **Loading.** At startup and on reload (`SIGHUP` or `POST /admin/reload`), the host
-   reads every `config.toml`, resolves secret references (`{ secret = … }` from
-   `/run/secrets`, `{ env = … }` from the environment), validates each instance against
+1. **Loading.** At startup and on reload, the host reads every `config.toml`, resolves
+   secret references (`{ secret = … }` from the secrets directory, `{ env = … }` from the
+   environment) exactly as the server config does (§18.2), validates each instance against
    the plugin's config schema, then calls `validate_config()`.
 2. **Secrets stay out of the database.** Resolved values live only in memory. Fields
    marked `x-secret` should use a reference; a literal value is accepted but logged as a
@@ -611,7 +714,8 @@ small and limits the blast radius.
 
 Tools and wait conditions are namespaced by **instance name**:
 `support_mail.send_email`, `support_mail.reply_received`. Two email instances can be
-enabled on one case without clashing.
+enabled on one case without clashing. Providers that forbid `.` in tool names get them
+mapped by the adapter (§8).
 
 ### 9.7 Approval policy
 
@@ -632,8 +736,8 @@ the plugin id attached.
 adding `--with-requirements requirements.txt` when that file exists. The dependency
 cache lives on the data volume (`UV_CACHE_DIR=/data/cache/uv`), so the plugin directory
 can stay read-only and dependencies survive restarts. `runtime = "exec"` runs the
-entrypoint directly. The process gets a minimal environment: no server secrets and no
-master credentials, only `PATH`, `HOME`, `TZ` and the cache variables.
+entrypoint directly. The process gets a minimal environment: no server secrets, only
+`PATH`, `HOME`, `TZ` and the cache variables.
 
 **Methods (host → plugin).** They mirror the `Plugin` and `HumanChannel` traits:
 
@@ -647,6 +751,10 @@ master credentials, only `PATH`, `HOME`, `TZ` and the cache variables.
 | `deliver`, `poll`, `on_resolved`, `notify` | as in §10.3, plus `instance`, `config`                                   | as in §10.3                                                           |
 | `shutdown`                                 |                                                                          | the process exits                                                     |
 
+Errors are JSON-RPC errors: `-32700` invalid JSON, `-32600` not a request, `-32601`
+unknown method, `-32602` invalid params, `-32000` a failure, with `data.retryable` telling
+the host whether trying again can help.
+
 - **Stateless processes.** Every call carries the instance's resolved `config` and the
   case-scoped key/value `state` for that plugin. The plugin returns `state_updates`,
   which the host writes to `plugin_kv` in the same transaction as the call's event. A
@@ -656,7 +764,7 @@ master credentials, only `PATH`, `HOME`, `TZ` and the cache variables.
   process handles one call at a time.
 - **Timeouts** per method (defaults: `call_tool` 60 s, `check` 30 s, others 10 s). A
   process that times out or crashes is killed and restarted with backoff. The failed
-  call is reported as a tool error or check error, which the core already handles (§6.2).
+  call is reported as a tool error or check error, which the core already handles.
 - **Reload** restarts a plugin's processes after its directory changed.
 - A small Python helper module that implements the JSON-RPC loop and decorators for tools
   and checks can be shipped later; the protocol above is the contract.
@@ -665,53 +773,44 @@ ______________________________________________________________________
 
 ## 10. Human-in-the-loop
 
-### 10.1 Human requests
+### 10.1 Human requests (partly built)
 
-Whenever a case needs a person, the core creates a **human request** in the
-`human_requests` table:
+Whenever a case needs a person, the core creates a **human request**:
 
-| Kind       | Created by                    | Valid answers                                                             |
-| ---------- | ----------------------------- | ------------------------------------------------------------------------- |
-| `question` | the LLM calling `ask_human`   | free text, optionally with files                                          |
-| `approval` | a tool that requires approval | approve / reject (with an optional comment); editing the args is web-only |
+| Kind       | Created by                                                   | Valid answers                                                             | Status  |
+| ---------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- | ------- |
+| `question` | `ask_human`, or two LLM replies in a row without a tool call | free text                                                                 | Built   |
+| `approval` | a tool that requires approval (§9.7)                         | approve / reject (with an optional comment); editing the args is web-only | Planned |
 
-Human requests belong to the **core**, not to any plugin. A request is delivered to every
-human channel the case uses, and it can be answered from **any** of them. The web client
-is always one of those channels. Every answer, whatever its source, goes through a single
-core function:
-
-```rust
-fn resolve_human_request(id: RequestId, answer: Answer, via: ChannelRef, responder: &str)
-    -> Result<Resolved, AlreadyResolved>;
-```
-
-It runs as one transaction:
+Human requests belong to the **core**, not to any plugin. A request can be answered from
+any channel; today the web client is the only one (the inbox, the case page, or a message
+to the case, which answers its open question). Every answer goes through one transaction:
 
 ```
 UPDATE human_requests SET status = 'answered', answer = ?, answered_via = ?, responder = ?
 WHERE id = ? AND status = 'open'
-  1 row  → append `human_request_resolved` event, cancel the case's other wait conditions,
-           case state = pending, enqueue activation, queue `on_resolved` for every channel
-           the request was delivered to
-  0 rows → AlreadyResolved: the caller tells the human ("already answered via web by
-           joe at 14:02")
+  1 row  → fire the case's core.human_input condition, append a human_answer wake,
+           cancel its other conditions, set the case pending and enqueue it;
+           (planned) queue `on_resolved` for every channel the request was delivered to
+  0 rows → already resolved: the API answers 409 and the UI says so
 ```
 
-**The first answer wins.** If you answer in the web client, the Discord message is edited
-to show "✅ Answered via web", so no stale prompt is left behind. If you then reply in
-Discord anyway, the bot says it was already answered.
+**The first answer wins.** Planned with chat channels: answering in the web client edits
+the Discord message to "Answered via web", and a late reply in Discord is told the
+question was already answered.
 
-### 10.2 Waiting on a human and something else
+### 10.2 Waiting on a human and something else (built)
 
-`ask_human` accepts `also_wait_for: [WaitCondition]` and `timeout`. For example: *"Ask the
-owner for the panel photo, but if Bob replies in the meantime, wake up."*
+`ask_human` accepts `also_wait_for: [WaitCondition]` and `timeout`. For example: _"Ask the
+owner for the panel photo, but if Bob replies in the meantime, wake up."_
 
-Internally the human request is a `core.human_input` wait condition. The scheduler never
-polls it; only `resolve_human_request` fires it. It sits next to any other conditions,
-and the first to fire wins. If another condition or the timeout fires first, the request
-is marked `superseded`, and the channels update their message ("no longer needed").
+Internally the question is a `core.human_input` wait condition. The scheduler never polls
+it; only the answer fires it, or its deadline times it out. It sits next to any other
+conditions, and the first to fire wins. If another condition or the timeout wins, the
+question is marked `superseded` (and, planned, channels update their message to "no
+longer needed").
 
-### 10.3 Human channels
+### 10.3 Human channels (planned, milestone 3)
 
 A plugin becomes a human channel by returning an implementation of this trait from
 `Plugin::human_channel()`:
@@ -723,9 +822,10 @@ pub trait HumanChannel: Send + Sync {
     fn deliver(&self, inst: &InstanceCtx, req: &HumanRequestView)
         -> Result<DeliveryRef, PluginError>;
 
-    /// Fetch replies that arrived since `cursor`. Called by the channel poller once per
+    /// Look for answers to the requests still open on this channel (the host passes
+    /// each one's `DeliveryRef`), since `cursor`. Called by the channel poller once per
     /// instance, not once per case. MUST NOT call the LLM.
-    fn poll(&self, inst: &InstanceCtx, cursor: Option<&serde_json::Value>)
+    fn poll(&self, inst: &InstanceCtx, open: &[OpenDelivery], cursor: Option<&serde_json::Value>)
         -> Result<PollResult, PluginError>;
 
     /// The request was answered elsewhere, superseded or cancelled: update the message.
@@ -736,17 +836,24 @@ pub trait HumanChannel: Send + Sync {
     fn notify(&self, inst: &InstanceCtx, n: &NotificationView) -> Result<(), PluginError> { Ok(()) }
 }
 
+pub struct OpenDelivery {
+    pub request_id: HumanRequestId,
+    pub delivery: DeliveryRef,            // what `deliver` returned, opaque to the core
+}
+
 pub struct PollResult {
     pub replies: Vec<InboundReply>,
     pub cursor: Option<serde_json::Value>,
+    pub warnings: Vec<String>,            // logged; e.g. a missing channel permission
 }
 
 pub struct InboundReply {
+    pub request_id: HumanRequestId,       // which open request this answers
     pub external_id: String,              // channel message id, for dedup
-    pub in_reply_to: Option<DeliveryRef>, // which delivered message the human replied to
     pub responder: String,                // channel user id
-    pub text: String,
-    pub attachments: Vec<InboundFile>,
+    pub text: Option<String>,             // a question's answer
+    pub decision: Option<Decision>,       // an approval's approve / reject
+    pub attachments: Vec<InboundFile>,    // links the host downloads at once
 }
 ```
 
@@ -757,35 +864,34 @@ request is always visible in the web client. Notifications and `on_resolved` upd
 through the same outbox.
 
 **Inbound.** A **channel poller** calls `poll()` for each enabled channel instance every
-`poll_interval` (default 20 s). That is one API call per instance, however many cases
-are waiting. For each reply the core:
+`poll_interval` (default 20 s), passing the requests still open on that channel. The
+plugin does the channel-specific matching (a thread reply, a reaction) and returns
+answers already tied to a `request_id`. For each reply the core:
 
-1. ignores it unless `responder` is in the instance's `allowed_responders`;
+1. checks `responder` against the instance's `allowed_responders` again (the plugin
+   already filters; the core does not trust it blindly);
 2. deduplicates it on `external_id`;
-3. matches it to a request. `in_reply_to` → delivery → request. If the reply references
-   no delivery and exactly one request is open on that channel, it answers that request.
-   Otherwise the bot asks the human to reply to the specific message;
-4. parses it. For a question, the text plus any files is the answer. For an approval, the
-   text must be `approve` or `reject <reason>`; anything else gets a short help message;
-5. calls `resolve_human_request(…, via = instance, responder)`.
-
-A reply to a case's notification that isn't tied to an open request is added to that
-case as a plain human message, the same as `POST /cases/{id}/messages`.
+3. downloads any attachments into the case's files (§7.5), since channel links expire;
+4. records the answer (§10.1) with the text (question) or the decision (approval),
+   `answered_via` set to the instance.
 
 The poll cursor is stored in `plugin_kv`, so replies sent while the server was down are
-picked up after a restart (Discord keeps message history).
+picked up after a restart (Discord keeps message history). Replying to a notification to
+send a case a plain message is future work.
 
-### 10.4 Routing
+### 10.4 Routing (planned)
 
-- Every case has an `owner` and a list of `human_channels` (e.g. `["discord_joe"]`). If
-  the list is omitted, the server's `default_human_channels` applies.
+- Every case has an `owner` (built) and a list of `human_channels` (planned, e.g.
+  `["discord_joe"]`). If the list is omitted, a server-wide `default_human_channels`
+  applies.
 - The web client is always a channel and can't be removed.
 - Each channel instance chooses which notifications it sends (`notify_on`). Human requests
   are always delivered.
+- Links back to a case are built from the server's `public_url` (§17.3).
 
 ______________________________________________________________________
 
-## 11. Email plugin (worked example)
+## 11. Email plugin (planned, worked example)
 
 ### 11.1 Configuration schema (abridged)
 
@@ -864,10 +970,13 @@ confirm the credentials work.
 | `list_messages` | `thread_ref?`, `since?`, `from?`, `limit`              | message summaries (id, from, subject, date, snippet)         |
 | `read_message`  | `message_id`                                           | headers, text body (HTML converted to text), attachment list |
 
+- `file_ids` attach case files (§7.5) to outgoing mail.
 - Outgoing mail gets a generated `Message-ID` (`<uuid@clankjob.local>`). The plugin
   stores it in the case-scoped store so replies can be linked back to the case.
 - `thread_ref` is the Message-ID of the first message in the thread. `reply` sets
   `In-Reply-To` and `References` correctly.
+- Attachments of incoming mail are added to the case as files, marked as coming from a
+  third party.
 - Sending goes through the **outbox** (§17.1), so a crash mid-send never results in
   a duplicate email.
 
@@ -907,95 +1016,89 @@ on a per-instance schedule.
 
 ______________________________________________________________________
 
-## 12. Discord plugin (worked example)
+## 12. Discord plugin (built, not yet wired)
 
 A **human channel** plugin: it has no LLM tools or wait conditions, only `HumanChannel`.
+It lives in `plugin/discord/` as an external Python plugin (standard library only,
+Python 3.11+) that implements the protocol of §9.8, with tests against a fake Discord.
+The server side that calls it (§10.3) is not built yet.
 
 ### 12.1 Configuration
 
-Instances go in `/plugins/discord/config.toml` and are validated against this schema:
+Instances go in `plugin/discord/config.toml` (git-ignored; `config.example.toml` is the
+template) and are validated against `schema.json`:
 
-```json
-{
-    "type": "object",
-    "required": ["bot_token", "target", "allowed_responders"],
-    "properties": {
-        "bot_token": { "type": "string", "x-secret": true },
-        "target": {
-            "oneOf": [
-                { "type": "object", "properties": { "dm_user_id": { "type": "string" } } },
-                { "type": "object", "properties": { "channel_id": { "type": "string" } } }
-            ]
-        },
-        "allowed_responders": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Discord user ids whose replies count as the owner's answer"
-        },
-        "mention": { "type": "string", "description": "e.g. <@123456>, added to requests" },
-        "poll_interval": { "type": "string", "default": "20s" },
-        "web_base_url": { "type": "string", "description": "For links back to the case" },
-        "notify_on": {
-            "type": "array",
-            "items": { "enum": ["completed", "failed", "budget_exceeded"] },
-            "default": ["completed", "failed", "budget_exceeded"]
-        }
-    }
-}
+```toml
+[instances.discord_joe]
+bot_token = { secret = "discord_bot_token" }
+channel_id = "123456789012345678"
+allowed_responders = ["234567890123456789"]   # only these users can answer
+mention = true                                # ping them on questions and approvals
+# poll_interval = "20s"
+# notify_on = ["completed", "failed", "budget_exceeded"]
 ```
 
-`validate_config()` checks the token (`GET /users/@me`) and checks that the bot can post
-to the target (for a DM, it opens the channel with `POST /users/@me/channels`).
+Links back to a case come from the server's `public_url`, passed as `case_url` in each
+request, so the plugin needs no URL of its own. `validate_config` and `healthcheck`
+check the token (`GET /users/@me`) and that the channel is visible.
 
 ### 12.2 Messages
 
-A question:
+A question opens a **thread** on itself; a reply in the thread is the answer. Scoping
+replies to a thread is what keeps concurrent questions apart, with nothing to match up.
 
 ```
-🔌 Electrician quote needs your input
-Bob needs a photo of the electrical panel before confirming the price. Can you upload one?
-↩️ Reply to this message to answer · https://clankjob.example.com/cases/01J9…
+@joe
+**Electrician quote** needs your input
+Bob needs a photo of the electrical panel before confirming the price. Can you send one?
+-# Reply in the thread to answer
+<https://clank.acme.com/#/cases/01J9…>
 ```
 
-An approval:
+An approval is answered with a **reaction**: the bot seeds ✅ and ❌, and a tap by an
+allowed responder decides. Editing the proposed action stays a web-only feature.
 
+````
+@joe
+**Electrician quote** wants your approval
+Send an email to bob@sparkyelectric.ca
 ```
-🔐 Electrician quote wants to send an email
-To: bob@sparkyelectric.ca · Subject: Quote request: 50A EV charger circuit
-> Hi Bob, I'd like a quote to install… (truncated)
-Reply `approve` or `reject <reason>` · to edit it, use the web client: https://…
+{ "to": ["bob@sparkyelectric.ca"], "subject": "Quote request: 50A EV charger circuit" }
 ```
+-# React ✅ to approve or ❌ to reject. To edit it first, use the web UI.
+````
 
-After resolution the bot edits the message: "✅ Answered via web by joe",
-"✅ Approved via Discord", or "⏭️ No longer needed".
+After resolution the bot edits the message with a status line ("Answered via web by
+joe", "No longer needed", "Case cancelled") and closes the question's thread.
+
+Every message sets `allowed_mentions` to the allowed responders only: questions are
+written by the LLM, and an `@everyone` in one must stay plain text.
 
 ### 12.3 Talking to Discord
 
-- **REST only**, through `ureq`, which matches the synchronous server:
-  `POST /channels/{id}/messages`, `PATCH /channels/{id}/messages/{mid}`, and
-  `GET /channels/{id}/messages?after={snowflake}&limit=100` for polling. No gateway
-  WebSocket is needed.
-- The poll cursor is the last message snowflake seen. `in_reply_to` comes from the
-  message's `message_reference`.
-- Attachments are downloaded at poll time and stored as files (§16), because Discord CDN
-  URLs expire.
-- Rate limits: the plugin honours `429` / `retry_after`. One poll per instance per
-  interval stays well within the limits.
-- In a server channel (as opposed to a DM), the bot needs the **Message Content**
-  privileged intent to read reply text.
+- **REST only**, polled: no gateway WebSocket and no public endpoint (`urllib`).
+- The poll cursor maps each open thread to the last message seen in it; approvals are
+  checked by reading the message's reactions.
+- Attachments are returned as links, and the host downloads them at once because
+  Discord CDN links expire.
+- Rate limits: short `429` waits are slept through; longer ones come back as retryable
+  errors so the host backs off. One or two API calls per open request per poll.
+- The bot needs the **Message Content** intent to read thread replies; an empty reply
+  from a responder is reported as a warning pointing at it.
 
 ### 12.4 Later: buttons
 
 Approve/Reject buttons need Discord **Interactions**, which call a public HTTPS endpoint.
 They would come in as a push source, written to a durable inbox table and resolved through
-the same `resolve_human_request` (§19). Text replies remain the fallback.
+the same answer path (§19). Reactions remain the fallback.
 
 ______________________________________________________________________
 
-## 13. End-to-end walkthrough
+## 13. End-to-end walkthrough (target)
 
-A user creates a case: _"Ask sales@acme.com for a quote on 200 blue widgets delivered by
-Oct 15. Follow up once if there's no answer in 2 days. Summarize the quote when it arrives."_
+This is the target experience once the email and Discord plugins are wired. A user
+creates a case: _"Ask sales@acme.com for a quote on 200 blue widgets delivered by Oct 15.
+Follow up once if there's no answer in 2 days. Summarize the quote when it arrives."_
 The case has the `support_mail` instance enabled, `send_email` requires approval, and the
 case's human channel is `discord_joe`.
 
@@ -1030,189 +1133,220 @@ User        API/Engine            LLM                  Email plugin        Sched
 
 Four scheduler checks, three LLM activations. The approval was posted to both the web
 inbox and Discord; the first answer resolved it and the other channel's copy was marked
-as answered. If the reply had not arrived within 2 days, activation #3 would start with a `timeout` event. The LLM would then send a follow-up with
-`reply`, sleep again, and eventually `complete` or `fail`.
+as answered. If the reply had not arrived within 2 days, activation #3 would start with a
+`timed_out` wake. The LLM would then send a follow-up with `reply`, sleep again, and
+eventually `complete` or `fail`.
+
+What works today is the same flow without the plugins: timers, questions answered in the
+web client, messages, instructions and files.
 
 ______________________________________________________________________
 
-## 14. REST API
+## 14. REST API (partly built)
 
-Base path `/api/v1`. JSON in and out. Auth: `Authorization: Bearer <token>`. In v1 tokens
-are static and defined in server config; they are hashed at rest.
+Base path `/api/v1`. JSON in and out, except file uploads (raw bytes) and file content.
+Auth: `Authorization: Bearer <token>` on everything except `/healthz` and the web client's
+static files. Tokens come from the config (`[api] tokens`) and are compared in constant
+time.
 
-### 14.1 Cases
+### 14.1 Cases (built)
 
-| Method  | Path                               | Description                                                                    |
-| ------- | ---------------------------------- | ------------------------------------------------------------------------------ |
-| `GET`   | `/cases?state=&q=&cursor=`         | List cases (paginated).                                                        |
-| `POST`  | `/cases`                           | Create a case.                                                                 |
-| `GET`   | `/cases/{id}`                      | Case detail: state, goal, notes, active wait conditions, budgets, usage.       |
-| `PATCH` | `/cases/{id}`                      | Update title, owner, budgets, plugin instances, human channels.                |
-| `GET`   | `/cases/{id}/events?after=&limit=` | Event timeline (for polling, use `after` = last seen event id).                |
-| `POST`  | `/cases/{id}/messages`             | Human message; wakes the case if it's sleeping, waiting, or terminal (reopen). |
-| `POST`  | `/cases/{id}/wake`                 | Wake now (cancels active wait conditions).                                     |
-| `POST`  | `/cases/{id}/cancel`               | Cancel.                                                                        |
+| Method   | Path                                  | Description                                                                                        |
+| -------- | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `GET`    | `/cases?state=&cursor=&limit=`        | List cases, newest first. `next_cursor` is set when there may be more. `limit` 1–1000, default 50. |
+| `POST`   | `/cases`                              | Create a case (body below). `201` with the case.                                                   |
+| `GET`    | `/cases/{id}`                         | The case, its notes, active wait conditions, open questions, instructions, and files (metadata).   |
+| `GET`    | `/cases/{id}/events?after=&limit=`    | Event timeline; poll with `after` = the last `seq` seen.                                           |
+| `POST`   | `/cases/{id}/messages`                | `{ "text" }`. Answers the open question if there is one; otherwise wakes (or reopens) the case.    |
+| `POST`   | `/cases/{id}/wake`                    | Wake a sleeping or waiting case now.                                                               |
+| `POST`   | `/cases/{id}/cancel`                  | Cancel. Returns the case detail.                                                                   |
+| `POST`   | `/cases/{id}/instructions`            | Add an instruction `{ name, content }`; wakes the case (§7.5).                                     |
+| `PUT`    | `/cases/{id}/instructions/{id}`       | Replace an instruction's name and content; wakes the case.                                         |
+| `DELETE` | `/cases/{id}/instructions/{id}`       | Remove an instruction; wakes the case.                                                             |
+| `POST`   | `/cases/{id}/files?name=`             | Add a file: raw bytes as the body, up to 20 MB. `201` with the file. Wakes the case.               |
+| `GET`    | `/cases/{id}/files/{file_id}`         | A file's metadata and extracted text.                                                              |
+| `GET`    | `/cases/{id}/files/{file_id}/content` | The bytes: images inline, everything else as a download (§17.3).                                   |
 
-Create request:
+Create request (every field but `title` and `goal` is optional):
 
 ```json
 POST /api/v1/cases
 {
-  "title": "ACME widget quote",
-  "goal": "Ask sales@acme.com for a quote on 200 blue widgets ...",
-  "plugin_instances": ["support_mail"],
+  "title": "Electrician quote",
+  "goal": "Get a quote from bob@sparky.ca for a 50A EV charger circuit.",
   "owner": "joe",
   "profile": "quotes",
-  "human_channels": ["discord_joe"],
-  "llm": { "provider": "default", "model": null },
-  "budgets": { "max_activations": 20, "max_turns_per_activation": 30, "max_total_tokens": 2000000 }
+  "llm": "default",
+  "model": "openai/gpt-4.1-mini",
+  "budgets": { "max_activations": 20, "max_turns_per_activation": 30, "max_total_tokens": 2000000 },
+  "instructions": [{ "name": "tone.md", "content": "Be polite. Never offer more than $1,500." }]
 }
 ```
 
-Response `201`:
+`profile`, `llm` and `budgets` default to the server's `default_profile`, `default_llm` and
+`[budgets]`; `model` defaults to the LLM's default model. Response `201`: the case,
+`{ "id": "01J9…", "state": "pending", "usage": {…}, … }`.
 
-```json
-{ "id": "case_01J9...", "state": "pending", "created_at": "2026-09-28T14:02:11Z", ... }
-```
+Planned: `PATCH /cases/{id}` (title, owner, budgets), and `plugin_instances` and
+`human_channels` on cases.
 
-### 14.2 Human requests & files
+### 14.2 Human requests (partly built)
 
-| Method | Path                                   | Description                                                                                           |
-| ------ | -------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `GET`  | `/human-requests?status=open&case_id=` | Open questions and approvals, with the channels each was delivered to.                                |
-| `POST` | `/human-requests/{id}/answer`          | Answer from the web channel (bodies below). `409 already_resolved` if another channel answered first. |
-| `POST` | `/files`                               | Upload a file (multipart) → `{ "file_id": "…" }`.                                                     |
-| `GET`  | `/files/{id}`                          | Download a file.                                                                                      |
+| Method | Path                               | Description                                                                              | Status  |
+| ------ | ---------------------------------- | ---------------------------------------------------------------------------------------- | ------- |
+| `GET`  | `/human-requests?status=&case_id=` | Questions; `status` defaults to `open`, `all` lists every status.                        | Built   |
+| `POST` | `/human-requests/{id}/answer`      | `{ "text" }` from the web. `409` if the question is no longer open.                      | Built   |
+|        | approvals                          | `{ "decision": "approve" \| "reject", "comment"?, "edited_args"? }` on the same endpoint | Planned |
 
-```json
-// question
-{ "text": "Here's the panel photo.", "file_ids": ["file_01J9..."] }
-// approval
-{ "decision": "approve", "comment": "ok", "edited_args": { "body": "..." } }
-```
-
-`edited_args` lets a human fix the draft (e.g. the email body) before approving. It is
+`edited_args` will let a human fix a draft (e.g. an email body) before approving; it is
 only available from the web channel.
 
-### 14.3 Prompts
+### 14.3 LLMs (built)
 
-| Method | Path              | Description                                                                     |
-| ------ | ----------------- | ------------------------------------------------------------------------------- |
-| `GET`  | `/prompts`        | Effective templates and profiles: source (built-in or file), hash, load errors. |
-| `GET`  | `/prompts/{name}` | Content of one effective template.                                              |
+| Method | Path    | Description                                                                                                |
+| ------ | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/llms` | `default_llm`, and each configured LLM with its default model and the models on offer (prices when known). |
 
-Prompts are edited as files and picked up by `POST /admin/reload` (§14.4).
+### 14.4 Prompts and reload (built)
 
-### 14.4 Plugins
+| Method | Path                       | Description                                                                     |
+| ------ | -------------------------- | ------------------------------------------------------------------------------- |
+| `GET`  | `/prompts`                 | Effective templates and profiles: source (built-in or file), hash, load errors. |
+| `GET`  | `/prompts/{name}`          | One effective template, with its content.                                       |
+| `GET`  | `/prompts/profiles/{name}` | One profile, with its content.                                                  |
+| `POST` | `/admin/reload`            | Reload the prompt templates (same as `SIGHUP`).                                 |
+
+Planned: reloading the server config and plugins as well.
+
+### 14.5 Plugins (planned)
 
 Plugins and their instances are defined by files (§9.4), so these endpoints are read-only
-apart from testing and reloading.
+apart from testing.
 
 | Method | Path                            | Description                                                                            |
 | ------ | ------------------------------- | -------------------------------------------------------------------------------------- |
 | `GET`  | `/plugins`                      | Loaded plugins: manifest, runtime, config schema, tools, condition kinds, load errors. |
 | `GET`  | `/plugin-instances`             | Instances with their config (secrets redacted) and health.                             |
 | `POST` | `/plugin-instances/{name}/test` | Run `validate_config` + `healthcheck`.                                                 |
-| `POST` | `/admin/reload`                 | Reload server config, plugins and prompts (same as `SIGHUP`).                          |
 
-### 14.5 Errors
+### 14.6 Health (built)
+
+`GET /healthz`, without auth: `200` when the database answers and the scheduler ticked in
+the last two minutes, `503` otherwise, with
+`{ "database", "scheduler", "last_scheduler_tick" }`.
+
+### 14.7 Errors (built)
 
 ```json
-{
-    "error": {
-        "code": "validation_failed",
-        "message": "imap.host is required",
-        "details": [{ "path": "imap.host", "message": "required" }]
-    }
-}
+{ "error": { "code": "bad_request", "message": "`title` and `goal` must not be empty" } }
 ```
 
-Status codes: `400` validation, `401` auth, `404` not found, `409` invalid state
-transition / conflict, `422` plugin config rejected by `validate_config`, `500` otherwise.
+| Status | `code`              | When                                                                                |
+| ------ | ------------------- | ----------------------------------------------------------------------------------- |
+| `400`  | `bad_request`       | Invalid body or parameters, unknown LLM or profile, invalid instruction or file.    |
+| `401`  | `unauthorized`      | Missing or wrong bearer token.                                                      |
+| `404`  | `not_found`         | Unknown case, question, instruction, file or route.                                 |
+| `409`  | `conflict`          | The case's state forbids it (e.g. messaging a cancelled case), or already answered. |
+| `413`  | `payload_too_large` | Body over 2 MB, or a file over 20 MB.                                               |
+| `500`  | `internal`          | Anything else; details are logged, not returned.                                    |
 
-### 14.6 rouille notes
+### 14.8 rouille notes
 
-- Routing with `router!`. Each handler maps domain errors to the error format above.
-- Handlers only touch the DB and the work queue and never call the LLM or IMAP. The one
-  exception is `/test`, which runs with a timeout.
-- Static files for the web client can be served by the same process
-  (`rouille::match_assets`) or by a separate web server.
+- Routing with `router!`. Each handler maps engine and storage errors to the format above.
+- Handlers only touch the database, the file store and the work queue; they never call
+  the LLM or a plugin. The model catalog is refreshed on its own thread (§8).
+- The same process serves the web client (§15).
 
 ______________________________________________________________________
 
-## 15. Web client
+## 15. Web client (built)
 
-A single-page app. The framework is not fixed; any SPA framework works, since it only
-consumes the REST API. Pages:
+A single-page app in `web/` (vanilla JavaScript, one stylesheet, system fonts, no
+framework, no build step, no CDN), compiled into the server binary and served from `/`,
+the same origin as the API. Everything the server sends is inserted as text, never HTML.
 
-- **Cases**: a table with state badges (running / sleeping / waiting / done), next wake
-  time, last activity, and cost so far. Filters by state and full-text search.
-- **Case detail**:
-  - Header: goal, state, budgets and usage, enabled plugins, and actions (wake now,
-    cancel, message).
-  - **Timeline** of events: LLM messages, tool calls with args/results (collapsible),
-    scheduler checks (grouped: "checked 3× — nothing new"), wake reasons, human
-    requests and their answers (with the channel they came from).
-  - Side panel: case notes and active wait conditions with their next check and deadline.
-  - Message box for human input and answers to `ask_human`.
-- **Inbox**: open human requests across cases. Questions have an answer box with file
-  upload; approvals have a diff-style preview (e.g. the email to be sent) and
-  approve / edit / reject. Each request shows where it was delivered (e.g. Discord). Once
-  answered, it shows who answered and through which channel.
-- **Plugins**: loaded plugins and their instances, read-only (config comes from files,
-  §9.4), with secrets redacted, health status, load errors, a "Test connection" button
-  and a "Reload" button.
-- **Prompts**: effective templates and profiles, read-only, showing whether each comes
-  from the built-in default or a file, plus load errors.
-- **Settings**: API token, default LLM provider/model, default budgets.
+- **Sign in** with an API token, kept in the browser's local storage.
+- **Status bar**: engine health (scheduler tick), counts (need you / working / sleeping),
+  navigation, **New case**, the theme toggle (auto / light / dark) and sign out.
+- **Cases**: two panes from 880 px up, one at a time below.
+  - The **rail** lists cases grouped by state, "Needs you" first, finished groups folded,
+    with a filter box. Selecting a case keeps the rail, its filter and its scroll.
+  - The **detail** pane shows the state chip and details, the open question with an answer
+    box, the result or failure reason, the goal, the **instructions** (write, upload, edit,
+    remove), the **files** (add, preview text, view images), what the case is waiting
+    for, budget use, notes, the **timeline**, and a message box.
+- **New case**: title, goal, owner, profile, LLM, model (with the catalog's suggestions,
+  prices and context size), instructions, and budgets.
+- **Inbox**: every open question across cases, answerable in place.
+- **Prompts**: effective templates and profiles, their source and hash, rejected files,
+  and "Reload from disk".
 
-**Live updates**: the client polls `GET /cases/{id}/events?after=<last>` every few
-seconds while a case is open. rouille is thread-per-request, so long-lived WebSockets
-are a poor fit. Server-Sent Events on a dedicated thread are a possible later upgrade.
+**Live updates**: the page polls every few seconds (the case every 2.5 s, the rail every
+4 s, the counts every 10 s), fetching only events newer than the last one seen. rouille is
+thread-per-request, so long-lived WebSockets are a poor fit; Server-Sent Events are a
+possible later upgrade.
+
+Planned: approvals in the inbox, the channel each answer came from, a plugins page, and
+file downloads.
 
 ______________________________________________________________________
 
 ## 16. Data model
 
-SQLite with WAL, migrations embedded in the binary (e.g. `rusqlite_migration`). IDs are
-ULIDs stored as text. Timestamps are UTC.
+SQLite in WAL mode, with the schema embedded in the binary and applied at startup
+(`PRAGMA user_version`). IDs are ULIDs stored as text; timestamps are UTC Unix
+milliseconds.
+
+**Built:**
 
 ```
 cases
-  id, title, goal, owner, human_channels (json), state, result (json), failure_reason,
-  llm_provider, llm_model, budgets (json), usage (json: tokens, cost, activations),
-  created_at, updated_at, completed_at
+  id, title, goal, owner, profile, llm, model, state, budgets (json),
+  usage (json: activations, input_tokens, output_tokens), result (json),
+  outcome (the complete summary or the failure reason), created_at, updated_at
 
-events                       -- append-only
-  id (ULID, sortable), case_id, activation_id, kind, payload (json), created_at
-  kind ∈ user_message, llm_message, tool_call, tool_result, state_change,
-         wait_registered, check_result, wake, human_request_created,
-         human_request_resolved, compaction, error
+events                       -- append-only; `seq` orders them and is the polling cursor
+  seq, case_id, activation_id, kind, payload (json), created_at
+  kind ∈ wake, llm_message, tool_result, nudge, state_changed, error
 
 activations
-  id, case_id, reason, started_at, ended_at, end_state, usage (json),
-  prompt_hashes (json: template name → content hash, §7.4)
+  id, case_id, started_at, ended_at, end_state, usage (json),
+  prompt_hashes (json: template name → SHA-256, §7.4)
 
-work_queue
-  id, case_id, available_at, lease_until, attempts, created_at
+work_queue                   -- at most one row per case: "this case should run"
+  case_id, available_at, lease_until, rerun, attempts
 
-wait_conditions
-  (see §6.1)
+wait_conditions              -- see §6.1
+  id, case_id, kind, params (json), next_check_at, deadline_at, status, created_at
+
+case_notes
+  case_id, key, value, updated_at
+
+human_requests               -- questions today (§10.1)
+  id, case_id, question, status (open/answered/superseded/cancelled),
+  answer, answered_via, responder, created_at, resolved_at
+
+instructions                 -- owner guidance, always in the prompt, editable (§7.5)
+  id, case_id, name, content, created_at, updated_at
+
+files                        -- bytes in data/files/<id> (§7.5)
+  id, case_id, name, media_type, kind (text/pdf/image), size, sha256,
+  text (extracted), pages, created_at
+```
+
+**Planned:**
+
+```
+cases                        + human_channels (json)
+wait_conditions              + instance_name, check_every, cursor (json), lease_until
+human_requests               + kind (question/approval), instance_name, tool, args (json)
+files                        + source (owner / third party)
 
 case_plugins                 -- plugin instances are defined in files (§9.4) and
   case_id, instance_name     -- referenced everywhere by their unique name
 
 plugin_kv                    -- host-provided storage for plugins
   instance_name, case_id (nullable), key, value (json)
-
-case_notes
-  case_id, key, value, updated_at
-
-human_requests
-  id, case_id, activation_id, kind (question/approval), text (question or summary),
-  instance_name, tool, args (json)          -- approvals only
-  status (open/answered/superseded/cancelled), answer (json), answered_via, responder,
-  created_at, resolved_at
 
 channel_deliveries           -- outbox for channel messages
   id, case_id, human_request_id (nullable), channel_instance_name,
@@ -1222,10 +1356,7 @@ channel_deliveries           -- outbox for channel messages
 channel_inbound              -- dedup of processed replies
   channel_instance_name, external_id, human_request_id (nullable), processed_at
 
-files                        -- stored on disk under the data dir
-  id, case_id, name, mime, size, sha256, path, source (web/discord/email), created_at
-
-outbox
+outbox                       -- side effects of plugin tools (§17.1)
   id, case_id, instance_name, tool, args (json), idempotency_key,
   status (pending/sent/failed), result (json), attempts, created_at
 ```
@@ -1236,101 +1367,130 @@ ______________________________________________________________________
 
 ### 17.1 Durability and idempotency
 
-- **Leases**: work-queue items and wait-condition checks are claimed with `lease_until`.
-  If the process dies, leases expire and the work is picked up again after restart.
-- **Activation replay**: every LLM response and tool result is persisted before the next
-  step. If an activation crashes, the next activation rebuilds the context from events and
-  continues. It does not re-run completed steps.
-- **Outbox for side effects**: tools with external side effects (sending email) write an
-  `outbox` row with an idempotency key in the same transaction as the `tool_call` event,
-  then execute it and mark it `sent`. If a crash happens between those steps, the outbox
-  entry is reconciled on restart. The email plugin checks the sent folder for the
-  Message-ID before re-sending.
-- **One activation per case**: a case can only be claimed by one worker at a time
-  (enforced by the lease and state checks in the same transaction).
-- **One answer per human request**: `resolve_human_request` only updates rows that are
-  still `open`, so simultaneous answers from the web and Discord can't both win (§10.1).
-- **Channel messages go through an outbox**: `channel_deliveries` rows are written in the
-  same transaction as the request, so a crash never loses a notification. The channel
-  poll cursor and `channel_inbound` dedup table mean each reply is processed exactly once.
+- **Leases (built)**: a worker claims a case by leasing its `work_queue` row (10 minutes,
+  renewed before every LLM call). A second worker cannot claim it while the lease holds,
+  which guarantees one activation per case. On startup every lease is cleared, since a
+  fresh process owns no work.
+- **Activation replay (built)**: every LLM response and tool result is committed before
+  the next step. After a crash, the next activation rebuilds the context from events and
+  runs the tool calls that have no result yet, without asking the LLM again.
+- **One answer per question (built)**: an answer only updates a request that is still
+  `open`, so two simultaneous answers cannot both win (§10.1).
+- **Files (built)**: bytes are written and renamed before the database row, and removed
+  again if the transaction fails, so a row never points at a missing file.
+- **Outbox for side effects (planned)**: plugin tools with external side effects (sending
+  email) write an `outbox` row with an idempotency key in the same transaction as the tool
+  call event, then execute it and mark it `sent`. A crash between those steps is
+  reconciled on restart; the email plugin checks the sent folder for the Message-ID
+  before re-sending.
+- **Channel messages go through an outbox (planned)**: `channel_deliveries` rows are
+  written in the same transaction as the request, so a crash never loses a notification.
+  The channel poll cursor and `channel_inbound` dedup table mean each reply is processed
+  exactly once.
+- **Plugin-check leases (planned)**: wait-condition checks are claimed with `lease_until`
+  so a slow check is never run twice.
 
-### 17.2 Retries
+### 17.2 Retries (built)
 
-- LLM transient errors: exponential backoff inside the activation, up to a limit, then
-  the activation is re-queued with a delay.
-- Plugin check errors: backoff on the condition (§6.2).
-- Tool errors: returned to the LLM as a tool error so it can adapt. They are not retried
-  silently.
+- **LLM retryable errors**: retried within the activation up to 3 times, with a backoff of
+  2 s doubling each time. If it still fails, the case goes back to `pending` and is retried
+  after `60 s × attempt`; after 5 attempts it fails.
+- **LLM fatal errors**: the case fails with the provider's error.
+- **Tool errors**: returned to the LLM as a tool error so it can adapt. They are not
+  retried silently.
+- **Plugin check errors (planned)**: backoff on the condition (§6.2).
 
 ### 17.3 Security
 
-- **Untrusted content**: email bodies and any plugin output are data, not instructions.
-  The system prompt says so explicitly. Tool results are wrapped and labeled with
-  their source. Irreversible actions (sending email, and anything a plugin marks as
-  such) default to `requires_approval`. `allowed_recipients` limits where email can go.
-- **Channel identity**: an answer from a chat channel carries the owner's authority, so
-  only replies from the instance's `allowed_responders` are accepted. Everyone else is
-  ignored and logged. Channel text is still treated as data when it's rendered into the
-  LLM context.
-- **Secrets**: plugin and server secrets are references in config files, resolved from
-  Docker secrets or environment variables at load time. They are never written to the
-  database, never logged, never returned by the API, never shown to the LLM, and never
-  passed to plugin processes except inside that plugin's own instance config.
-- **Plugins are trusted code**: an external plugin runs inside the container with the
-  server's user. It gets a minimal environment and only its own config, but nothing
-  stops a malicious plugin from reading the data volume. Only install plugins you trust.
-- **API**: bearer tokens and HTTPS (TLS terminated by a reverse proxy in front of rouille).
-- **Audit**: events and human requests form a complete audit trail of what each case did
-  and why, including who answered each request and through which channel.
+- **Untrusted content (built)**: tool results are data, not instructions, and the system
+  prompt says so. Planned: irreversible plugin actions (sending email) default to
+  `requires_approval`, and `allowed_recipients` limits where email can go.
+- **API (built)**: bearer tokens compared in constant time. Request bodies are limited to
+  2 MB (20 MB for file uploads). TLS is terminated by a reverse proxy in front of rouille.
+- **Web client (built)**: server data is inserted as text, never HTML. The page's
+  Content-Security-Policy allows only this origin (`default-src 'none'`, scripts, styles,
+  requests and images from `'self'`, plus `blob:` and `data:` images). No CDN or web fonts.
+- **Serving files (built)**: only images are served inline; PDFs and text are downloads,
+  never rendered by the browser as a page. Responses carry `nosniff`, a sandboxing CSP and
+  a sanitized file name.
+- **Server address and CORS (built)**: `public_url` (e.g. `https://clank.acme.com`) is where
+  people reach the server; it is logged at startup and will be used for links in
+  notifications. The web client is served from the same origin as the API, so it never
+  needs CORS. Browser pages on `public_url` or `allowed_origins` get CORS headers
+  (including preflight answers); every other origin gets none, and the browser blocks it.
+- **Channel identity (planned)**: an answer from a chat channel carries the owner's
+  authority, so only replies from the instance's `allowed_responders` are accepted.
+  Channel text is still treated as data when it's rendered into the LLM context.
+- **Secrets (built for the server, planned for plugins)**: secrets are references in
+  config files (`{ secret = … }`, `{ env = … }`), resolved at startup. They are never
+  written to the database, never logged, never returned by the API, never shown to the
+  LLM, and (planned) never passed to plugin processes except in their own instance config.
+- **Plugins are trusted code (planned)**: an external plugin runs with the server's user.
+  It gets a minimal environment and only its own config, but nothing stops a malicious
+  plugin from reading the data volume. Only install plugins you trust.
+- **Audit (built)**: events and human requests form an audit trail of what each case did
+  and why, including who answered each question and through which channel.
 
 ### 17.4 Observability
 
-- Structured logs (`tracing`) with `case_id` and `activation_id` on every line.
-- Metrics: active/sleeping cases, checks per minute, check error rate, activations,
-  tokens and cost per case/provider, queue lag.
+- **Built**: logs through `tracing`, as text or JSON (`CLANKJOB_LOG_FORMAT=json`), with the
+  level from `RUST_LOG` (default `info`). Activations log their case and activation ids;
+  failures, retries, rejected prompts and model-catalog refreshes are logged.
+- **Planned**: metrics for active and sleeping cases, checks per minute, check error
+  rate, activations, tokens and cost per case and provider, and queue lag.
 
 ______________________________________________________________________
 
-## 18. Deployment (Docker)
+## 18. Deployment
 
-Clankjob runs as **one container**. The image holds only code; configuration, plugins,
-secrets and data are mounted from the host.
+Clankjob runs as **one process**: the `clankjob` binary serves the API and the web client
+on one port. It reads its configuration from the path given as its first argument, else
+`$CLANKJOB_CONFIG`, else `/config/clankjob.toml`. `clankjob.example.toml` in the
+repository documents every option.
 
-### 18.1 Layout
+### 18.1 Container layout (planned)
+
+A Docker image is not built yet. The intended layout:
 
 ```
 host: /opt/clankjob/                container
   config/clankjob.toml         →   /config/clankjob.toml   read-only   server settings
-  plugins/<id>/...             →   /plugins/<id>/...       read-only   plugins + their config (§9.3)
+  plugin/<id>/...              →   /plugins/<id>/...       read-only   plugins + their config (§9.3)
   prompts/...                  →   /prompts/...            read-only   prompt overrides, profiles (§7.4)
   secrets/                     →   /run/secrets/           read-only   Docker secrets
   data/                        →   /data/                  read-write  clankjob.db, files/, cache/
 ```
 
-`/data` is the only writable mount and holds all runtime state. Everything else can be
-rebuilt from the host directories.
+`/data` is the only writable mount and holds all runtime state: the database and the
+bytes of case files. Everything else can be rebuilt from the host directories.
 
-### 18.2 Server configuration
+### 18.2 Server configuration (built)
 
 ```toml
 # /config/clankjob.toml
 listen = "0.0.0.0:8080"
+public_url = "https://clank.acme.com"       # optional
+allowed_origins = ["http://localhost:5173"] # optional, for UIs hosted elsewhere
 data_dir = "/data"
-plugins_dir = "/plugins"
-prompts_dir = "/prompts"
-default_profile = "general"
-workers = 4                          # activation threads
-check_workers = 4                    # plugin check threads
-default_human_channels = ["discord_joe"]
+prompts_dir = "/prompts"                    # optional
+secrets_dir = "/run/secrets"                # the default
+workers = 4                                 # activation threads
+shutdown_grace = "30s"
+default_llm = "default"
+default_profile = "general"                 # optional; must exist in prompts/profiles
 
 [api]
 tokens = [{ secret = "api_token" }]
 
 [llm.default]
 provider = "openai-compatible"
-base_url = "https://api.openai.com/v1"
+base_url = "https://openrouter.ai/api/v1"
 api_key = { secret = "llm_api_key" }
-model = "gpt-4.1"
+model = "openai/gpt-4.1-mini"
+models = ["openai/gpt-4.1", "openai/gpt-4.1-nano"]   # suggestions, optional
+discover_models = true                               # the default
+vision = false                                       # the default
+timeout = "5m"
 
 [budgets]
 max_activations = 20
@@ -1338,44 +1498,46 @@ max_turns_per_activation = 30
 max_total_tokens = 2000000
 ```
 
-Secrets use the same `{ secret = … }` / `{ env = … }` references as plugin config (§9.4).
+Unknown keys are rejected at startup, so a typo is an error, not a silently ignored
+setting. `public_url` and `allowed_origins` must be `http(s)://` URLs. Secrets are
+`{ secret = "name" }` (a file in `secrets_dir`), `{ env = "NAME" }`, or a literal string
+(accepted, but logged as a warning). Planned: `plugins_dir`, `check_workers` and
+`default_human_channels`, with the plugin host.
 
-### 18.3 Image
+### 18.3 Image (planned)
 
-- Multi-stage build: compile the release binary and the web client, then copy them into a
-  slim runtime image (debian-slim) with `python3`, `uv` and CA certificates. Python is
-  there for external plugins (§9.8).
+- Multi-stage build: compile the release binary (the web client is embedded), then copy
+  it into a slim runtime image (debian-slim) with `python3`, `uv` and CA certificates.
+  Python is there for external plugins (§9.8).
 - Runs as a non-root user with a fixed UID/GID. The host's `data/` directory must be
-  writable by that UID, and `config/`, `plugins/` and `secrets/` readable.
-- rouille serves both the API and the built web client, so one port is exposed. TLS is
-  terminated by a reverse proxy (Caddy, Traefik, nginx) in front.
+  writable by that UID, and `config/`, `plugin/` and `secrets/` readable.
+- One port is exposed. TLS is terminated by a reverse proxy (Caddy, Traefik, nginx).
 - Every integration is outbound (IMAP, SMTP, Discord REST, the LLM API), so no other
-  inbound ports and no public URL are needed.
+  inbound ports and no public URL are needed for them.
 
 ### 18.4 Operational rules
 
 - **Exactly one replica.** The design is single-node: one SQLite writer and one scheduler.
-  Never run two containers against the same `/data`.
-- **Local volume only.** `/data` must be a local disk or named volume, not NFS/SMB.
-  SQLite's WAL mode relies on file locking that network filesystems don't provide
-  reliably.
-- **Graceful shutdown.** On `SIGTERM` the server stops claiming work and lets in-flight
-  steps finish up to a deadline, stops plugin processes with `shutdown`, then exits.
-  Anything cut off is recovered through leases (§17.1). Set `stop_grace_period: 60s`,
-  since Docker's default of 10 s is short for an LLM call.
-- **Fast recovery after restart.** A fresh process owns no work, so on startup it clears
-  every lease immediately instead of waiting for them to expire.
-- **Migrations** run at startup, before any thread starts.
-- **Health check.** `GET /healthz` checks the database and that the scheduler ticked
-  recently; it's wired to Docker's `HEALTHCHECK`.
+  Never run two processes against the same `data_dir`.
+- **Local volume only.** The data directory must be a local disk or named volume, not
+  NFS/SMB. SQLite's WAL mode relies on file locking that network filesystems don't
+  provide reliably.
+- **Graceful shutdown (built).** On `SIGTERM` or `SIGINT` the server stops accepting
+  requests, workers stop after their current step, and the process exits once they have,
+  or after `shutdown_grace`. Anything cut off resumes after the next start. In Docker, set
+  `stop_grace_period` above `shutdown_grace`, since the default of 10 s is short for an
+  LLM call.
+- **Fast recovery after restart (built).** Leases are cleared at startup, so interrupted
+  cases resume at once.
+- **Migrations (built)** run at startup, before any thread starts.
+- **Health check (built).** `GET /healthz` (§14.6), for Docker's `HEALTHCHECK`.
 - **Backups.** Don't copy the live database file. Use `VACUUM INTO` on a timer, or a
   Litestream sidecar that streams the database to S3-compatible storage. Back up
   `data/files/` alongside it.
-- **Logs** go to stdout as JSON (`tracing`), with plugin stderr included.
-- **Reload** (`SIGHUP` or `POST /admin/reload`) picks up changes to `clankjob.toml`,
-  `/plugins` and `/prompts` without restarting the container.
+- **Reload (built).** `SIGHUP` or `POST /admin/reload` reloads the prompt templates.
+  Planned: reloading `clankjob.toml` and the plugins without a restart.
 
-### 18.5 Compose example
+### 18.5 Compose example (planned)
 
 ```yaml
 services:
@@ -1385,9 +1547,11 @@ services:
     stop_grace_period: 60s
     user: "1000:1000"
     ports: ["127.0.0.1:8080:8080"]
+    environment:
+      CLANKJOB_LOG_FORMAT: json
     volumes:
       - ./config:/config:ro
-      - ./plugins:/plugins:ro
+      - ./plugin:/plugins:ro
       - ./prompts:/prompts:ro
       - ./data:/data
     secrets: [api_token, llm_api_key, yahoo_app_password, discord_bot_token]
@@ -1406,6 +1570,12 @@ ______________________________________________________________________
 
 ## 19. Open questions & future work
 
+- **Next milestones**: human requests delivered to chat channels and approvals
+  (milestone 3, §10), then the plugin host and the external plugin protocol
+  (milestone 4, §9), then the email plugin (§11).
+- **Compaction** of long transcripts (§7.3).
+- **Cost budgets in dollars**, using the prices the model catalog already collects (§8).
+- **Scheduler precision**: sleep until the next due condition instead of a fixed 15 s tick.
 - **Plugin sandboxing**: run external plugins in their own container or as WASM
   (wasmtime), so an untrusted plugin can't read the data volume.
 - **Python plugin SDK**: a helper module implementing the JSON-RPC loop of §9.8.
@@ -1416,7 +1586,7 @@ ______________________________________________________________________
 - **More human channels**: Slack, SMS, or email itself (reply to a notification email),
   all built on the same `HumanChannel` trait.
 - **Cases created by events** (inbound email → new case) (§11.4).
-- **Case templates**: reusable goals, plugin sets, budgets and a profile (§7.4).
+- **Case templates**: reusable goals, instructions, plugin sets, budgets and a profile.
 - **Prompt evaluation**: replay recorded cases against an edited prompt to compare
   behaviour before deploying it.
 - **Sub-cases**: a case spawning and waiting on child cases (a `core.case_completed`

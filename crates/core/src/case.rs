@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ids::CaseId;
+use crate::ids::{CaseId, InstructionId};
 
 string_enum!(
     /// Lifecycle state of a case (design §4).
@@ -96,6 +96,34 @@ pub struct NewCase {
     pub model: Option<String>,
     /// Budgets for this case.
     pub budgets: Budgets,
+    /// Instructions the first activation already follows (design §7.5).
+    pub instructions: Vec<NewInstruction>,
+}
+
+/// Instruction text to add to a case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewInstruction {
+    /// Name shown to the owner and the LLM, e.g. `tone.md`.
+    pub name: String,
+    /// The instruction text, usually markdown.
+    pub content: String,
+}
+
+/// Owner-written guidance for a case, always part of its system prompt (design §7.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Instruction {
+    /// Unique id.
+    pub id: InstructionId,
+    /// The case it belongs to.
+    pub case_id: CaseId,
+    /// Name, e.g. `tone.md`.
+    pub name: String,
+    /// The instruction text.
+    pub content: String,
+    /// When it was added.
+    pub created_at: DateTime<Utc>,
+    /// When it was last edited.
+    pub updated_at: DateTime<Utc>,
 }
 
 /// A case as stored.

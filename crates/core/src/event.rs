@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::case::CaseState;
-use crate::ids::{ActivationId, CaseId, HumanRequestId, WaitConditionId};
+use crate::file::FileKind;
+use crate::ids::{ActivationId, CaseId, FileId, HumanRequestId, InstructionId, WaitConditionId};
 use crate::llm::AssistantMessage;
 
 /// Why a case was woken up. Rendered into the conversation through the `wake` prompt.
@@ -49,7 +50,37 @@ pub enum WakeReason {
     },
     /// The owner woke the case up by hand.
     Manual,
+    /// The owner added, edited or removed an instruction while the case runs.
+    InstructionsChanged {
+        /// The instruction.
+        instruction_id: InstructionId,
+        /// Its name.
+        name: String,
+        /// What happened.
+        change: InstructionChange,
+    },
+    /// A file was added to the case, e.g. a contractor's photo or an email attachment.
+    FileAdded {
+        /// The file.
+        file_id: FileId,
+        /// Its name.
+        name: String,
+        /// Its kind.
+        kind: FileKind,
+    },
 }
+
+string_enum!(
+    /// What happened to an instruction.
+    InstructionChange {
+        /// A new instruction.
+        Added => "added",
+        /// An existing instruction was edited.
+        Updated => "updated",
+        /// An instruction was removed.
+        Removed => "removed",
+    }
+);
 
 /// The result of one tool call, as recorded and shown to the LLM.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

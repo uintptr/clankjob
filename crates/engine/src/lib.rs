@@ -12,20 +12,23 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use clankjob_core::case::{Case, CaseState, NewCase};
+use clankjob_core::case::{Case, CaseState, Instruction, NewCase, NewInstruction};
+use clankjob_core::file::CaseFile;
 use clankjob_core::human::HumanRequest;
-use clankjob_core::ids::{CaseId, HumanRequestId};
+use clankjob_core::ids::{CaseId, FileId, HumanRequestId, InstructionId};
 use clankjob_core::llm::LlmProvider;
 use clankjob_storage::human::Answer;
 use clankjob_storage::{Connection, Db, StorageError};
 
 mod activation;
 pub mod context;
+pub mod files;
 pub mod prompts;
 mod scheduler;
 pub mod tools;
 pub mod transitions;
 
+use files::FileStore;
 use prompts::PromptSet;
 
 /// Errors from engine operations.
@@ -57,6 +60,18 @@ pub enum EngineError {
     /// The case names a profile that does not exist.
     #[error("unknown profile `{0}`")]
     UnknownProfile(String),
+    /// No instruction of the case has this id.
+    #[error("instruction {0} not found")]
+    InstructionNotFound(InstructionId),
+    /// An instruction is empty, too long, or over the case's limits.
+    #[error("{0}")]
+    InvalidInstruction(String),
+    /// A file cannot be added: unsupported type, too large, or over the case's limits.
+    #[error("{0}")]
+    InvalidFile(String),
+    /// A file's bytes could not be written or read.
+    #[error("file storage failed: {0}")]
+    FileStorage(#[from] std::io::Error),
     /// A prompt template failed to render.
     #[error(transparent)]
     Prompt(#[from] prompts::RenderError),
@@ -64,6 +79,52 @@ pub enum EngineError {
 
 /// Shorthand for results of engine operations.
 pub type Result<T> = std::result::Result<T, EngineError>;
+
+/// Most instructions one case can hold.
+pub const MAX_INSTRUCTIONS: usize = 10;
+/// Longest single instruction, in characters.
+pub const MAX_INSTRUCTION_CHARS: usize = 20_000;
+/// Longest total of a case's instructions, in characters. They are resent with every
+/// LLM turn, so this bounds what they cost.
+pub const MAX_INSTRUCTIONS_CHARS: usize = 50_000;
+
+/// Check a case's full set of instructions against the limits.
+///
+/// # Errors
+///
+/// Returns [`EngineError::InvalidInstruction`] explaining the first limit broken.
+pub fn validate_instructions<'a, I>(instructions: I) -> Result<()>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let invalid = |message: String| Err(EngineError::InvalidInstruction(message));
+    let (mut count, mut total) = (0_usize, 0_usize);
+    for (name, content) in instructions {
+        count = count.saturating_add(1);
+        let chars = content.chars().count();
+        total = total.saturating_add(chars);
+        if name.trim().is_empty() || name.chars().count() > 200 {
+            return invalid("instruction names must be 1 to 200 characters".to_owned());
+        }
+        if content.trim().is_empty() {
+            return invalid(format!("instruction `{name}` is empty"));
+        }
+        if chars > MAX_INSTRUCTION_CHARS {
+            return invalid(format!(
+                "instruction `{name}` is longer than {MAX_INSTRUCTION_CHARS} characters"
+            ));
+        }
+    }
+    if count > MAX_INSTRUCTIONS {
+        return invalid(format!("a case holds at most {MAX_INSTRUCTIONS} instructions"));
+    }
+    if total > MAX_INSTRUCTIONS_CHARS {
+        return invalid(format!(
+            "a case's instructions total at most {MAX_INSTRUCTIONS_CHARS} characters; use files for longer material"
+        ));
+    }
+    Ok(())
+}
 
 /// Tuning knobs for the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +203,7 @@ struct Shared {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
     prompts: RwLock<Arc<PromptSet>>,
     prompts_dir: Option<PathBuf>,
+    files: FileStore,
     settings: EngineSettings,
     signal: WorkSignal,
     shutdown: AtomicBool,
@@ -172,11 +234,13 @@ impl Engine {
     /// * `db` - The database (already migrated)
     /// * `providers` - Configured LLMs by name
     /// * `prompts_dir` - Directory with prompt overrides, if any
+    /// * `files_dir` - Directory holding the bytes of files added to cases
     /// * `settings` - Tuning knobs
     pub fn new(
         db: Db,
         providers: HashMap<String, Arc<dyn LlmProvider>>,
         prompts_dir: Option<PathBuf>,
+        files_dir: PathBuf,
         settings: EngineSettings,
     ) -> Self {
         let prompts = prompts_dir
@@ -188,6 +252,7 @@ impl Engine {
                 providers,
                 prompts: RwLock::new(Arc::new(prompts)),
                 prompts_dir,
+                files: FileStore::new(files_dir),
                 settings,
                 signal: WorkSignal::default(),
                 shutdown: AtomicBool::new(false),
@@ -271,7 +336,8 @@ impl Engine {
     /// # Errors
     ///
     /// Returns [`EngineError::UnknownLlm`] or [`EngineError::UnknownProfile`] if the case
-    /// refers to something that is not configured, or [`EngineError::Storage`].
+    /// refers to something that is not configured, [`EngineError::InvalidInstruction`] if its
+    /// instructions break a limit, or [`EngineError::Storage`].
     pub fn create_case(&self, connection: &mut Connection, new_case: &NewCase) -> Result<Case> {
         if !self.shared.providers.contains_key(&new_case.llm) {
             return Err(EngineError::UnknownLlm(new_case.llm.clone()));
@@ -283,9 +349,129 @@ impl Engine {
         {
             return Err(EngineError::UnknownProfile(profile.to_owned()));
         }
+        validate_instructions(new_case.instructions.iter().map(|i| (i.name.as_str(), i.content.as_str())))?;
         let case = transitions::create_case(connection, new_case, Utc::now())?;
         self.shared.signal.notify();
         Ok(case)
+    }
+
+    /// Add a file to a case and wake the case so its agent sees it (design §7.5).
+    ///
+    /// # Arguments
+    ///
+    /// * `connection` - Database connection
+    /// * `case_id` - The case
+    /// * `name` - Original file name; only its last path component is kept
+    /// * `bytes` - The content; its type is detected from the bytes
+    ///
+    /// # Returns
+    ///
+    /// The stored file
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidFile`] for an unsupported, empty or oversized file or a
+    /// case over its file limits, [`EngineError::CaseNotFound`], [`EngineError::InvalidState`]
+    /// for a cancelled case, or a storage error.
+    pub fn add_file(
+        &self,
+        connection: &mut Connection,
+        case_id: &CaseId,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<CaseFile> {
+        let name = files::clean_name(name).map_err(EngineError::InvalidFile)?;
+        if bytes.is_empty() || bytes.len() > files::MAX_FILE_BYTES {
+            return Err(EngineError::InvalidFile(format!(
+                "`{name}` must be between 1 byte and {} MB",
+                files::MAX_FILE_BYTES / 1024 / 1024
+            )));
+        }
+        let existing = clankjob_storage::files::list_files(connection, case_id)?;
+        let total: u64 = existing.iter().map(|file| file.size).sum();
+        let size = bytes.len() as u64;
+        if existing.len() >= files::MAX_CASE_FILES || total.saturating_add(size) > files::MAX_CASE_FILE_BYTES {
+            return Err(EngineError::InvalidFile(format!(
+                "a case holds at most {} files and {} MB",
+                files::MAX_CASE_FILES,
+                files::MAX_CASE_FILE_BYTES / 1024 / 1024
+            )));
+        }
+        let inspected = files::inspect(&name, bytes).map_err(EngineError::InvalidFile)?;
+        let file = CaseFile {
+            id: FileId::generate(),
+            case_id: case_id.clone(),
+            name,
+            media_type: inspected.media_type,
+            kind: inspected.kind,
+            size,
+            sha256: prompts::sha256_hex(bytes),
+            text_chars: inspected.text.as_ref().map(|text| text.chars().count() as u64),
+            text: inspected.text,
+            pages: inspected.pages,
+            created_at: Utc::now(),
+        };
+        // Bytes first: a row must never point at a missing file. If the row cannot be
+        // written, the orphaned bytes are removed again.
+        self.shared.files.write(&file.id, bytes)?;
+        if let Err(error) = transitions::add_file(connection, &file, Utc::now()) {
+            self.shared.files.remove(&file.id);
+            return Err(error);
+        }
+        self.shared.signal.notify();
+        Ok(file)
+    }
+
+    /// Add, edit (`id` set) or remove (`instruction` unset) an instruction, and wake the case.
+    ///
+    /// # Arguments
+    ///
+    /// * `connection` - Database connection
+    /// * `case_id` - The case
+    /// * `id` - The instruction to edit or remove; `None` to add one
+    /// * `instruction` - The new name and text; `None` to remove
+    ///
+    /// # Returns
+    ///
+    /// The instruction as stored, or `None` after a removal
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidInstruction`] if the result breaks a limit,
+    /// [`EngineError::InstructionNotFound`], [`EngineError::CaseNotFound`],
+    /// [`EngineError::InvalidState`] for a cancelled case, or [`EngineError::Storage`].
+    pub fn change_instruction(
+        &self,
+        connection: &mut Connection,
+        case_id: &CaseId,
+        id: Option<&InstructionId>,
+        instruction: Option<&NewInstruction>,
+    ) -> Result<Option<Instruction>> {
+        let existing = clankjob_storage::instructions::list_instructions(connection, case_id)?;
+        if let Some(id) = id
+            && !existing.iter().any(|stored| &stored.id == id)
+        {
+            return Err(EngineError::InstructionNotFound(id.clone()));
+        }
+        if let Some(instruction) = instruction {
+            let kept = existing
+                .iter()
+                .filter(|stored| Some(&stored.id) != id)
+                .map(|stored| (stored.name.as_str(), stored.content.as_str()));
+            validate_instructions(kept.chain(std::iter::once((
+                instruction.name.as_str(),
+                instruction.content.as_str(),
+            ))))?;
+        }
+        let stored = transitions::change_instruction(connection, case_id, id, instruction, Utc::now())?;
+        self.shared.signal.notify();
+        Ok(stored)
+    }
+
+    /// Where file bytes are stored, for serving them back.
+    #[must_use]
+    pub fn files(&self) -> &FileStore {
+        &self.shared.files
     }
 
     /// Post a message from the owner; see [`transitions::post_message`].
@@ -409,6 +595,7 @@ pub(crate) mod test_support {
     /// A migrated database in a temporary directory, deleted when dropped.
     pub struct TestDb {
         pub db: Db,
+        pub files_dir: std::path::PathBuf,
         _dir: TempDir,
     }
 
@@ -417,7 +604,11 @@ pub(crate) mod test_support {
             let dir = tempfile::tempdir().unwrap();
             let db = Db::new(dir.path().join("test.db"));
             db.migrate().unwrap();
-            Self { db, _dir: dir }
+            Self {
+                db,
+                files_dir: dir.path().join("files"),
+                _dir: dir,
+            }
         }
 
         pub fn connect(&self) -> Connection {
@@ -435,6 +626,7 @@ pub(crate) mod test_support {
     pub struct ScriptedProvider {
         responses: Mutex<VecDeque<std::result::Result<CompletionResponse, LlmError>>>,
         pub requests: Mutex<Vec<CompletionRequest>>,
+        vision: bool,
     }
 
     impl ScriptedProvider {
@@ -445,6 +637,19 @@ pub(crate) mod test_support {
             Arc::new(Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 requests: Mutex::default(),
+                vision: false,
+            })
+        }
+
+        /// The same, for a model that can see images.
+        pub fn with_vision<I>(responses: I) -> Arc<Self>
+        where
+            I: IntoIterator<Item = std::result::Result<CompletionResponse, LlmError>>,
+        {
+            Arc::new(Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                requests: Mutex::default(),
+                vision: true,
             })
         }
 
@@ -456,6 +661,10 @@ pub(crate) mod test_support {
     impl LlmProvider for ScriptedProvider {
         fn default_model(&self) -> &'static str {
             "scripted"
+        }
+
+        fn supports_images(&self) -> bool {
+            self.vision
         }
 
         fn complete(&self, request: &CompletionRequest) -> std::result::Result<CompletionResponse, LlmError> {
@@ -479,6 +688,6 @@ pub(crate) mod test_support {
             requeue_delay: Duration::ZERO,
             ..EngineSettings::default()
         };
-        Engine::new(test_db.db.clone(), providers, None, settings)
+        Engine::new(test_db.db.clone(), providers, None, test_db.files_dir.clone(), settings)
     }
 }

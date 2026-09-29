@@ -71,6 +71,7 @@ mod tests {
             llm: "default".to_owned(),
             model: None,
             budgets: Budgets::default(),
+            instructions: Vec::new(),
         };
         let case = create_case(connection, &new_case, time(0)).unwrap();
         storage::queue::remove(connection, &case.id).unwrap();

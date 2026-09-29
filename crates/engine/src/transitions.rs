@@ -4,10 +4,11 @@
 //! between two states.
 
 use chrono::{DateTime, Utc};
-use clankjob_core::case::{Case, CaseState, NewCase};
-use clankjob_core::event::{EventBody, WakeReason};
+use clankjob_core::case::{Case, CaseState, Instruction, NewCase, NewInstruction};
+use clankjob_core::event::{EventBody, InstructionChange, WakeReason};
+use clankjob_core::file::CaseFile;
 use clankjob_core::human::{HumanRequest, HumanRequestStatus};
-use clankjob_core::ids::{ActivationId, CaseId, HumanRequestId};
+use clankjob_core::ids::{ActivationId, CaseId, HumanRequestId, InstructionId};
 use clankjob_core::wait::{HUMAN_INPUT_KIND, WaitCondition, WaitStatus};
 use clankjob_storage::human::Answer;
 use clankjob_storage::{self as storage, Connection, begin_write, commit};
@@ -104,6 +105,9 @@ fn answer_open_request(
 pub fn create_case(connection: &mut Connection, new_case: &NewCase, now: DateTime<Utc>) -> Result<Case> {
     let transaction = begin_write(connection)?;
     let case = storage::cases::insert_case(&transaction, &CaseId::generate(), new_case, now)?;
+    for instruction in &new_case.instructions {
+        storage::instructions::insert_instruction(&transaction, &case.id, instruction, now)?;
+    }
     storage::events::append_event(&transaction, &case.id, None, &EventBody::Wake(WakeReason::Created), now)?;
     storage::queue::enqueue(&transaction, &case.id, now)?;
     commit(transaction)?;
@@ -176,6 +180,84 @@ pub fn answer_request(
         .ok_or_else(|| EngineError::RequestNotFound(request_id.clone()))?;
     commit(transaction)?;
     Ok(answered)
+}
+
+/// Store a file's row and wake its case, which reopens a finished case like a message.
+///
+/// # Errors
+///
+/// Returns [`EngineError::CaseNotFound`], [`EngineError::InvalidState`] for a cancelled
+/// case, or [`EngineError::Storage`].
+pub fn add_file(connection: &mut Connection, file: &CaseFile, now: DateTime<Utc>) -> Result<()> {
+    let transaction = begin_write(connection)?;
+    let case = load_case(&transaction, &file.case_id)?;
+    storage::files::insert_file(&transaction, file)?;
+    let reason = WakeReason::FileAdded {
+        file_id: file.id.clone(),
+        name: file.name.clone(),
+        kind: file.kind,
+    };
+    wake(&transaction, &case, reason, now)?;
+    commit(transaction)?;
+    Ok(())
+}
+
+/// Add, edit or remove an instruction and wake the case; see
+/// [`crate::Engine::change_instruction`]. Limits are checked by the caller.
+///
+/// # Errors
+///
+/// Returns [`EngineError::InstructionNotFound`], [`EngineError::CaseNotFound`],
+/// [`EngineError::InvalidState`] for a cancelled case, or [`EngineError::Storage`].
+pub fn change_instruction(
+    connection: &mut Connection,
+    case_id: &CaseId,
+    id: Option<&InstructionId>,
+    instruction: Option<&NewInstruction>,
+    now: DateTime<Utc>,
+) -> Result<Option<Instruction>> {
+    let transaction = begin_write(connection)?;
+    let case = load_case(&transaction, case_id)?;
+    let not_found = |id: &InstructionId| EngineError::InstructionNotFound(id.clone());
+    let (stored, reason) = match (id, instruction) {
+        (None, Some(instruction)) => {
+            let stored = storage::instructions::insert_instruction(&transaction, case_id, instruction, now)?;
+            let reason = WakeReason::InstructionsChanged {
+                instruction_id: stored.id.clone(),
+                name: stored.name.clone(),
+                change: InstructionChange::Added,
+            };
+            (Some(stored), reason)
+        }
+        (Some(id), Some(instruction)) => {
+            if !storage::instructions::update_instruction(&transaction, case_id, id, instruction, now)? {
+                return Err(not_found(id));
+            }
+            let stored =
+                storage::instructions::get_instruction(&transaction, case_id, id)?.ok_or_else(|| not_found(id))?;
+            let reason = WakeReason::InstructionsChanged {
+                instruction_id: id.clone(),
+                name: stored.name.clone(),
+                change: InstructionChange::Updated,
+            };
+            (Some(stored), reason)
+        }
+        (Some(id), None) => {
+            let removed =
+                storage::instructions::get_instruction(&transaction, case_id, id)?.ok_or_else(|| not_found(id))?;
+            storage::instructions::delete_instruction(&transaction, case_id, id)?;
+            let reason = WakeReason::InstructionsChanged {
+                instruction_id: id.clone(),
+                name: removed.name,
+                change: InstructionChange::Removed,
+            };
+            (None, reason)
+        }
+        (None, None) => return Ok(None),
+    };
+    wake(&transaction, &case, reason, now)?;
+    commit(transaction)?;
+    Ok(stored)
 }
 
 /// Wake a sleeping or waiting case by hand.
@@ -330,6 +412,7 @@ mod tests {
             llm: "default".to_owned(),
             model: None,
             budgets: Budgets::default(),
+            instructions: Vec::new(),
         }
     }
 

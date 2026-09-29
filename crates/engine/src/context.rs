@@ -2,10 +2,25 @@
 
 use std::collections::HashSet;
 
-use clankjob_core::event::{Event, EventBody};
-use clankjob_core::llm::{Message, ToolCall};
+use clankjob_core::event::{Event, EventBody, ToolResult};
+use clankjob_core::ids::FileId;
+use clankjob_core::llm::{ImageData, Message, ToolCall};
 
 use crate::prompts::{NUDGE, PromptContext, PromptSet, RenderError, WAKE};
+
+/// Images shown with `view_image` stay in the conversation for this many views; older
+/// ones are replaced by a note, since every image is resent with every LLM turn.
+const MAX_IMAGES_IN_CONTEXT: usize = 4;
+
+/// The file a successful `view_image` result refers to.
+fn viewed_image(result: &ToolResult) -> Option<(FileId, String)> {
+    if result.is_error {
+        return None;
+    }
+    let id = result.content.get("image_file_id")?.as_str()?;
+    let name = result.content.get("file")?.as_str()?;
+    Some((FileId::from_string(id), name.to_owned()))
+}
 
 /// Tool calls of the latest LLM turn that have no recorded result yet.
 ///
@@ -55,6 +70,7 @@ pub fn pending_tool_calls(events: &[Event]) -> Vec<ToolCall> {
 /// * `events` - The case's full event log, in order
 /// * `prompts` - Templates for wake and nudge messages
 /// * `context` - Template variables; `now` is replaced by each event's own time
+/// * `image` - Loads an image shown with `view_image`
 ///
 /// # Errors
 ///
@@ -63,7 +79,13 @@ pub fn build_messages(
     events: &[Event],
     prompts: &PromptSet,
     context: &PromptContext<'_>,
+    image: &dyn Fn(&FileId) -> Option<ImageData>,
 ) -> Result<Vec<Message>, RenderError> {
+    let viewed = events
+        .iter()
+        .filter(|event| matches!(&event.body, EventBody::ToolResult(result) if viewed_image(result).is_some()))
+        .count();
+    let mut to_omit = viewed.saturating_sub(MAX_IMAGES_IN_CONTEXT);
     let mut messages = Vec::with_capacity(events.len());
     let mut deferred = Vec::new();
     let mut unanswered: HashSet<&str> = HashSet::new();
@@ -83,9 +105,11 @@ pub fn build_messages(
                         ..at
                     },
                 )?,
+                images: Vec::new(),
             }),
             EventBody::Nudge => Some(Message::User {
                 text: prompts.render(NUDGE, &at)?,
+                images: Vec::new(),
             }),
             EventBody::LlmMessage(message) => {
                 unanswered = message.tool_calls.iter().map(|call| call.id.as_str()).collect();
@@ -101,7 +125,28 @@ pub fn build_messages(
                 if unanswered.is_empty() {
                     messages.append(&mut deferred);
                 }
-                None
+                // Chat APIs only accept images in user messages, so a viewed image
+                // follows the tool results as one.
+                viewed_image(result).map(|(id, name)| {
+                    let loaded = if to_omit > 0 {
+                        to_omit = to_omit.saturating_sub(1);
+                        None
+                    } else {
+                        image(&id)
+                    };
+                    match loaded {
+                        Some(data) => Message::User {
+                            text: format!("Image `{name}`, as requested with view_image:"),
+                            images: vec![data],
+                        },
+                        None => Message::User {
+                            text: format!(
+                                "[Image `{name}` left out to save context; call view_image again to see it.]"
+                            ),
+                            images: Vec::new(),
+                        },
+                    }
+                })
             }
             EventBody::StateChanged { .. } | EventBody::Error { .. } => None,
         };
@@ -174,9 +219,11 @@ mod tests {
             usage: &usage,
             notes: &[],
             tools: &[],
+            instructions: &[],
+            files: &[],
             wake: None,
         };
-        build_messages(events, &PromptSet::builtin(), &context).unwrap()
+        build_messages(events, &PromptSet::builtin(), &context, &|_| None).unwrap()
     }
 
     #[test]
@@ -217,10 +264,76 @@ mod tests {
         let messages = build(&events);
 
         assert_eq!(messages.len(), 4);
-        assert!(matches!(&messages[0], Message::User { text } if text.contains("just created")));
+        assert!(matches!(&messages[0], Message::User { text, .. } if text.contains("just created")));
         assert!(matches!(&messages[1], Message::Assistant(_)));
         assert!(matches!(&messages[2], Message::Tool { tool_call_id, .. } if tool_call_id == "a"));
-        assert!(matches!(&messages[3], Message::User { text } if text.contains("without calling a tool")));
+        assert!(matches!(&messages[3], Message::User { text, .. } if text.contains("without calling a tool")));
+    }
+
+    #[test]
+    fn viewed_images_follow_their_results_and_only_the_latest_are_kept() {
+        // Arrange: six views, each its own LLM turn and tool result.
+        let mut events = Vec::new();
+        for index in 0..6_i64 {
+            let id = format!("v{index}");
+            events.push(event(index * 2, turn(&[id.as_str()])));
+            events.push(event(
+                index * 2 + 1,
+                EventBody::ToolResult(ToolResult {
+                    tool_call_id: id,
+                    tool_name: "view_image".to_owned(),
+                    content: json!({"status": "shown", "file": format!("{index}.png"), "image_file_id": format!("f{index}")}),
+                    is_error: false,
+                }),
+            ));
+        }
+        let (budgets, usage) = (Budgets::default(), Usage::default());
+        let context = PromptContext {
+            now: String::new(),
+            case: CaseView {
+                title: "T",
+                goal: "G",
+                owner: None,
+                created_at: String::new(),
+            },
+            budgets: &budgets,
+            usage: &usage,
+            notes: &[],
+            tools: &[],
+            instructions: &[],
+            files: &[],
+            wake: None,
+        };
+        let loader = |id: &FileId| {
+            Some(ImageData {
+                media_type: "image/png".to_owned(),
+                base64: id.to_string(),
+            })
+        };
+
+        // Act
+        let messages = build_messages(&events, &PromptSet::builtin(), &context, &loader).unwrap();
+
+        // Assert: after each tool result comes a user message; the first two are notes.
+        let images: Vec<Option<String>> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { images, .. } => Some(images.first().map(|image| image.base64.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            images,
+            [
+                None,
+                None,
+                Some("f2".to_owned()),
+                Some("f3".to_owned()),
+                Some("f4".to_owned()),
+                Some("f5".to_owned())
+            ]
+        );
+        assert!(matches!(&messages[2], Message::User { text, .. } if text.contains("left out to save context")));
     }
 
     #[test]
@@ -235,6 +348,6 @@ mod tests {
         let messages = build(&events);
 
         assert!(matches!(&messages[2], Message::Tool { tool_call_id, .. } if tool_call_id == "b"));
-        assert!(matches!(&messages[3], Message::User { text } if text.contains("hi")));
+        assert!(matches!(&messages[3], Message::User { text, .. } if text.contains("hi")));
     }
 }

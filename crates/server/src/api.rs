@@ -4,17 +4,28 @@
 //! so request threads always return quickly.
 
 use chrono::Utc;
-use clankjob_core::case::{Budgets, CaseState, NewCase};
+use clankjob_core::case::{Budgets, CaseState, NewCase, NewInstruction};
+use clankjob_core::file::FileKind;
 use clankjob_core::human::HumanRequestStatus;
-use clankjob_core::ids::{CaseId, HumanRequestId};
+use clankjob_core::ids::{CaseId, FileId, HumanRequestId, InstructionId};
 use clankjob_engine::{Engine, EngineError};
 use clankjob_storage::cases::CaseFilter;
 use clankjob_storage::human::Answer;
 use clankjob_storage::{self as storage, Connection, StorageError};
+use std::io::Read;
+use std::sync::Arc;
+
 use rouille::{Request, Response, router};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+use crate::catalog::Catalog;
+
+/// Largest request body accepted, in bytes, except for file uploads.
+const MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
+/// Largest file upload body accepted, in bytes.
+const MAX_UPLOAD_BYTES: u64 = clankjob_engine::files::MAX_FILE_BYTES as u64;
 
 /// Default and maximum page sizes for list endpoints.
 const DEFAULT_PAGE: u32 = 50;
@@ -27,6 +38,8 @@ pub enum AppError {
     BadRequest(String),
     /// Missing or wrong bearer token (401).
     Unauthorized,
+    /// The request body is larger than the server accepts (413).
+    PayloadTooLarge,
     /// The resource does not exist (404).
     NotFound(String),
     /// The operation conflicts with the resource's current state (409).
@@ -40,6 +53,15 @@ impl AppError {
         let (status, code, message) = match self {
             Self::BadRequest(message) => (400, "bad_request", message),
             Self::Unauthorized => (401, "unauthorized", "missing or invalid bearer token".to_owned()),
+            Self::PayloadTooLarge => (
+                413,
+                "payload_too_large",
+                format!(
+                    "request bodies are limited to {} MB, and file uploads to {} MB",
+                    MAX_BODY_BYTES / 1024 / 1024,
+                    MAX_UPLOAD_BYTES / 1024 / 1024
+                ),
+            ),
             Self::NotFound(message) => (404, "not_found", message),
             Self::Conflict(message) => (409, "conflict", message),
             Self::Internal => (500, "internal", "internal server error".to_owned()),
@@ -58,9 +80,18 @@ impl From<StorageError> for AppError {
 impl From<EngineError> for AppError {
     fn from(error: EngineError) -> Self {
         match error {
-            EngineError::CaseNotFound(_) | EngineError::RequestNotFound(_) => Self::NotFound(error.to_string()),
+            EngineError::CaseNotFound(_) | EngineError::RequestNotFound(_) | EngineError::InstructionNotFound(_) => {
+                Self::NotFound(error.to_string())
+            }
             EngineError::AlreadyResolved(_) | EngineError::InvalidState { .. } => Self::Conflict(error.to_string()),
-            EngineError::UnknownLlm(_) | EngineError::UnknownProfile(_) => Self::BadRequest(error.to_string()),
+            EngineError::UnknownLlm(_)
+            | EngineError::UnknownProfile(_)
+            | EngineError::InvalidFile(_)
+            | EngineError::InvalidInstruction(_) => Self::BadRequest(error.to_string()),
+            EngineError::FileStorage(error) => {
+                tracing::error!(%error, "file storage error while handling a request");
+                Self::Internal
+            }
             EngineError::Storage(error) => error.into(),
             EngineError::Prompt(error) => {
                 tracing::error!(%error, "prompt error while handling a request");
@@ -88,16 +119,18 @@ pub struct AppState {
     engine: Engine,
     tokens: Vec<SecretString>,
     defaults: CaseDefaults,
+    catalog: Arc<Catalog>,
 }
 
 impl AppState {
-    /// Bundle the engine, accepted API tokens and case defaults.
+    /// Bundle the engine, accepted API tokens, case defaults and the model catalog.
     #[must_use]
-    pub fn new(engine: Engine, tokens: Vec<SecretString>, defaults: CaseDefaults) -> Self {
+    pub fn new(engine: Engine, tokens: Vec<SecretString>, defaults: CaseDefaults, catalog: Arc<Catalog>) -> Self {
         Self {
             engine,
             tokens,
             defaults,
+            catalog,
         }
     }
 
@@ -182,6 +215,25 @@ struct CreateCaseBody {
     model: Option<String>,
     #[serde(default)]
     budgets: Option<Budgets>,
+    #[serde(default)]
+    instructions: Vec<InstructionBody>,
+}
+
+/// An instruction in `POST /cases`, `POST` or `PUT /cases/{id}/instructions`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstructionBody {
+    name: String,
+    content: String,
+}
+
+impl InstructionBody {
+    fn into_new(self) -> NewInstruction {
+        NewInstruction {
+            name: self.name.trim().to_owned(),
+            content: self.content,
+        }
+    }
 }
 
 fn create_case(state: &AppState, request: &Request) -> Handled {
@@ -197,6 +249,7 @@ fn create_case(state: &AppState, request: &Request) -> Handled {
         llm: body.llm.unwrap_or_else(|| state.defaults.llm.clone()),
         model: body.model,
         budgets: body.budgets.unwrap_or(state.defaults.budgets),
+        instructions: body.instructions.into_iter().map(InstructionBody::into_new).collect(),
     };
     let case = state.engine.create_case(&mut state.connect()?, &new_case)?;
     Ok(Response::json(&case).with_status_code(201))
@@ -221,12 +274,107 @@ fn get_case(state: &AppState, id: &CaseId) -> Handled {
     let notes = storage::notes::list_notes(&connection, id)?;
     let wait_conditions = storage::waits::active_waits(&connection, id)?;
     let human_requests = storage::human::list_requests(&connection, Some(HumanRequestStatus::Open), Some(id))?;
+    // Metadata only; extracted text and bytes are fetched one file at a time.
+    let files = storage::files::list_files(&connection, id)?;
+    let instructions = storage::instructions::list_instructions(&connection, id)?;
     Ok(Response::json(&json!({
         "case": case,
         "notes": notes,
         "wait_conditions": wait_conditions,
         "open_human_requests": human_requests,
+        "instructions": instructions,
+        "files": files,
     })))
+}
+
+/// Add (`id` unset), edit, or remove (`body` unset) an instruction.
+fn change_instruction(
+    state: &AppState,
+    request: Option<&Request>,
+    case_id: &CaseId,
+    id: Option<&InstructionId>,
+) -> Handled {
+    let instruction = request
+        .map(json_body::<InstructionBody>)
+        .transpose()?
+        .map(InstructionBody::into_new);
+    let stored = state
+        .engine
+        .change_instruction(&mut state.connect()?, case_id, id, instruction.as_ref())?;
+    Ok(match (stored, id) {
+        (Some(stored), None) => Response::json(&stored).with_status_code(201),
+        (Some(stored), Some(_)) => Response::json(&stored),
+        (None, _) => Response::json(&json!({ "status": "removed" })),
+    })
+}
+
+fn upload_file(state: &AppState, request: &Request, case_id: &CaseId) -> Handled {
+    let name = request
+        .get_param("name")
+        .ok_or_else(|| AppError::BadRequest("the `name` query parameter is required".to_owned()))?;
+    let Some(body) = request.data() else {
+        return Err(AppError::BadRequest("the request body was already read".to_owned()));
+    };
+    // One byte past the limit is enough to tell an oversized upload that lied about
+    // (or omitted) its Content-Length.
+    let mut bytes = Vec::new();
+    body.take(MAX_UPLOAD_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| AppError::BadRequest(format!("cannot read the upload: {error}")))?;
+    if bytes.len() as u64 > MAX_UPLOAD_BYTES {
+        return Err(AppError::PayloadTooLarge);
+    }
+    let file = state.engine.add_file(&mut state.connect()?, case_id, &name, &bytes)?;
+    Ok(Response::json(&file).with_status_code(201))
+}
+
+fn load_file(state: &AppState, case_id: &CaseId, id: &FileId) -> Result<clankjob_core::file::CaseFile, AppError> {
+    storage::files::get_file(&state.connect()?, case_id, id)?
+        .ok_or_else(|| AppError::NotFound(format!("file {id} not found")))
+}
+
+/// Metadata plus the extracted text, for text files and PDFs.
+fn get_file(state: &AppState, case_id: &CaseId, id: &FileId) -> Handled {
+    let file = load_file(state, case_id, id)?;
+    let mut body = serde_json::to_value(&file).map_err(|_| AppError::Internal)?;
+    if let Value::Object(fields) = &mut body {
+        fields.insert("text".to_owned(), json!(file.text));
+    }
+    Ok(Response::json(&body))
+}
+
+/// The file's bytes. Only images are shown inline; everything else is a download, and
+/// nothing is ever served as something a browser would render as a page.
+fn file_content(state: &AppState, case_id: &CaseId, id: &FileId) -> Handled {
+    let file = load_file(state, case_id, id)?;
+    let bytes = state.engine.files().read(&file.id).map_err(|error| {
+        tracing::error!(%error, file_id = %file.id, "cannot read stored file");
+        AppError::Internal
+    })?;
+    let (content_type, disposition) = match file.kind {
+        FileKind::Image => (file.media_type.clone(), "inline"),
+        FileKind::Pdf => ("application/pdf".to_owned(), "attachment"),
+        FileKind::Text => ("application/octet-stream".to_owned(), "attachment"),
+    };
+    // Quotes and control characters cannot break out of the header's filename.
+    let safe_name: String = file
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_control() || c == '"' || c == '\\' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    Ok(Response::from_data(content_type, bytes)
+        .with_additional_header(
+            "Content-Disposition",
+            format!("{disposition}; filename=\"{safe_name}\""),
+        )
+        .with_additional_header("X-Content-Type-Options", "nosniff")
+        .with_additional_header("Content-Security-Policy", "default-src 'none'; sandbox"))
 }
 
 fn list_events(state: &AppState, request: &Request, id: &CaseId) -> Handled {
@@ -321,6 +469,22 @@ fn route(state: &AppState, request: &Request) -> Handled {
         (GET) (/api/v1/cases) => { list_cases(state, request) },
         (POST) (/api/v1/cases) => { create_case(state, request) },
         (GET) (/api/v1/cases/{id: String}) => { get_case(state, &CaseId::from_string(id)) },
+        (POST) (/api/v1/cases/{id: String}/instructions) => {
+            change_instruction(state, Some(request), &CaseId::from_string(id), None)
+        },
+        (PUT) (/api/v1/cases/{id: String}/instructions/{instruction: String}) => {
+            change_instruction(state, Some(request), &CaseId::from_string(id), Some(&InstructionId::from_string(instruction)))
+        },
+        (DELETE) (/api/v1/cases/{id: String}/instructions/{instruction: String}) => {
+            change_instruction(state, None, &CaseId::from_string(id), Some(&InstructionId::from_string(instruction)))
+        },
+        (POST) (/api/v1/cases/{id: String}/files) => { upload_file(state, request, &CaseId::from_string(id)) },
+        (GET) (/api/v1/cases/{id: String}/files/{file: String}) => {
+            get_file(state, &CaseId::from_string(id), &FileId::from_string(file))
+        },
+        (GET) (/api/v1/cases/{id: String}/files/{file: String}/content) => {
+            file_content(state, &CaseId::from_string(id), &FileId::from_string(file))
+        },
         (GET) (/api/v1/cases/{id: String}/events) => { list_events(state, request, &CaseId::from_string(id)) },
         (POST) (/api/v1/cases/{id: String}/messages) => { post_message(state, request, &CaseId::from_string(id)) },
         (POST) (/api/v1/cases/{id: String}/wake) => { wake_case(state, &CaseId::from_string(id)) },
@@ -328,6 +492,9 @@ fn route(state: &AppState, request: &Request) -> Handled {
         (GET) (/api/v1/human-requests) => { list_human_requests(state, request) },
         (POST) (/api/v1/human-requests/{id: String}/answer) => {
             answer_human_request(state, request, &HumanRequestId::from_string(id))
+        },
+        (GET) (/api/v1/llms) => {
+            Ok(Response::json(&json!({ "default_llm": state.defaults.llm, "llms": state.catalog.choices() })))
         },
         (GET) (/api/v1/prompts) => { Ok(Response::json(&prompts_summary(&state.engine.prompts()))) },
         (GET) (/api/v1/prompts/profiles/{name: String}) => { get_prompt(state, &format!("profiles/{name}")) },
@@ -356,14 +523,20 @@ pub fn handle(state: &AppState, request: &Request) -> Response {
     if !authorized(state, request) {
         return AppError::Unauthorized.into_response();
     }
+    let declared = request
+        .header("Content-Length")
+        .and_then(|length| length.trim().parse::<u64>().ok());
+    let is_upload = request.method() == "POST" && request.url().ends_with("/files");
+    let limit = if is_upload { MAX_UPLOAD_BYTES } else { MAX_BODY_BYTES };
+    if declared.is_some_and(|length| length > limit) {
+        return AppError::PayloadTooLarge.into_response();
+    }
     route(state, request).unwrap_or_else(AppError::into_response)
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::io::Read;
-    use std::sync::Arc;
 
     use clankjob_core::llm::{CompletionRequest, CompletionResponse, LlmError, LlmProvider};
     use clankjob_engine::EngineSettings;
@@ -371,6 +544,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::catalog::CatalogLlm;
 
     /// A provider that is never called: API tests do not start the engine's threads.
     struct UnusedProvider;
@@ -396,13 +570,20 @@ mod tests {
             let db = Db::new(dir.path().join("test.db"));
             db.migrate().unwrap();
             let providers = HashMap::from([("default".to_owned(), Arc::new(UnusedProvider) as Arc<dyn LlmProvider>)]);
-            let engine = Engine::new(db, providers, None, EngineSettings::default());
+            let engine = Engine::new(db, providers, None, dir.path().join("files"), EngineSettings::default());
             let defaults = CaseDefaults {
                 llm: "default".to_owned(),
                 profile: None,
                 budgets: Budgets::default(),
             };
-            let state = AppState::new(engine, vec![SecretString::from("token".to_owned())], defaults);
+            let catalog = Catalog::new(vec![CatalogLlm {
+                name: "default".to_owned(),
+                model: "big-model".to_owned(),
+                suggested: vec!["cheap-model".to_owned(), "big-model".to_owned()],
+                provider: None,
+            }]);
+            let tokens = vec![SecretString::from("token".to_owned())];
+            let state = AppState::new(engine, tokens, defaults, Arc::new(catalog));
             Self { state, _dir: dir }
         }
 
@@ -555,9 +736,187 @@ mod tests {
         let (reload_status, _) = api.call("POST", "/api/v1/admin/reload", None);
 
         assert_eq!((status, prompt_status, reload_status), (200, 200, 200));
-        assert_eq!(list["prompts"].as_array().unwrap().len(), 4);
+        assert_eq!(list["prompts"].as_array().unwrap().len(), 6);
         assert_eq!(prompt["source"], "builtin");
         assert_eq!(api.call("GET", "/api/v1/prompts/profiles/none", None).0, 404);
+    }
+
+    #[test]
+    fn llms_list_the_default_model_first_without_duplicates() {
+        let api = TestApi::new();
+
+        let (status, body) = api.call("GET", "/api/v1/llms", None);
+
+        assert_eq!(status, 200);
+        assert_eq!(body["default_llm"], "default");
+        assert_eq!(body["llms"][0]["model"], "big-model");
+        assert_eq!(
+            body["llms"][0]["models"],
+            json!([{"id": "big-model"}, {"id": "cheap-model"}])
+        );
+    }
+
+    #[test]
+    fn case_can_be_started_with_a_chosen_model() {
+        let api = TestApi::new();
+
+        let (status, case) = api.call(
+            "POST",
+            "/api/v1/cases",
+            Some(json!({"title": "t", "goal": "g", "llm": "default", "model": "cheap-model"})),
+        );
+
+        assert_eq!(status, 201);
+        assert_eq!(case["model"], "cheap-model");
+    }
+
+    fn upload(api: &TestApi, url: &str, bytes: &[u8]) -> (u16, Value) {
+        let headers = vec![("Authorization".to_owned(), "Bearer token".to_owned())];
+        let response = handle(&api.state, &Request::fake_http("POST", url, headers, bytes.to_vec()));
+        let (mut reader, _) = response.data.into_reader_and_size();
+        let mut text = String::new();
+        reader.read_to_string(&mut text).unwrap();
+        (response.status_code, serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    #[test]
+    fn files_are_uploaded_listed_read_and_served() {
+        // Arrange
+        let api = TestApi::new();
+        let id = api.create_case();
+
+        // Act
+        let (status, file) = upload(
+            &api,
+            &format!("/api/v1/cases/{id}/files?name=tone.md"),
+            b"# Tone\nBe polite.",
+        );
+        let (image_status, image) = upload(
+            &api,
+            &format!("/api/v1/cases/{id}/files?name=p.png"),
+            b"\x89PNG\r\n\x1a\n",
+        );
+        let (_, detail) = api.call("GET", &format!("/api/v1/cases/{id}"), None);
+        let file_id = file["id"].as_str().unwrap();
+        let (_, full) = api.call("GET", &format!("/api/v1/cases/{id}/files/{file_id}"), None);
+        let request = Request::fake_http(
+            "GET",
+            format!("/api/v1/cases/{id}/files/{}/content", image["id"].as_str().unwrap()),
+            vec![("Authorization".to_owned(), "Bearer token".to_owned())],
+            Vec::new(),
+        );
+        let content = handle(&api.state, &request);
+
+        // Assert
+        assert_eq!((status, image_status), (201, 201));
+        assert_eq!(file["kind"], "text");
+        assert_eq!(image["media_type"], "image/png");
+        assert_eq!(detail["files"].as_array().unwrap().len(), 2);
+        assert!(detail["files"][0].get("text").is_none());
+        assert_eq!(full["text"], "# Tone\nBe polite.");
+        assert_eq!(content.status_code, 200);
+        assert!(
+            content
+                .headers
+                .iter()
+                .any(|(name, value)| name == "Content-Type" && value == "image/png")
+        );
+        assert!(
+            content
+                .headers
+                .iter()
+                .any(|(name, value)| name == "Content-Disposition" && value.starts_with("inline"))
+        );
+        // The upload woke the case, like a message.
+        let (_, events) = api.call("GET", &format!("/api/v1/cases/{id}/events"), None);
+        assert!(
+            events["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["payload"]["reason"] == "file_added")
+        );
+    }
+
+    #[test]
+    fn instructions_are_set_at_creation_and_edited_later() {
+        // Arrange
+        let api = TestApi::new();
+        let body = json!({"title": "t", "goal": "g", "instructions": [{"name": " tone.md ", "content": "Be polite."}]});
+        let (created, case) = api.call("POST", "/api/v1/cases", Some(body));
+        let id = case["id"].as_str().unwrap();
+        let (_, detail) = api.call("GET", &format!("/api/v1/cases/{id}"), None);
+        let tone = detail["instructions"][0]["id"].as_str().unwrap().to_owned();
+
+        // Act
+        let base = format!("/api/v1/cases/{id}/instructions");
+        let (added, budget) = api.call(
+            "POST",
+            &base,
+            Some(json!({"name": "budget.md", "content": "Max $1,500."})),
+        );
+        let (edited, _) = api.call(
+            "PUT",
+            &format!("{base}/{tone}"),
+            Some(json!({"name": "tone.md", "content": "Be firm."})),
+        );
+        let (removed, _) = api.call("DELETE", &format!("{base}/{}", budget["id"].as_str().unwrap()), None);
+        let (_, after) = api.call("GET", &format!("/api/v1/cases/{id}"), None);
+
+        // Assert
+        assert_eq!((created, added, edited, removed), (201, 201, 200, 200));
+        assert_eq!(detail["instructions"][0]["name"], "tone.md");
+        assert_eq!(after["instructions"].as_array().unwrap().len(), 1);
+        assert_eq!(after["instructions"][0]["content"], "Be firm.");
+        assert_eq!(api.call("DELETE", &format!("{base}/nope"), None).0, 404);
+        assert_eq!(
+            api.call("POST", &base, Some(json!({"name": "x.md", "content": " "}))).0,
+            400
+        );
+    }
+
+    #[test]
+    fn bad_uploads_are_rejected() {
+        let api = TestApi::new();
+        let id = api.create_case();
+        let oversized_headers = vec![
+            ("Authorization".to_owned(), "Bearer token".to_owned()),
+            ("Content-Length".to_owned(), (MAX_UPLOAD_BYTES + 1).to_string()),
+        ];
+
+        let (binary, error) = upload(
+            &api,
+            &format!("/api/v1/cases/{id}/files?name=a.exe"),
+            b"MZ\x90\x00\xff\xfe",
+        );
+        let (no_name, _) = upload(&api, &format!("/api/v1/cases/{id}/files"), b"text");
+        let (no_case, _) = upload(&api, "/api/v1/cases/nope/files?name=a.txt", b"text");
+        let oversized = handle(
+            &api.state,
+            &Request::fake_http(
+                "POST",
+                format!("/api/v1/cases/{id}/files?name=big.txt"),
+                oversized_headers,
+                Vec::new(),
+            ),
+        );
+        let big_json = handle(
+            &api.state,
+            &Request::fake_http(
+                "POST",
+                "/api/v1/cases",
+                vec![
+                    ("Authorization".to_owned(), "Bearer token".to_owned()),
+                    ("Content-Length".to_owned(), (MAX_BODY_BYTES + 1).to_string()),
+                ],
+                Vec::new(),
+            ),
+        );
+
+        assert_eq!(binary, 400);
+        assert!(error["error"]["message"].as_str().unwrap().contains("not a supported file"));
+        assert_eq!((no_name, no_case), (400, 404));
+        assert_eq!((oversized.status_code, big_json.status_code), (413, 413));
     }
 
     #[test]

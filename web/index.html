@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>clankjob</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/app.css" />
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body data-view="list">
+    <a class="skip" href="#detail">Skip to the selected case</a>
+    <div class="topwrap">
+      <header class="top" role="banner">
+        <a class="brand" href="#/cases">clank<b>/</b>job</a>
+        <div class="pulse">
+          <i class="dot off" id="dot" aria-hidden="true"></i>
+          <span id="pulse-text" role="status" aria-live="polite">connecting…</span>
+          <span class="sub" id="pulse-sub"></span>
+        </div>
+        <div class="counts" id="counts"></div>
+        <nav class="top-actions" id="top-actions" aria-label="Main" hidden>
+          <a class="btn sm quiet" href="#/cases" data-nav="cases">Cases</a>
+          <a class="btn sm quiet" href="#/inbox" data-nav="inbox">Inbox <span class="n" id="inbox-count" hidden></span></a>
+          <a class="btn sm quiet" href="#/prompts" data-nav="prompts">Prompts</a>
+          <button class="btn sm primary" id="new-case" type="button">New case</button>
+          <button class="btn sm quiet" id="theme-toggle" type="button">Auto</button>
+          <button class="btn sm quiet" id="sign-out" type="button">Sign out</button>
+        </nav>
+      </header>
+    </div>
+    <div class="view" id="view"></div>
+    <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+  </body>
+</html>

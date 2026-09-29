@@ -70,6 +70,33 @@ pub struct NoteDeleteArgs {
     pub key: String,
 }
 
+/// Arguments of `read_file`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadFileArgs {
+    /// File name (or id).
+    pub file: String,
+    /// Character to start from.
+    #[serde(default)]
+    pub offset: usize,
+    /// Characters to return; capped at [`MAX_READ_CHARS`].
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+}
+
+/// Arguments of `view_image`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewImageArgs {
+    /// File name (or id).
+    pub file: String,
+}
+
+/// Characters `read_file` returns when `max_chars` is not given.
+pub const DEFAULT_READ_CHARS: usize = 20_000;
+/// Most characters one `read_file` call returns.
+pub const MAX_READ_CHARS: usize = 40_000;
+
 /// A parsed call to a core tool.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CoreTool {
@@ -85,6 +112,10 @@ pub enum CoreTool {
     NoteSet(NoteSetArgs),
     /// Delete a note.
     NoteDelete(NoteDeleteArgs),
+    /// Read the text of a file in parts.
+    ReadFile(ReadFileArgs),
+    /// Show an image file to the model.
+    ViewImage(ViewImageArgs),
 }
 
 fn parse_args<T>(call: &ToolCall) -> Result<T, String>
@@ -109,6 +140,8 @@ impl CoreTool {
             "fail" => parse_args(call).map(Self::Fail),
             "note_set" => parse_args(call).map(Self::NoteSet),
             "note_delete" => parse_args(call).map(Self::NoteDelete),
+            "read_file" => parse_args(call).map(Self::ReadFile),
+            "view_image" => parse_args(call).map(Self::ViewImage),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -176,9 +209,52 @@ pub fn schedule(spec: &WaitConditionSpec, now: DateTime<Utc>) -> Result<Schedule
     }
 }
 
+fn spec(name: &str, description: &str, parameters: Value) -> ToolSpec {
+    ToolSpec {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        parameters,
+    }
+}
+
+/// `read_file`, and `view_image` when the model can see images.
+fn file_tool_specs(vision: bool) -> Vec<ToolSpec> {
+    let mut specs = Vec::with_capacity(2);
+    specs.push(spec(
+        "read_file",
+        "Read the text of one of the case's files (text or PDF), in parts. Returns `next_offset` while there is more.",
+        json!({
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "The file's name, as listed under Files."},
+                "offset": {"type": "integer", "minimum": 0, "description": "Character to start from (default 0)."},
+                "max_chars": {"type": "integer", "minimum": 1, "maximum": MAX_READ_CHARS, "description": "Characters to return (default 20000)."}
+            },
+            "required": ["file"]
+        }),
+    ));
+    if vision {
+        specs.push(spec(
+            "view_image",
+            "Look at one of the case's image files. The image is shown to you right after this call.",
+            json!({
+                "type": "object",
+                "properties": {"file": {"type": "string", "description": "The file's name, as listed under Files."}},
+                "required": ["file"]
+            }),
+        ));
+    }
+    specs
+}
+
 /// Specs of the core tools, shown to the LLM.
+///
+/// # Arguments
+///
+/// * `has_files` - The case has files, so `read_file` is offered
+/// * `vision` - The model can see images, so `view_image` is offered too
 #[must_use]
-pub fn core_tool_specs() -> Vec<ToolSpec> {
+pub fn core_tool_specs(has_files: bool, vision: bool) -> Vec<ToolSpec> {
     let condition = json!({
         "type": "object",
         "properties": {
@@ -192,12 +268,7 @@ pub fn core_tool_specs() -> Vec<ToolSpec> {
         },
         "required": ["kind"]
     });
-    let spec = |name: &str, description: &str, parameters: Value| ToolSpec {
-        name: name.to_owned(),
-        description: description.to_owned(),
-        parameters,
-    };
-    vec![
+    let mut specs = vec![
         spec(
             "sleep",
             "Suspend the case until any of the conditions fires or times out. Costs nothing while asleep.",
@@ -266,7 +337,11 @@ pub fn core_tool_specs() -> Vec<ToolSpec> {
                 "required": ["key"]
             }),
         ),
-    ]
+    ];
+    if has_files {
+        specs.extend(file_tool_specs(vision));
+    }
+    specs
 }
 
 #[cfg(test)]
@@ -383,11 +458,27 @@ mod tests {
 
     #[test]
     fn specs_cover_every_parsable_tool() {
-        let names: Vec<String> = core_tool_specs().into_iter().map(|spec| spec.name).collect();
+        let names = |has_files, vision| -> Vec<String> {
+            core_tool_specs(has_files, vision).into_iter().map(|spec| spec.name).collect()
+        };
 
         assert_eq!(
-            names,
+            names(false, true),
             ["sleep", "ask_human", "complete", "fail", "note_set", "note_delete"]
         );
+        assert_eq!(names(true, false).last().map(String::as_str), Some("read_file"));
+        assert_eq!(names(true, true)[6..], ["read_file", "view_image"]);
+        assert!(matches!(
+            CoreTool::parse(&call("read_file", json!({"file": "a.pdf", "offset": 10}))).unwrap(),
+            CoreTool::ReadFile(ReadFileArgs {
+                offset: 10,
+                max_chars: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            CoreTool::parse(&call("view_image", json!({"file": "p.png"}))).unwrap(),
+            CoreTool::ViewImage(_)
+        ));
     }
 }

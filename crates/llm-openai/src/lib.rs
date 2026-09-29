@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use clankjob_core::llm::{
-    AssistantMessage, CompletionRequest, CompletionResponse, LlmError, LlmProvider, Message, TokenUsage, ToolCall,
+    AssistantMessage, CompletionRequest, CompletionResponse, LlmError, LlmProvider, Message, ModelInfo, TokenUsage,
+    ToolCall,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
@@ -25,6 +26,8 @@ pub struct OpenAiConfig {
     pub model: String,
     /// Maximum time for one completion request.
     pub timeout: Duration,
+    /// Whether the model can be shown images.
+    pub vision: bool,
 }
 
 /// Wire format of the request body.
@@ -46,7 +49,7 @@ mod wire {
             content: &'a str,
         },
         User {
-            content: &'a str,
+            content: UserContent<'a>,
         },
         Assistant {
             content: Option<&'a str>,
@@ -58,6 +61,27 @@ mod wire {
             tool_call_id: &'a str,
             content: &'a str,
         },
+    }
+
+    /// Plain text, or text plus images for vision models.
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    pub enum UserContent<'a> {
+        Text(&'a str),
+        Parts(Vec<Part<'a>>),
+    }
+
+    #[derive(Serialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum Part<'a> {
+        Text { text: &'a str },
+        ImageUrl { image_url: ImageUrl },
+    }
+
+    #[derive(Serialize)]
+    pub struct ImageUrl {
+        /// A `data:` URL carrying the image itself.
+        pub url: String,
     }
 
     #[derive(Serialize)]
@@ -128,6 +152,34 @@ mod wire {
         pub completion_tokens: u64,
     }
 
+    /// `GET /models`. OpenAI and Ollama only send `id`; OpenRouter adds the rest.
+    #[derive(Deserialize)]
+    pub struct Models {
+        pub data: Vec<Model>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Model {
+        pub id: String,
+        #[serde(default)]
+        pub name: Option<String>,
+        #[serde(default)]
+        pub context_length: Option<u64>,
+        #[serde(default)]
+        pub pricing: Option<Pricing>,
+        #[serde(default)]
+        pub supported_parameters: Option<Vec<String>>,
+    }
+
+    /// US dollars per token, as decimal strings.
+    #[derive(Deserialize)]
+    pub struct Pricing {
+        #[serde(default)]
+        pub prompt: Option<String>,
+        #[serde(default)]
+        pub completion: Option<String>,
+    }
+
     #[derive(Deserialize)]
     pub struct ErrorBody {
         pub error: ErrorDetail,
@@ -146,7 +198,21 @@ fn to_wire(request: &CompletionRequest) -> wire::Request<'_> {
     });
     messages.extend(request.messages.iter().map(|message| {
         match message {
-            Message::User { text } => wire::RequestMessage::User { content: text },
+            Message::User { text, images } if images.is_empty() => wire::RequestMessage::User {
+                content: wire::UserContent::Text(text),
+            },
+            Message::User { text, images } => {
+                let mut parts = Vec::with_capacity(images.len().saturating_add(1));
+                parts.push(wire::Part::Text { text });
+                parts.extend(images.iter().map(|image| wire::Part::ImageUrl {
+                    image_url: wire::ImageUrl {
+                        url: format!("data:{};base64,{}", image.media_type, image.base64),
+                    },
+                }));
+                wire::RequestMessage::User {
+                    content: wire::UserContent::Parts(parts),
+                }
+            }
             Message::Assistant(assistant) => wire::RequestMessage::Assistant {
                 content: assistant.text.as_deref(),
                 tool_calls: assistant
@@ -219,6 +285,40 @@ fn from_wire(response: wire::Response) -> Result<CompletionResponse, LlmError> {
     })
 }
 
+/// Convert a per-token price string to dollars per million tokens.
+///
+/// Negative prices mean "variable" on OpenRouter and are treated as unknown.
+fn per_million(price: Option<&str>) -> Option<f64> {
+    price
+        .and_then(|price| price.parse::<f64>().ok())
+        .filter(|price| *price >= 0.0)
+        // Rounded to 6 decimals so "0.0000004" becomes 0.4 and not 0.39999999999999997.
+        .map(|price| (price * 1_000_000_000_000.0).round() / 1_000_000.0)
+}
+
+/// Keep the models that can call tools, when the provider says which ones can.
+fn models_from_wire(models: wire::Models) -> Vec<ModelInfo> {
+    let mut models: Vec<ModelInfo> = models
+        .data
+        .into_iter()
+        .filter(|model| {
+            model
+                .supported_parameters
+                .as_ref()
+                .is_none_or(|parameters| parameters.iter().any(|p| p == "tools"))
+        })
+        .map(|model| ModelInfo {
+            input_price: per_million(model.pricing.as_ref().and_then(|pricing| pricing.prompt.as_deref())),
+            output_price: per_million(model.pricing.as_ref().and_then(|pricing| pricing.completion.as_deref())),
+            id: model.id,
+            name: model.name,
+            context_length: model.context_length,
+        })
+        .collect();
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models
+}
+
 /// Turn a non-success HTTP response into an [`LlmError`].
 fn http_error(status: u16, body: &str) -> LlmError {
     let detail = serde_json::from_str::<wire::ErrorBody>(body).map_or_else(
@@ -255,8 +355,29 @@ impl OpenAiCompatible {
         Self { config, agent }
     }
 
-    fn url(&self) -> String {
-        format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'))
+    fn url(&self, path: &str) -> String {
+        format!("{}/{path}", self.config.base_url.trim_end_matches('/'))
+    }
+
+    fn authorize<B>(&self, builder: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        match &self.config.api_key {
+            Some(key) => builder.header("Authorization", format!("Bearer {}", key.expose_secret())),
+            None => builder,
+        }
+    }
+}
+
+/// Read a response body, turning error statuses into an [`LlmError`].
+fn success_body(mut response: ureq::http::Response<ureq::Body>) -> Result<String, LlmError> {
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| LlmError::Retryable(format!("cannot read response: {error}")))?;
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        Err(http_error(status, &body))
     }
 }
 
@@ -266,25 +387,30 @@ impl LlmProvider for OpenAiCompatible {
     }
 
     fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let mut builder = self.agent.post(self.url());
-        if let Some(key) = &self.config.api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key.expose_secret()));
-        }
         // Network failures (refused, reset, timeout, DNS) are all worth retrying.
-        let mut response = builder
+        let response = self
+            .authorize(self.agent.post(self.url("chat/completions")))
             .send_json(to_wire(request))
             .map_err(|error| LlmError::Retryable(format!("request failed: {error}")))?;
-        let status = response.status().as_u16();
-        let body = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|error| LlmError::Retryable(format!("cannot read response: {error}")))?;
-        if !(200..300).contains(&status) {
-            return Err(http_error(status, &body));
-        }
+        let body = success_body(response)?;
         let parsed: wire::Response =
             serde_json::from_str(&body).map_err(|error| LlmError::Fatal(format!("unexpected response: {error}")))?;
         from_wire(parsed)
+    }
+
+    fn supports_images(&self) -> bool {
+        self.config.vision
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        let response = self
+            .authorize(self.agent.get(self.url("models")))
+            .call()
+            .map_err(|error| LlmError::Retryable(format!("request failed: {error}")))?;
+        let body = success_body(response)?;
+        let parsed: wire::Models =
+            serde_json::from_str(&body).map_err(|error| LlmError::Fatal(format!("unexpected response: {error}")))?;
+        Ok(models_from_wire(parsed))
     }
 }
 
@@ -316,7 +442,12 @@ mod tests {
                 let mut raw = String::new();
                 request.data().unwrap().read_to_string(&mut raw).unwrap();
                 let auth = request.header("Authorization").map(str::to_owned);
-                log.lock().unwrap().push((auth, serde_json::from_str(&raw).unwrap()));
+                let received_body = if raw.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str(&raw).unwrap()
+                };
+                log.lock().unwrap().push((auth, received_body));
                 rouille::Response::from_data("application/json", body).with_status_code(status)
             })
             .unwrap();
@@ -331,6 +462,7 @@ mod tests {
                 api_key: api_key.map(|key| SecretString::from(key.to_owned())),
                 model: "gpt-test".to_owned(),
                 timeout: Duration::from_secs(5),
+                vision: false,
             })
         }
     }
@@ -348,6 +480,7 @@ mod tests {
             messages: vec![
                 Message::User {
                     text: "Start.".to_owned(),
+                    images: Vec::new(),
                 },
                 Message::Assistant(AssistantMessage {
                     text: None,
@@ -415,6 +548,29 @@ mod tests {
     }
 
     #[test]
+    fn images_are_sent_as_data_url_parts() {
+        let mut with_image = request();
+        with_image.messages.push(Message::User {
+            text: "Image `panel.png`:".to_owned(),
+            images: vec![clankjob_core::llm::ImageData {
+                media_type: "image/png".to_owned(),
+                base64: "iVBORw==".to_owned(),
+            }],
+        });
+
+        let body = serde_json::to_value(to_wire(&with_image)).unwrap();
+
+        assert_eq!(body["messages"][1]["content"], "Start.");
+        assert_eq!(
+            body["messages"][4]["content"],
+            json!([
+                {"type": "text", "text": "Image `panel.png`:"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw=="}}
+            ])
+        );
+    }
+
+    #[test]
     fn no_api_key_sends_no_authorization_and_text_replies_parse() {
         let server = TestServer::start(200, r#"{"choices": [{"message": {"content": "Hello"}}]}"#);
 
@@ -447,6 +603,7 @@ mod tests {
             api_key: None,
             model: "m".to_owned(),
             timeout: Duration::from_secs(2),
+            vision: false,
         });
 
         assert!(matches!(provider.complete(&request()), Err(LlmError::Retryable(_))));
@@ -463,15 +620,71 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_models_are_filtered_to_tool_callers_with_prices() {
+        // Arrange: OpenRouter's shape, with one model that cannot call tools.
+        let server = TestServer::start(
+            200,
+            r#"{"data": [
+                {"id": "z/tools", "name": "Z", "context_length": 128000,
+                 "pricing": {"prompt": "0.0000004", "completion": "0.0000016"},
+                 "supported_parameters": ["tools", "temperature"]},
+                {"id": "a/variable", "pricing": {"prompt": "-1", "completion": "-1"},
+                 "supported_parameters": ["tools"]},
+                {"id": "m/no-tools", "supported_parameters": ["temperature"]}
+            ]}"#,
+        );
+
+        // Act
+        let models = server.provider(Some("sk-or")).list_models().unwrap();
+
+        // Assert
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, ["a/variable", "z/tools"]);
+        assert_eq!(models[0].input_price, None);
+        let priced = &models[1];
+        assert_eq!(priced.input_price, Some(0.4));
+        assert_eq!(priced.output_price, Some(1.6));
+        assert_eq!(priced.context_length, Some(128_000));
+        assert_eq!(server.received.lock().unwrap()[0].0.as_deref(), Some("Bearer sk-or"));
+    }
+
+    #[test]
+    fn plain_openai_model_lists_are_kept_whole() {
+        let server = TestServer::start(
+            200,
+            r#"{"object": "list", "data": [{"id": "llama3", "object": "model"}]}"#,
+        );
+
+        let models = server.provider(None).list_models().unwrap();
+
+        assert_eq!(models, vec![ModelInfo::from_id("llama3")]);
+    }
+
+    #[test]
+    fn model_listing_errors_are_reported() {
+        let server = TestServer::start(401, r#"{"error": {"message": "bad key"}}"#);
+
+        assert_eq!(
+            server.provider(None).list_models().unwrap_err(),
+            LlmError::Fatal("HTTP 401: bad key".to_owned())
+        );
+    }
+
+    #[test]
     fn base_url_trailing_slash_is_ignored() {
         let provider = OpenAiCompatible::new(OpenAiConfig {
             base_url: "http://localhost:11434/v1/".to_owned(),
             api_key: None,
             model: "llama".to_owned(),
             timeout: Duration::from_secs(1),
+            vision: true,
         });
 
-        assert_eq!(provider.url(), "http://localhost:11434/v1/chat/completions");
+        assert_eq!(
+            provider.url("chat/completions"),
+            "http://localhost:11434/v1/chat/completions"
+        );
         assert_eq!(provider.default_model(), "llama");
+        assert!(provider.supports_images());
     }
 }

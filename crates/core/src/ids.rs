@@ -68,6 +68,14 @@ ulid_id!(
     /// Identifies a human request (a question the case asked its owner).
     HumanRequestId
 );
+ulid_id!(
+    /// Identifies a file uploaded for a case.
+    FileId
+);
+ulid_id!(
+    /// Identifies an instruction of a case.
+    InstructionId
+);
 
 #[cfg(test)]
 mod tests {

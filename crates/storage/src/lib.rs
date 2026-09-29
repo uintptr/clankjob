@@ -15,7 +15,9 @@ pub use rusqlite::{Connection, Transaction};
 pub mod activations;
 pub mod cases;
 pub mod events;
+pub mod files;
 pub mod human;
+pub mod instructions;
 pub mod notes;
 pub mod queue;
 pub mod waits;
@@ -192,6 +194,7 @@ pub(crate) mod test_support {
             llm: "default".to_owned(),
             model: None,
             budgets: Budgets::default(),
+            instructions: Vec::new(),
         };
         crate::cases::insert_case(connection, &id, &new_case, time(0)).unwrap();
         id

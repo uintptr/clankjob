@@ -1,0 +1,40 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Discord instance",
+    "type": "object",
+    "required": ["bot_token", "channel_id", "allowed_responders"],
+    "additionalProperties": false,
+    "properties": {
+        "bot_token": {
+            "type": "string",
+            "x-secret": true,
+            "description": "Developer Portal -> your app -> Bot -> Reset Token. Use a { secret = ... } or { env = ... } reference."
+        },
+        "channel_id": {
+            "type": ["string", "integer"],
+            "description": "Channel to post in (Developer Mode on, right-click the channel -> Copy Channel ID)."
+        },
+        "allowed_responders": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": ["string", "integer"] },
+            "description": "Discord user ids whose answers count as the owner's. Everyone else is ignored."
+        },
+        "mention": {
+            "type": "boolean",
+            "default": true,
+            "description": "@-mention the allowed responders on questions and approvals so their phone rings."
+        },
+        "poll_interval": {
+            "type": "string",
+            "default": "20s",
+            "description": "How often the server polls for answers. One or two API calls per open request."
+        },
+        "notify_on": {
+            "type": "array",
+            "items": { "enum": ["completed", "failed", "budget_exceeded"] },
+            "default": ["completed", "failed", "budget_exceeded"],
+            "description": "Case events that also post an informational message."
+        }
+    }
+}

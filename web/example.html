@@ -1,0 +1,1564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>ralph</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<style>
+  /* One HTML file, no framework, no build step, no CDN (PROJECT_SPECS.md §10.4).
+     Two layouts: a rail + reply pane from 880px up, one screen at a time below. */
+  :root {
+    --bg:#F3F4F6; --card:#FFFFFF; --card2:#F6F7F9;
+    --ink:#16191F; --ink2:#3B4250; --muted:#5C6675;
+    --line:#E1E4E9; --line2:#C9CED6; --border-in:#8A96A5;
+    --accent:#1F5F9E; --accent-soft:#E6EFF8; --on-accent:#FFFFFF;
+    --await:#8A4B00; --await-soft:#FBEFD9;
+    --live:#0F6B6B;  --live-soft:#DDF1F0;
+    --human:#A12B33; --human-soft:#FBE7E8;
+    --done:#1F6B45;  --done-soft:#E1F2E8;
+    --off:#5B6472;   --off-soft:#ECEEF1;
+    --on-human:#FFFFFF;
+    --shadow:0 1px 2px rgba(22,25,31,.06), 0 0 0 1px rgba(22,25,31,.03);
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Inter,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --bar-h:52px;
+    color-scheme:light;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg:#0F1216; --card:#171B21; --card2:#1E232B;
+    --ink:#E8ECF2; --ink2:#C3CAD5; --muted:#98A2B3;
+    --line:#2A313B; --line2:#3A434F; --border-in:#5F6B7A;
+    --accent:#7CB4EA; --accent-soft:#1A2A3B; --on-accent:#0D1319;
+    --await:#F0B35E; --await-soft:#2F2415;
+    --live:#6FD0CF;  --live-soft:#123232;
+    --human:#F08B93; --human-soft:#33191C;
+    --done:#7BCB9F;  --done-soft:#15291E;
+    --off:#98A2B3;   --off-soft:#232A33;
+    --on-human:#1A0B0D;
+    --shadow:0 1px 2px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.04);
+    color-scheme:dark;
+  } }
+  :root[data-theme="dark"] {
+    --bg:#0F1216; --card:#171B21; --card2:#1E232B;
+    --ink:#E8ECF2; --ink2:#C3CAD5; --muted:#98A2B3;
+    --line:#2A313B; --line2:#3A434F; --border-in:#5F6B7A;
+    --accent:#7CB4EA; --accent-soft:#1A2A3B; --on-accent:#0D1319;
+    --await:#F0B35E; --await-soft:#2F2415;
+    --live:#6FD0CF;  --live-soft:#123232;
+    --human:#F08B93; --human-soft:#33191C;
+    --done:#7BCB9F;  --done-soft:#15291E;
+    --off:#98A2B3;   --off-soft:#232A33;
+    --on-human:#1A0B0D;
+    color-scheme:dark;
+  }
+
+  * { box-sizing:border-box; }
+  html { height:100%; } body { min-height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans);
+         font-size:15px; line-height:1.5; -webkit-font-smoothing:antialiased;
+         display:flex; flex-direction:column; }
+  a { color:var(--accent); }
+  button { font:inherit; color:inherit; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
+  .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+  .skip { position:absolute; left:8px; top:-40px; background:var(--card); padding:8px 12px; z-index:30; }
+  .skip:focus { top:8px; }
+  .num { font-variant-numeric:tabular-nums; }
+
+  /* ---- buttons: one vocabulary ------------------------------------------ */
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:36px;
+         padding:6px 14px; border-radius:6px; border:1px solid var(--border-in); background:var(--card);
+         color:var(--ink2); font-size:14px; font-weight:500; cursor:pointer; text-decoration:none;
+         white-space:nowrap; }
+  .btn:hover:not([disabled]) { background:var(--card2); border-color:var(--muted); color:var(--ink); }
+  .btn[disabled], .btn[aria-disabled="true"] { opacity:.5; cursor:not-allowed; }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+  .btn.primary:hover:not([disabled]) { background:var(--accent); filter:brightness(1.08); color:var(--on-accent); }
+  .btn.danger { background:var(--human); border-color:var(--human); color:var(--on-human); }
+  .btn.danger:hover:not([disabled]) { background:var(--human); filter:brightness(1.08); color:var(--on-human); }
+  .btn.quiet { border-color:transparent; background:transparent; color:var(--muted); }
+  .btn.quiet:hover:not([disabled]) { color:var(--ink); background:var(--card2); border-color:transparent; }
+  .btn.quiet.warn:hover:not([disabled]) { color:var(--human); }
+  .btn.sm { min-height:30px; padding:3px 10px; font-size:13px; }
+  .btn .kbd { font-family:var(--mono); font-size:11px; opacity:.7; border:1px solid currentColor;
+              border-radius:3px; padding:0 4px; line-height:1.4; }
+
+  /* ---- status bar ------------------------------------------------------- */
+  .topwrap { position:sticky; top:0; z-index:20; }
+  .top { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+         min-height:52px; padding:6px 16px; padding-top:calc(6px + env(safe-area-inset-top, 0px));
+         background:var(--card); border-bottom:1px solid var(--line); }
+  .brand { font-family:var(--mono); font-weight:700; font-size:17px; letter-spacing:-.01em; text-decoration:none; color:var(--ink); }
+  .brand b { color:var(--accent); font-weight:700; }
+  .pulse { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink2); min-width:0; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--done); flex:none; box-shadow:0 0 0 3px var(--done-soft); }
+  .dot.warn { background:var(--await); box-shadow:0 0 0 3px var(--await-soft); }
+  .dot.bad { background:var(--human); box-shadow:0 0 0 3px var(--human-soft); }
+  .dot.off { background:var(--off); box-shadow:0 0 0 3px var(--off-soft); }
+  .pulse .sub { color:var(--muted); font-size:12.5px; }
+  .counts { font-size:13px; color:var(--muted); }
+  .counts b { color:var(--ink); font-weight:600; }
+  .counts b.hot { color:var(--await); }
+  .top-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+
+  .banners { }
+  .banner { display:flex; gap:10px; align-items:flex-start; padding:10px 16px; font-size:14px;
+            background:var(--human-soft); color:var(--human); border-bottom:1px solid currentColor; }
+  .banner.warn { background:var(--await-soft); color:var(--await); }
+  .banner.info { background:var(--live-soft); color:var(--live); }
+  .banner code { font-family:var(--mono); font-size:12.5px; background:rgba(0,0,0,.06); padding:1px 5px; border-radius:3px; }
+
+  /* ---- two panes -------------------------------------------------------- */
+  .app { flex:1; display:grid; grid-template-columns:minmax(300px, 360px) minmax(0, 1fr); min-height:0; }
+  .rail { border-right:1px solid var(--line); background:var(--card); display:flex; flex-direction:column; min-height:0;
+          height:calc(100vh - var(--bar-h)); position:sticky; top:var(--bar-h); }
+  .rail-tools { padding:10px 12px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; }
+  .rail-tools input { flex:1; min-width:0; font:inherit; font-size:14px; padding:6px 10px; border-radius:6px;
+                      border:1px solid var(--border-in); background:var(--card); color:var(--ink); }
+  .rail-tools.file { padding-top:0; }
+  .rail-list { flex:1; overflow-y:auto; padding:6px 0 24px; }
+  .grp { margin-top:8px; }
+  h2.grp-hh { margin:0; font:inherit; }
+  .grp-h { display:flex; align-items:center; gap:8px; width:100%; min-height:36px; padding:4px 12px 4px 10px;
+           background:none; border:0; text-align:left; cursor:pointer; color:var(--muted);
+           font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  .grp-h:hover { color:var(--ink); }
+  .grp-h .n { font-variant-numeric:tabular-nums; color:var(--ink2); background:var(--card2); border-radius:10px;
+              padding:0 7px; font-weight:600; letter-spacing:0; }
+  .grp-h .fold { width:10px; color:var(--muted); font-size:10px; text-align:center; }
+  .grp-h .split { text-transform:none; letter-spacing:0; font-weight:400; margin-left:auto; }
+  .grp.folded .rows { display:none; }
+  .sub-h { padding:8px 12px 2px 28px; color:var(--muted); font-size:11.5px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  .row { display:grid; grid-template-columns:4px 1fr auto; gap:2px 10px; width:100%; padding:9px 12px 9px 10px;
+         border:0; border-top:1px solid var(--line); background:none; text-align:left; cursor:pointer; color:inherit; }
+  .grp .rows .row:first-child { border-top:0; }
+  .row:hover { background:var(--card2); }
+  .row.sel { background:var(--accent-soft); }
+  .row:focus-visible { outline-offset:-2px; }
+  .row .bar { grid-row:1 / span 2; border-radius:2px; background:var(--off); }
+  .row .bar.awaiting_approval, .row .bar.needs_review { background:var(--await); }
+  .row .bar.investigating, .row .bar.approved, .row .bar.posting { background:var(--live); }
+  .row .bar.needs_human { background:var(--human); }
+  .row .bar.posted { background:var(--done); }
+  .row .t { font-weight:600; font-size:14px; line-height:1.35; color:var(--ink);
+            display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+  .row .m { grid-column:2 / span 2; font-size:12.5px; color:var(--muted); display:flex; flex-wrap:wrap; gap:2px 6px; align-items:center; }
+  .row .m .ch { color:var(--ink2); }
+  .row .side { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+  .pip { display:inline-block; width:34px; height:5px; border-radius:3px; background:var(--line2); overflow:hidden; vertical-align:middle; }
+  .pip i { display:block; height:100%; background:var(--accent); }
+  .pip.lo i { background:var(--await); }
+  .tag { display:inline-block; font-size:11px; font-weight:600; letter-spacing:.02em; padding:1px 6px; border-radius:4px;
+         background:var(--off-soft); color:var(--off); white-space:nowrap; }
+  .tag.new { background:var(--await-soft); color:var(--await); }
+  .tag.run { background:var(--live-soft); color:var(--live); }
+  .tag.ok { background:var(--done-soft); color:var(--done); }
+  .tag.bad { background:var(--human-soft); color:var(--human); }
+  .rail-empty { padding:24px 16px; color:var(--muted); font-size:14px; }
+
+  /* ---- detail pane ------------------------------------------------------ */
+  .detail { min-width:0; padding:0 24px 24px; }
+  .detail:focus { outline:none; }
+  .detail-in { max-width:860px; }
+  .back { display:none; margin:12px 0 0 -8px; }
+  .dhead { padding:20px 0 12px; border-bottom:1px solid var(--line); }
+  .dhead .line { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; }
+  .dhead h1 { font-size:20px; line-height:1.3; font-weight:650; margin:8px 0 6px; overflow-wrap:anywhere; }
+  .dhead .meta { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:13.5px; color:var(--muted); }
+  .dhead .meta b { color:var(--ink2); font-weight:500; }
+  .dhead .links { display:flex; gap:8px; flex-wrap:wrap; margin-left:auto; }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; letter-spacing:.03em;
+          text-transform:uppercase; padding:3px 9px; border-radius:5px; background:var(--off-soft); color:var(--off); white-space:nowrap; }
+  .chip i { width:6px; height:6px; border-radius:50%; background:currentColor; }
+  .chip.awaiting_approval, .chip.needs_review { background:var(--await-soft); color:var(--await); }
+  .chip.investigating, .chip.approved, .chip.posting { background:var(--live-soft); color:var(--live); }
+  .chip.needs_human { background:var(--human-soft); color:var(--human); }
+  .chip.posted { background:var(--done-soft); color:var(--done); }
+
+  .notice { display:flex; gap:10px; align-items:flex-start; margin-top:12px; padding:10px 14px; border-radius:8px; font-size:14px;
+            background:var(--await-soft); color:var(--await); border:1px solid color-mix(in srgb, currentColor 35%, transparent); }
+  .notice.ok { background:var(--done-soft); color:var(--done); }
+  .notice.info { background:var(--live-soft); color:var(--live); }
+  .notice.bad { background:var(--human-soft); color:var(--human); }
+  .notice.plain { background:var(--card2); color:var(--ink2); border-color:var(--line); }
+  .notice a { color:inherit; }
+  .notice .mono { font-family:var(--mono); font-size:12.5px; overflow-wrap:anywhere; }
+  .notice .btn { margin-left:auto; flex:none; }
+
+  .sec { margin-top:22px; }
+  .sec-h { display:flex; align-items:baseline; gap:10px; margin:0 0 8px; }
+  .sec-h h2 { font-size:12.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:0; }
+  .sec-h .hint { font-size:12.5px; color:var(--muted); }
+  .sec-h .right { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); }
+
+  /* reply: a rendered preview that toggles to a textarea, never both */
+  .reply .prev { padding:14px 16px; font-size:15px; line-height:1.6; overflow-wrap:anywhere; }
+  .reply .prev p { margin:0 0 .8em; } .reply .prev p:last-child { margin-bottom:0; }
+  .reply .prev code, .msg code, .md code { font-family:var(--mono); font-size:.88em; background:var(--card2); border:1px solid var(--line);
+                                            padding:0 4px; border-radius:3px; }
+  .reply .prev pre, .msg pre, .md pre { font-family:var(--mono); font-size:12.5px; background:var(--card2); border:1px solid var(--line);
+                                         border-radius:6px; padding:10px 12px; overflow-x:auto; white-space:pre-wrap; margin:.6em 0; }
+  .reply .prev .bcast, .msg .bcast { color:var(--human); font-weight:600; background:var(--human-soft); padding:0 3px; border-radius:3px; }
+  .reply textarea { display:block; width:100%; min-height:220px; padding:14px 16px; border:0; border-radius:8px; resize:vertical;
+                    font-family:var(--mono); font-size:13.5px; line-height:1.55; color:var(--ink); background:var(--card); }
+  .reply textarea:focus-visible { outline-offset:-2px; }
+  @media (pointer:coarse) { .reply textarea { font-family:var(--sans); font-size:16px; } }
+  .reply .foot { display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; padding:8px 14px; border-top:1px solid var(--line);
+                 font-size:12.5px; color:var(--muted); background:var(--card2); border-radius:0 0 8px 8px; }
+  .reply .foot .over { color:var(--human); font-weight:600; }
+  .reply .foot .edited { color:var(--await); font-weight:600; }
+  .reply .adv.soft { color:var(--muted); }
+  .reply .foot .right { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .reply .adv { color:var(--human); font-size:12.5px; }
+  .reply.ro .prev { color:var(--ink2); }
+
+  /* action bar: sticky to the bottom of the pane while the reply is long */
+  .actbar { position:sticky; bottom:0; margin-top:16px; padding:10px 0 calc(10px + env(safe-area-inset-bottom, 0px));
+            background:var(--bg); border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .actbar .right { margin-left:auto; display:flex; gap:8px; }
+  .actbar .primary .kbd { border-color:rgba(255,255,255,.5); }
+  .arm { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; width:100%; padding:10px 14px; border-radius:8px;
+         background:var(--human-soft); color:var(--human); border:1px solid currentColor; font-size:14px; }
+  .arm .dest { flex:1; min-width:200px; }
+  .arm .dest b { font-weight:700; }
+  .arm .dest small { display:block; color:var(--human); opacity:.85; font-size:12.5px; }
+
+  .box { width:100%; padding:12px 14px; }
+  .box label { display:block; font-size:13.5px; font-weight:600; color:var(--ink2); margin-bottom:6px; }
+  .box .why { font-size:12.5px; color:var(--muted); margin:-2px 0 8px; }
+  .box textarea { display:block; width:100%; min-height:72px; font:inherit; font-size:14px; line-height:1.5; padding:8px 10px;
+                  border:1px solid var(--border-in); border-radius:6px; background:var(--card); color:var(--ink); resize:vertical; }
+  @media (pointer:coarse) {
+    .box textarea, .rail-tools input { font-size:16px; }
+    .rail-tools input { padding:8px 10px; }
+    .btn.sm, .chipbtn { min-height:36px; }
+  }
+  .box .acts { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; align-items:center; }
+  .box select { display:block; max-width:100%; font:inherit; font-size:14px; padding:6px 8px; margin:0 0 10px;
+                border:1px solid var(--border-in); border-radius:6px; background:var(--card); color:var(--ink); }
+  @media (pointer:coarse) { .box select { font-size:16px; } }
+
+  /* fix: the side track from an investigation to a draft PR */
+  .fixcard .fixline { display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; padding:12px 16px; font-size:14px; }
+  .fixcard .fixline .mono { font-family:var(--mono); font-size:12.5px; color:var(--muted); overflow-wrap:anywhere; }
+  .fixcard .fixline .right { margin-left:auto; display:flex; gap:8px; }
+  .fixcard .md { border-top:1px solid var(--line); }
+  .fixcard .warn { padding:8px 16px; border-top:1px solid var(--line); font-size:13px; color:var(--human); }
+
+  /* thread */
+  .thread .msg { display:grid; grid-template-columns:1fr; gap:2px; padding:10px 14px; border-top:1px solid var(--line); }
+  .thread .msg:first-child { border-top:0; }
+  .thread .msg .who { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; font-size:12.5px; color:var(--muted); }
+  .thread .msg .who b { color:var(--ink2); font-weight:600; }
+  .thread .msg.asker .who b { color:var(--accent); }
+  .thread .msg .txt { font-size:14.5px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .thread .msg.bot .txt { color:var(--muted); font-size:13.5px; }
+  .thread .msg.new { background:var(--await-soft); }
+  .thread .divider { display:flex; align-items:center; gap:10px; padding:4px 14px; font-size:12px; color:var(--await); font-weight:600; }
+  .thread .divider::before, .thread .divider::after { content:""; flex:1; border-top:1px dashed var(--await); opacity:.6; }
+  .thread .more { width:100%; border:0; border-bottom:1px solid var(--line); background:var(--card2); padding:8px; font-size:13px;
+                  color:var(--accent); cursor:pointer; border-radius:8px 8px 0 0; }
+
+  /* why: reasoning, evidence, missing */
+  .md { padding:14px 16px; font-size:14.5px; line-height:1.6; overflow-wrap:anywhere; }
+  .md p { margin:0 0 .8em; } .md p:last-child, .md ul:last-child, .md ol:last-child { margin-bottom:0; }
+  .md h4 { font-size:14px; margin:1em 0 .4em; color:var(--ink); } .md h4:first-child { margin-top:0; }
+  .md ul, .md ol { margin:0 0 .8em; padding-left:22px; } .md li { margin:.2em 0; }
+  .md.clamp { max-height:280px; overflow:hidden; position:relative; }
+  .md.clamp::after { content:""; position:absolute; left:0; right:0; bottom:0; height:64px;
+                     background:linear-gradient(to bottom, transparent, var(--card)); }
+  .more-md { width:100%; border:0; border-top:1px solid var(--line); background:var(--card2); padding:8px; font-size:13px;
+             color:var(--accent); cursor:pointer; border-radius:0 0 8px 8px; }
+  ul.ev { list-style:none; margin:0; padding:6px 0; }
+  ul.ev li { display:grid; gap:2px; padding:8px 14px; border-top:1px solid var(--line); }
+  ul.ev li:first-child { border-top:0; }
+  ul.ev .anchor { font-family:var(--mono); font-size:12.5px; color:var(--accent); overflow-wrap:anywhere; }
+  ul.ev .note { font-size:13.5px; color:var(--ink2); line-height:1.5; }
+  ul.miss { margin:0; padding:10px 14px 10px 32px; font-size:14px; line-height:1.5; color:var(--ink2); }
+  ul.miss li { margin:3px 0; }
+  .facts { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:1px; background:var(--line); border-radius:8px; overflow:hidden; }
+  .facts div { background:var(--card); padding:10px 14px; }
+  .facts b { display:block; font-size:15px; font-weight:600; color:var(--ink); }
+  .facts span { font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+
+  /* history */
+  details.hist { margin-top:22px; }
+  details.hist > summary { cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px; min-height:36px;
+                            font-size:12.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  details.hist > summary::-webkit-details-marker { display:none; }
+  details.hist > summary::before { content:"▸"; font-size:11px; width:10px; }
+  details.hist[open] > summary::before { content:"▾"; }
+  details.hist > summary:hover { color:var(--ink); }
+  table.tbl { width:100%; min-width:480px; border-collapse:collapse; font-size:13.5px; }
+  table.tbl th { text-align:left; font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600;
+                 padding:8px 12px; border-bottom:1px solid var(--line); }
+  table.tbl td { padding:8px 12px; border-top:1px solid var(--line); vertical-align:top; }
+  table.tbl tr:first-child td { border-top:0; }
+  table.tbl .mono { font-family:var(--mono); font-size:12.5px; white-space:nowrap; }
+  .tl { list-style:none; margin:0; padding:6px 0; }
+  .tl li { display:grid; grid-template-columns:64px 1fr; gap:12px; padding:6px 14px; font-size:13.5px; border-top:1px solid var(--line); }
+  .tl li:first-child { border-top:0; }
+  .tl .when { font-family:var(--mono); font-size:12px; color:var(--muted); padding-top:2px; }
+  .tl .what b { font-weight:600; }
+  .tl .what .r { color:var(--muted); }
+  pre.raw { font-family:var(--mono); font-size:12.5px; line-height:1.5; margin:0; padding:12px 14px; white-space:pre-wrap; overflow-wrap:anywhere;
+            max-height:420px; overflow:auto; }
+
+  /* empty state + triage log */
+  .empty { margin-top:24px; padding:24px; }
+  .empty h1 { font-size:18px; margin:0 0 6px; }
+  .empty p { margin:6px 0; color:var(--ink2); }
+  .empty .keys { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin-top:16px; font-size:13.5px; color:var(--muted); }
+  .empty kbd { font-family:var(--mono); font-size:12px; border:1px solid var(--line2); border-radius:4px; padding:0 6px; color:var(--ink2); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chipbtn { border:1px solid var(--border-in); background:var(--card); border-radius:14px; padding:3px 11px; font-size:13px;
+             color:var(--ink2); cursor:pointer; min-height:30px; }
+  .chipbtn[aria-pressed="true"] { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .tblwrap { overflow-x:auto; }
+  .seen-why { overflow-wrap:break-word; }
+
+  /* toasts */
+  /* Under the header, where nothing interactive lives — never over the action bar. */
+  .toasts { position:fixed; left:50%; top:calc(var(--bar-h) + 12px); transform:translateX(-50%); z-index:40;
+            display:flex; flex-direction:column; gap:8px; width:min(520px, calc(100vw - 32px)); pointer-events:none; }
+  .toast { pointer-events:none; display:flex; gap:10px; align-items:center; padding:8px 8px 8px 14px; border-radius:8px; font-size:14px;
+           background:var(--ink); color:var(--bg); box-shadow:0 6px 24px rgba(0,0,0,.25); }
+  .toast.bad { background:var(--human); color:var(--on-human); }
+  .toast button { pointer-events:auto; margin-left:auto; flex:none; min-width:32px; min-height:32px; display:inline-flex; align-items:center;
+                  justify-content:center; background:none; border:0; border-radius:6px; color:inherit; opacity:.75; cursor:pointer; font-size:18px; line-height:1; }
+  .toast button:hover { opacity:1; background:rgba(255,255,255,.12); }
+
+  /* ---- phone: one screen at a time --------------------------------------- */
+  @media (max-width: 879px) {
+    .app { grid-template-columns:1fr; }
+    .rail { position:static; height:auto; border-right:0; }
+    .rail-list { overflow:visible; }
+    .detail { padding:0 16px 16px; }
+    .back { display:inline-flex; }
+    body[data-view="queue"] .detail, body[data-view="queue"] .banners.detail-only { display:none; }
+    body[data-view="detail"] .rail { display:none; }
+    .top { gap:8px 12px; }
+    .counts { display:none; }
+    .dhead .links { margin-left:0; }
+    .actbar .btn { flex:1 1 auto; }
+    .actbar .right { margin-left:0; flex:1 1 100%; }
+    .actbar .right .btn { flex:1; }
+    /* Only the header stays pinned on a phone; a banner is read once and scrolls away. */
+    .topwrap { position:static; }
+    .top { position:sticky; top:0; z-index:20; }
+    body[data-view="queue"] .skip { display:none; }
+    .facts { grid-template-columns:repeat(2, 1fr); }
+    .tl li { grid-template-columns:52px 1fr; }
+  }
+  @media (max-width: 480px) {
+    .top .pulse .sub { display:none; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
+</style>
+</head>
+<body data-view="queue">
+<a class="skip" href="#detail" id="skip">Skip to the selected investigation</a>
+
+<div class="topwrap">
+<header class="top" role="banner">
+  <a class="brand" href="#" id="brand">ralph<b>/</b>queue</a>
+  <div class="pulse" id="pulse">
+    <i class="dot off" id="dot" aria-hidden="true"></i><span id="pulse-text" role="status" aria-live="polite">connecting…</span><span class="sub" id="pulse-sub"></span>
+  </div>
+  <div class="counts" id="counts"></div>
+  <nav class="top-actions" aria-label="Controls">
+    <a class="btn sm quiet" href="#seen" id="nav-seen">Triage log</a>
+    <button class="btn sm" id="tick" type="button">Tick now</button>
+    <button class="btn sm" id="pause" type="button" aria-pressed="false">Pause</button>
+  </nav>
+</header>
+<div class="banners" id="banners"></div>
+</div>
+
+<div class="app">
+  <nav class="rail" id="rail" aria-label="Queue">
+    <div class="rail-tools">
+      <input type="search" id="search" placeholder="Filter by topic, channel, asker…" aria-label="Filter the queue" autocomplete="off">
+    </div>
+    <form class="rail-tools file" id="file-form">
+      <input type="url" id="file-link" placeholder="Paste a Slack link to file it…" aria-label="File a Slack thread by hand, from a message link" autocomplete="off">
+      <button class="btn sm" id="file-go" type="submit">File</button>
+    </form>
+    <div class="rail-list" id="rail-list"><div class="rail-empty">Loading…</div></div>
+  </nav>
+  <main class="detail" id="detail" tabindex="-1" aria-live="off"></main>
+</div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TTYD = "__RALPH_TTYD__";
+  var TERMINAL = ["posted", "rejected", "superseded", "closed"];
+  var DRAFT_STATES = ["awaiting_approval", "needs_review"];
+  var LABEL = { awaiting_approval: "Awaiting you", needs_review: "Held for review", approved: "Approved, sending",
+                posting: "Mid-send", investigating: "Investigating", needs_human: "Needs a human",
+                posted: "Posted", superseded: "Superseded", rejected: "Rejected", closed: "Closed" };
+  var STALE_AFTER = 600;   // seconds without a tick before the page calls it broken
+  var LATE_AFTER = 180;    // seconds before the pulse turns amber
+
+  /* ---- state --------------------------------------------------------------
+     Everything the page shows is derived from S on each render. Per-viewer
+     conveniences (fold state) are the only thing kept in localStorage, and
+     every access is guarded: a private window throws rather than returning null. */
+  var S = {
+    csrf: "__RALPH_CSRF__",
+    queue: null,          // /api/queue payload
+    queueKey: "",         // queue minus the fields that move every tick
+    details: {},          // id -> /api/inv/<id> payload
+    sel: null,            // selected investigation id
+    view: "queue",        // queue | detail | seen  (phone shows one at a time)
+    q: "",                // rail filter text
+    ui: {},               // id -> { mode, box, text, showAll, showWhy, armedAt, pending }
+    edits: {},            // id -> { hash, text }
+    seen: null,           // triage log payload
+    seenVerdict: "",
+    sseOk: true,
+    focusNext: null,      // { row: id } | { detail: true } — consumed by route() after render
+    touched: {},          // id -> true once the operator decided on it this session
+    statuses: {},         // id -> status at the last refresh, for change toasts
+    keys: (function () { try { return localStorage.getItem("ralph.keys") !== "off"; } catch (e) { return true; } })(),
+  };
+  var FOLD_KEY = "ralph.folded";
+  var folded = (function () { try { return JSON.parse(localStorage.getItem(FOLD_KEY)) || {}; } catch (e) { return {}; } })();
+  function isFolded(key) {
+    if (Object.prototype.hasOwnProperty.call(folded, key)) return !!folded[key];
+    return key === "done";
+  }
+  function setFolded(key, v) { folded[key] = v; try { localStorage.setItem(FOLD_KEY, JSON.stringify(folded)); } catch (e) { /* private window */ } }
+  function ui(id) { return S.ui[id] || (S.ui[id] = { mode: "preview", box: null, text: {}, showAll: false, showWhy: false, showHist: false, armedAt: 0, armedSeq: null, focusConfirm: false, needKeyUp: false, pending: null }); }
+  function hide(text) { var sp = el("span", null, text); sp.setAttribute("aria-hidden", "true"); return sp; }
+  function withArrow(label, arrow, before) { var f = frag([]); if (before) { f.appendChild(hide(arrow + " ")); f.appendChild(document.createTextNode(label)); } else { f.appendChild(document.createTextNode(label + " ")); f.appendChild(hide(arrow)); } return f; }
+
+  /* ---- small helpers ---------------------------------------------------- */
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+  function frag(nodes) { var f = document.createDocumentFragment(); nodes.forEach(function (n) { if (n) f.appendChild(n); }); return f; }
+  function mk(label, cls, fn, attrs) {
+    var b = el("button", cls, label); b.type = "button";
+    if (fn) b.addEventListener("click", fn);
+    if (attrs) Object.keys(attrs).forEach(function (k) { b.setAttribute(k, attrs[k]); });
+    return b;
+  }
+  function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
+  // Slack ships text with &amp; &lt; &gt; already escaped. Decode ONLY Slack-sourced
+  // strings (question, thread, triage log) before escaping for HTML, never the draft:
+  // the draft is agent output and goes out byte-for-byte after the sanitizer.
+  function unslack(s) { return String(s == null ? "" : s).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"); }
+  function ago(stamp, now) {
+    if (!stamp) return "?";
+    var t = typeof stamp === "number" ? stamp * 1000 : Date.parse(stamp);
+    if (isNaN(t)) return "?";
+    var secs = Math.max(0, ((now || Date.now()) - t) / 1000);
+    if (secs < 60) return Math.round(secs) + "s";
+    if (secs < 5400) return Math.round(secs / 60) + "m";
+    if (secs < 172800) return Math.round(secs / 3600) + "h";
+    return Math.round(secs / 86400) + "d";
+  }
+  function fmtTime(stamp) {
+    var t = typeof stamp === "number" ? stamp * 1000 : Date.parse(stamp);
+    if (isNaN(t)) return String(stamp || "");
+    var d = new Date(t), today = new Date();
+    var hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() === today.toDateString()) return hm;
+    return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + hm;
+  }
+  function money(x) { return "$" + Number(x || 0).toFixed(2); }
+  function tsOf(id) { var p = String(id).split("-"); return p.length > 1 ? parseFloat(p[1].replace("_", ".")) : 0; }
+  function askedAt(meta) { var t = parseFloat(meta.thread_ts || "0"); return t ? t : (meta.created_at ? Date.parse(meta.created_at) / 1000 : 0); }
+  function shortModel(m) { return String(m || "").replace(/^claude-/, "").replace(/-\d{8}$/, ""); }
+  function num(n) { return Number(n || 0).toLocaleString(); }
+
+  /* Slack mrkdwn -> HTML. Used for the reply preview and for thread messages.
+     Escapes first; emits only strong/em/s/code/pre/a/br. Broadcast forms are
+     shown red because the sanitizer will refuse them. */
+  function mrkdwn(src) {
+    var blocks = [], SEP = "␞";
+    var s = esc(src).replace(/```([\s\S]*?)```/g, function (m, code) {
+      blocks.push(code.replace(/^\n/, "").replace(/\n$/, "")); return SEP + (blocks.length - 1) + SEP;
+    });
+    s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>")
+         .replace(/(^|[\s(])\*(\S(?:[^*\n]*?\S)?)\*(?=$|[\s).,!?;:'"])/gm, "$1<strong>$2</strong>")
+         .replace(/(^|[\s(])_(\S(?:[^_\n]*?\S)?)_(?=$|[\s).,!?;:'"])/gm, "$1<em>$2</em>")
+         .replace(/(^|[\s(])~(\S(?:[^~\n]*?\S)?)~(?=$|[\s).,!?;:'"])/gm, "$1<s>$2</s>")
+         .replace(/&lt;!(here|channel|everyone)(\|[^&]*)?&gt;/g, '<span class="bcast">@$1</span>')
+         .replace(/&lt;!subteam\^[^&]*&gt;/g, '<span class="bcast">@group</span>')
+         .replace(/&lt;@([UW][A-Z0-9]+)(\|([^&]*))?&gt;/g, function (m, id, _p, name) { return "@" + (name || id); })
+         .replace(/&lt;#[A-Z0-9]+\|([^&]*)&gt;/g, "#$1")
+         .replace(/&lt;(https?:\/\/[^|&\s]+)\|([^&<>]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener">$2</a>')
+         .replace(/&lt;(https?:\/\/[^|&\s]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
+         .replace(/(^|\n)\n+/g, "$1<br>").replace(/\n/g, "<br>");
+    return s.replace(new RegExp(SEP + "(\\d+)" + SEP, "g"), function (m, i) { return "<pre>" + blocks[+i] + "</pre>"; });
+  }
+  /* Light markdown for notes.md / summary_md. Escapes first and emits only
+     h4/p/ul/ol/li/strong/em/code/pre/br — no links and no raw HTML, because
+     notes quote customer-controlled thread text. */
+  function md(src) {
+    var lines = esc(src).replace(/\r/g, "").split("\n"), out = [], para = [], list = null, code = null;
+    function inline(t) {
+      return t.replace(/`([^`]+)`/g, "<code>$1</code>")
+              .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+              .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<strong>$2</strong>")
+              .replace(/(^|[\s(])_([^_\n]+)_/g, "$1<em>$2</em>");
+    }
+    function flushP() { if (para.length) { out.push("<p>" + inline(para.join(" ")) + "</p>"); para = []; } }
+    function flushL() { if (list) { out.push("<" + list.tag + ">" + list.items.map(function (i) { return "<li>" + inline(i) + "</li>"; }).join("") + "</" + list.tag + ">"); list = null; } }
+    lines.forEach(function (ln) {
+      if (code !== null) { if (/^```/.test(ln)) { out.push("<pre>" + code.join("\n") + "</pre>"); code = null; } else code.push(ln); return; }
+      if (/^```/.test(ln)) { flushP(); flushL(); code = []; return; }
+      var h = /^#{1,6}\s+(.*)$/.exec(ln), ul = /^\s*[-*•]\s+(.*)$/.exec(ln), ol = /^\s*\d+[.)]\s+(.*)$/.exec(ln);
+      if (h) { flushP(); flushL(); out.push("<h4>" + inline(h[1]) + "</h4>"); return; }
+      if (ul || ol) { flushP(); var tag = ul ? "ul" : "ol"; if (!list || list.tag !== tag) { flushL(); list = { tag: tag, items: [] }; } list.items.push((ul || ol)[1]); return; }
+      if (!ln.trim()) { flushP(); flushL(); return; }
+      if (list && /^\s{2,}/.test(ln)) { list.items[list.items.length - 1] += " " + ln.trim(); return; }
+      flushL(); para.push(ln.trim());
+    });
+    if (code !== null) out.push("<pre>" + code.join("\n") + "</pre>");
+    flushP(); flushL();
+    return out.join("");
+  }
+
+  /* ---- backend ------------------------------------------------------------
+     Every network call goes through here so the artifact build (§10.4) swaps one
+     object. The CSRF token is re-read from every queue payload: `ralph web`
+     mints a new one per process, and a tab left open across a restart would
+     otherwise have every POST refused. */
+  var Backend = {
+    call: function (path, opts) {
+      opts = opts || {};
+      opts.headers = Object.assign({ "X-Ralph-CSRF": S.csrf, "Content-Type": "application/json" }, opts.headers || {});
+      return fetch(path, opts).then(function (r) {
+        return r.json().catch(function () { return { ok: false, error: "HTTP " + r.status }; });
+      }).catch(function (e) { return { ok: false, error: "network: " + (e && e.message || e) }; });
+    },
+    queue: function () { return Backend.call("/api/queue").then(function (q) { if (q && q.csrf) S.csrf = q.csrf; return q; }); },
+    detail: function (id) { return Backend.call("/api/inv/" + encodeURIComponent(id)); },
+    decide: function (id, payload) { return Backend.call("/api/inv/" + encodeURIComponent(id) + "/decide", { method: "POST", body: JSON.stringify(payload) }); },
+    rerun: function (id) { return Backend.call("/api/inv/" + encodeURIComponent(id) + "/rerun", { method: "POST", body: "{}" }); },
+    fix: function (id, repo, note) { return Backend.call("/api/inv/" + encodeURIComponent(id) + "/fix", { method: "POST", body: JSON.stringify({ repo: repo, note: note }) }); },
+    reopen: function (id, reason) { return Backend.call("/api/inv/" + encodeURIComponent(id) + "/reopen", { method: "POST", body: JSON.stringify({ reason: reason }) }); },
+    pause: function (on) { return Backend.call("/api/pause", { method: "POST", body: JSON.stringify({ paused: on }) }); },
+    tick: function () { return Backend.call("/api/tick", { method: "POST", body: "{}" }); },
+    open: function (link) { return Backend.call("/api/open", { method: "POST", body: JSON.stringify({ link: link }) }); },
+    seen: function (verdict, all) { return Backend.call("/api/seen?limit=300&verdict=" + encodeURIComponent(verdict || "") + "&all=" + (all ? 1 : 0)); },
+  };
+
+  /* ---- routing: #inv/<id> · #seen · (nothing) ------------------------------ */
+  function route() {
+    var h = location.hash || "", before = S.view + "|" + S.sel;
+    var m = /^#inv\/(.+)$/.exec(h);
+    if (m) { try { S.sel = decodeURIComponent(m[1]); } catch (e) { S.sel = m[1]; } S.view = "detail"; }
+    else if (h === "#seen") { S.view = "seen"; if (!S.seen) loadSeen(); }
+    else { S.view = "queue"; }
+    document.body.setAttribute("data-view", S.view === "queue" ? "queue" : "detail");
+    if (S.sel && !S.details[S.sel]) loadDetail(S.sel);
+    Object.keys(S.ui).forEach(function (k) { S.ui[k].armedAt = 0; });   // a route change disarms
+    render();
+    var moved = before !== S.view + "|" + S.sel;
+    if (moved) window.scrollTo(0, 0);
+    var fn = S.focusNext; S.focusNext = null;
+    if (fn && fn.row) focusRow(fn.row);
+    else if ((fn && fn.detail) || (moved && S.view === "detail")) focusDetail();
+  }
+  function focusRow(id) { var r = document.querySelector('#rail-list .row[data-id="' + cssEsc(id) + '"]'); if (r) r.focus({ preventScroll: true }); return !!r; }
+  function focusDetail() { var d = document.getElementById("detail"); if (d) d.focus({ preventScroll: true }); }
+  function cssEsc(v) { return (window.CSS && CSS.escape) ? CSS.escape(v) : String(v).replace(/["\\]/g, "\\$&"); }
+  function goto(id) { location.hash = id ? "#inv/" + encodeURIComponent(id) : ""; }
+  function metaOf(id) {
+    if (!S.queue) return null;
+    for (var i = 0; i < S.queue.groups.length; i++) {
+      var items = S.queue.groups[i].items;
+      for (var j = 0; j < items.length; j++) if (items[j].id === id) return items[j];
+    }
+    return null;
+  }
+
+  /* ---- header: pulse, counts, banners --------------------------------------- */
+  function staleSecs() {
+    if (!S.queue || !S.queue.heartbeat || !S.queue.heartbeat.last_tick_at) return -1;
+    // Recomputed from the wall clock, not from the payload: the whole point of
+    // the red banner is to appear when nothing else on the page is changing.
+    var t = Date.parse(S.queue.heartbeat.last_tick_at);
+    return isNaN(t) ? -1 : (Date.now() - t) / 1000;
+  }
+  function renderHeader() {
+    var q = S.queue; if (!q) return;
+    var stale = staleSecs(), bad = stale < 0 || stale > STALE_AFTER, late = !bad && stale > LATE_AFTER;
+    var dot = document.getElementById("dot");
+    dot.className = "dot" + (!S.sseOk ? " off" : bad ? " bad" : q.paused ? " warn" : late ? " warn" : "");
+    // Live regions are only touched when the words change: a status that is
+    // re-set every 30s is re-announced every 30s.
+    setText(document.getElementById("pulse-text"),
+      (bad ? "not ticking" : q.paused ? "paused" : late ? "tick is late" : "ticking") + (S.sseOk ? "" : " · live updates lost, retrying"));
+    setText(document.getElementById("pulse-sub"),
+      stale >= 0 ? "last tick " + ago(q.heartbeat.last_tick_at) + " ago" : "no tick recorded");
+
+    var counts = {}, live = 0;
+    q.groups.forEach(function (g) { counts[g.key] = g.items.length; if (TERMINAL.indexOf(g.key) === -1) live += g.items.length; });
+    var awaiting = (counts.awaiting_approval || 0) + (counts.needs_review || 0);
+    var c = document.getElementById("counts");
+    c.innerHTML = "<b class='" + (awaiting ? "hot" : "") + "'>" + awaiting + "</b> awaiting you · <b>" + live
+      + "</b> live · <b>" + num(q.budget.runs) + "</b> " + (q.budget.runs === 1 ? "run" : "runs") + " today · <b>" + money(q.budget.cost_usd) + "</b>";
+    document.title = (awaiting ? "(" + awaiting + ") " : "") + "ralph";
+
+    var pause = document.getElementById("pause");
+    if (!(typeof resumeArmed === "number" && resumeArmed)) pause.textContent = q.paused ? "Resume" : "Pause";
+    pause.setAttribute("aria-pressed", String(!!q.paused));
+    var tick = document.getElementById("tick");
+    if (!tick.dataset.busy) { tick.disabled = !!q.paused; tick.title = q.paused ? "Resume first — the tick exits at line 1 while paused" : "Poll Slack now instead of waiting for the timer"; }
+
+    // Banners are keyed on state and only added or removed when it flips, so a
+    // role=alert node is announced once per outage, not once per render.
+    var b = document.getElementById("banners");
+    var stuck = b.querySelector(".banner.stale"), paused = b.querySelector(".banner.paused");
+    if (bad && !stuck) {
+      var n = el("div", "banner stale"); n.setAttribute("role", "alert");
+      n.innerHTML = "<div><b>ralph is not ticking.</b> Nothing new is being read or investigated. Approvals still post from here, but "
+        + "the thread is not being watched. Check <code>systemctl --user status ralph-tick.timer</code> or press Tick now.</div>";
+      b.insertBefore(n, b.firstChild);
+    } else if (!bad && stuck) stuck.remove();
+    if (q.paused && !paused) {
+      var p = el("div", "banner warn paused");
+      p.innerHTML = "<div><b>Paused.</b> Slack is still read so nothing is missed, but no agent runs and nothing posts — "
+        + "an approval made now goes out when you resume.</div>";
+      b.appendChild(p);
+    } else if (!q.paused && paused) paused.remove();
+    if (typeof barHeight === "function") barHeight();
+  }
+  function setText(node, text) { if (node && node.textContent !== text) node.textContent = text; }
+
+  /* ---- rail ------------------------------------------------------------------
+     Rebuilt only when the queue changed in a way that matters (see refresh):
+     a bare heartbeat tick costs no render, so the list never jumps under a
+     cursor for nothing. Scroll position is kept across rebuilds. */
+  function matches(meta) {
+    if (!S.q) return true;
+    var hay = [meta.topic, meta.draft_topic, meta.question, meta.channel_name, meta.asker_name, meta.customer, meta.status].join(" ").toLowerCase();
+    return S.q.split(/\s+/).every(function (w) { return !w || hay.indexOf(w) !== -1; });
+  }
+  function rowBadges(meta) {
+    var out = [];
+    if (meta.running) out.push(el("span", "tag run", "running"));
+    var moved = meta.acted_thread_ts && meta.based_on_ts && parseFloat(meta.acted_thread_ts) > parseFloat(meta.based_on_ts);
+    if (moved && DRAFT_STATES.indexOf(meta.status) !== -1) out.push(el("span", "tag new", "new replies"));
+    if (meta.kind && meta.kind !== "answer" && DRAFT_STATES.indexOf(meta.status) !== -1) out.push(el("span", "tag", meta.kind));
+    if (meta.status === "investigating" && meta.last_decision === "snooze" && meta.next_due_at && Date.parse(meta.next_due_at) > Date.now())
+      out.push(el("span", "tag", "snoozed"));
+    if (meta.status === "posted" && meta.posted && meta.posted.edited_by_human) out.push(el("span", "tag ok", "with your edits"));
+    if (meta.status === "superseded") out.push(el("span", "tag", "teammate answered"));
+    var fx = meta.fix;
+    if (fx && fx.running) out.push(el("span", "tag run", "fixing"));
+    else if (fx && fx.pr_url && fx.pr_state !== "CLOSED") out.push(el("span", "tag ok", fx.pr_state === "MERGED" ? "PR merged" : "draft PR"));
+    else if (fx && (fx.status === "failed" || fx.status === "killed" || fx.status === "blocked")) out.push(el("span", "tag bad", "fix " + fx.status));
+    if (meta.status === "closed" && meta.last_decision === "close") out.push(el("span", "tag", "closed by hand"));
+    return out;
+  }
+  function row(meta) {
+    var r = mk("", "row" + (meta.id === S.sel ? " sel" : ""), function () { goto(meta.id); });
+    r.dataset.id = meta.id;
+    r.setAttribute("aria-current", meta.id === S.sel ? "true" : "false");
+    r.appendChild(el("i", "bar " + meta.status));
+    var title = meta.draft_topic || meta.topic || unslack(meta.question || "").split("\n")[0] || meta.id;
+    r.appendChild(el("span", "t", title));
+    var side = el("span", "side");
+    if (meta.confidence) {
+      var pip = el("span", "pip" + (meta.confidence < 0.6 ? " lo" : "")), fill = el("i");
+      fill.style.width = Math.round(meta.confidence * 100) + "%"; pip.appendChild(fill);
+      pip.title = (meta.draft_hash ? "draft" : "triage") + " confidence " + Number(meta.confidence).toFixed(2);
+      side.appendChild(pip);
+    }
+    rowBadges(meta).forEach(function (b) { side.appendChild(b); });
+    r.appendChild(side);
+    var m = el("span", "m");
+    m.appendChild(el("span", "ch", "#" + (meta.channel_name || "?")));
+    if (meta.customer) m.appendChild(el("span", null, "· " + meta.customer));
+    m.appendChild(el("span", null, "· " + (meta.asker_name || "?")));
+    var asked = askedAt(meta), live = TERMINAL.indexOf(meta.status) === -1;
+    var w = el("span", "ago", ageText(live, asked, meta.updated_at)); w.title = fmtTime(asked);
+    w.dataset.live = live ? "1" : ""; w.dataset.asked = String(asked); w.dataset.updated = meta.updated_at || "";
+    m.appendChild(w);
+    r.appendChild(m);
+    return r;
+  }
+  function ageText(live, asked, updated) { return live ? "· asked " + ago(asked) + " ago" : "· " + ago(updated) + " ago"; }
+  function group(g, key, label, extra) {
+    var shut = isFolded(key);
+    var sec = el("section", "grp" + (shut ? " folded" : ""));
+    var h = mk("", "grp-h", function () { setFolded(key, !isFolded(key)); renderRail(); focusGroup(key); }, { "aria-expanded": String(!shut) });
+    h.dataset.key = key;
+    h.appendChild(hide(shut ? "▸" : "▾")).className = "fold";
+    h.appendChild(el("span", null, label));
+    h.appendChild(el("span", "n", String(g.count)));
+    if (extra) h.appendChild(el("span", "split", extra));
+    var hh = el("h2", "grp-hh"); hh.appendChild(h);
+    sec.appendChild(hh);
+    var rows = el("div", "rows");
+    if (!shut) g.build(rows);
+    sec.appendChild(rows);
+    return sec;
+  }
+  function focusGroup(key) { var g = document.querySelector('.grp-h[data-key="' + cssEsc(key) + '"]'); if (g) g.focus({ preventScroll: true }); }
+  function renderRail() {
+    var host = document.getElementById("rail-list"), keep = host.scrollTop;
+    // Whatever in the rail had focus gets it back after the rebuild.
+    var a = document.activeElement, hadRow = a && a.classList && a.classList.contains("row") && host.contains(a) ? a.dataset.id : null;
+    var hadGroup = a && a.classList && a.classList.contains("grp-h") && host.contains(a) ? a.dataset.key : null;
+    host.textContent = "";
+    if (!S.queue) { host.appendChild(el("div", "rail-empty", "Loading…")); return; }
+    var live = [], done = [], shown = 0;
+    S.queue.groups.forEach(function (g) {
+      var items = g.items.filter(matches); shown += items.length;
+      if (!items.length) return;
+      (TERMINAL.indexOf(g.key) === -1 ? live : done).push({ key: g.key, label: LABEL[g.key] || g.label, items: items });
+    });
+    live.forEach(function (g) {
+      host.appendChild(group({ count: g.items.length, build: function (rows) { g.items.forEach(function (m) { rows.appendChild(row(m)); }); } },
+                             g.key, g.label));
+    });
+    if (done.length) {
+      var total = done.reduce(function (n, g) { return n + g.items.length; }, 0);
+      var answered = done.reduce(function (n, g) { return n + (g.key === "posted" ? g.items.length : 0); }, 0);
+      host.appendChild(group({ count: total, build: function (rows) {
+        done.forEach(function (g) {
+          rows.appendChild(el("div", "sub-h", g.label + " · " + g.items.length));
+          g.items.forEach(function (m) { rows.appendChild(row(m)); });
+        });
+      } }, "done", "Done", answered + " answered · " + (total - answered) + " closed"));
+    }
+    if (!shown) host.appendChild(el("div", "rail-empty", S.q ? "Nothing matches “" + S.q + "”."
+      : "Nothing tracked yet. The tick polls Slack every minute; ralph doctor checks the setup."));
+    host.scrollTop = keep;
+    if (hadRow) focusRow(hadRow); else if (hadGroup) focusGroup(hadGroup);
+  }
+  /* The 30s clock re-labels ages in place instead of rebuilding the rail. */
+  function refreshAges() {
+    document.querySelectorAll("#rail-list .ago").forEach(function (w) {
+      setText(w, ageText(!!w.dataset.live, parseFloat(w.dataset.asked) || 0, w.dataset.updated));
+    });
+  }
+  function visibleRows() { return Array.prototype.slice.call(document.querySelectorAll("#rail-list .row")); }
+
+  /* ---- keyboard ------------------------------------------------------------
+     Letters only move focus or open a composer; nothing posts without Enter or
+     a click on the focused button, so a held key cannot confirm anything. */
+  document.addEventListener("keydown", function (e) {
+    if (e.repeat || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
+    var t = e.target, typing = t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable);
+    var narrow = window.innerWidth < 880;
+    if (e.key === "Escape") {
+      if (typing) { t.blur(); return; }
+      if (S.sel && (ui(S.sel).armedAt || ui(S.sel).box)) { ui(S.sel).armedAt = 0; ui(S.sel).box = null; renderDetail(true); focusAct(); return; }
+      if (S.view !== "queue" && narrow) { location.hash = ""; return; }
+      return;
+    }
+    if (typing) return;
+    if (e.key === "Enter" && t && t.classList && t.classList.contains("row")) { S.focusNext = { detail: true }; goto(t.dataset.id); return; }
+    if (!S.keys) return;   // letter shortcuts are switchable off (WCAG 2.1.4)
+    if (e.key === "/") { e.preventDefault(); document.getElementById("search").focus(); return; }
+    if (e.key === "j" || e.key === "k" || e.key === "ArrowDown" || e.key === "ArrowUp") {
+      var rows = visibleRows(); if (!rows.length) return;
+      var i = rows.findIndex(function (r) { return r.dataset.id === S.sel; });
+      var n = (e.key === "j" || e.key === "ArrowDown") ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1);
+      if (i === -1) n = 0;
+      e.preventDefault();
+      var id = rows[n].dataset.id;
+      if (!narrow) { S.focusNext = { row: id }; goto(id); }
+      else if (S.view === "detail") { S.focusNext = { detail: true }; goto(id); }
+      else { S.sel = id; renderRail(); focusRow(id); }
+      return;
+    }
+    // The detail pane is on screen on desktop whatever the route says.
+    var shown = S.sel && S.view !== "seen" && (S.view === "detail" || !narrow);
+    if (!shown) return;
+    if (e.key === "e") { var ed = document.getElementById("edit-" + S.sel); if (ed) { e.preventDefault(); ed.click(); } return; }
+    if (e.key === "a") { var ap = document.getElementById("approve-" + S.sel); if (ap && !ap.disabled) { e.preventDefault(); ap.focus(); } return; }
+    if (e.key === "c") { var ck = document.getElementById("ask-" + S.sel); if (ck) { e.preventDefault(); ck.click(); } return; }
+  });
+  document.getElementById("skip").addEventListener("click", function (e) { e.preventDefault(); focusDetail(); });
+  function focusAct() { var b = document.getElementById("approve-" + S.sel) || document.querySelector("#detail .actbar .btn"); if (b) b.focus(); }
+
+  /* ---- detail pane ------------------------------------------------------------
+     Rebuilt from S on demand. Never while the operator is typing in it: a render
+     that lands mid-word is deferred to blur, and the composer boxes live in
+     S.ui so a rebuild reproduces them with their text. */
+  var pendingDetail = false;
+  function typingInDetail() {
+    var a = document.activeElement;
+    return a && a.tagName === "TEXTAREA" && document.getElementById("detail").contains(a);
+  }
+  function renderDetail(force) {
+    var host = document.getElementById("detail");
+    if (!force && typingInDetail()) { pendingDetail = true; return; }
+    pendingDetail = false;
+    var keepScroll = host.scrollTop, keepY = window.scrollY, active = document.activeElement, focusId = active && host.contains(active) ? active.id : null;
+    var selStart = focusId && active.selectionStart, selEnd = focusId && active.selectionEnd;
+    host.textContent = "";
+    var inner = el("div", "detail-in");
+    if (S.view === "seen") inner.appendChild(seenView());
+    else if (!S.sel) inner.appendChild(emptyView());
+    else {
+      var meta = metaOf(S.sel) || (S.details[S.sel] && S.details[S.sel].meta);
+      if (!meta) inner.appendChild(el("div", "empty card", S.queue ? "No investigation " + S.sel + " — it may have been removed." : "Loading…"));
+      else inner.appendChild(buildDetail(meta, S.details[S.sel]));
+    }
+    host.appendChild(inner);
+    host.scrollTop = keepScroll; window.scrollTo(0, keepY);
+    if (focusId) { var again = document.getElementById(focusId); if (again) { again.focus({ preventScroll: true });
+      if (typeof selStart === "number" && again.setSelectionRange) try { again.setSelectionRange(selStart, selEnd); } catch (e) { /* not a text control */ } } }
+  }
+  document.addEventListener("focusout", function () { if (pendingDetail) setTimeout(function () { if (pendingDetail && !typingInDetail()) renderDetail(); }, 50); });
+
+  function emptyView() {
+    var q = S.queue, c = el("div", "empty card");
+    if (!q) { c.appendChild(el("h1", null, "Loading…")); return c; }
+    var awaiting = 0; if (q) q.groups.forEach(function (g) { if (DRAFT_STATES.indexOf(g.key) !== -1) awaiting += g.items.length; });
+    c.appendChild(el("h1", null, awaiting ? awaiting + (awaiting === 1 ? " reply is" : " replies are") + " waiting for you" : "Nothing is waiting for you"));
+    c.appendChild(el("p", null, q ? num(q.budget.runs) + " agent " + (q.budget.runs === 1 ? "run" : "runs") + " today, " + money(q.budget.cost_usd) + "." : ""));
+    c.appendChild(el("p", null, "Pick an investigation on the left. Approving posts to the customer's thread as you, after a dry run, a freshness check and the sanitizer."));
+    var k = el("div", "keys");
+    [["j / k", "next / previous investigation"], ["Enter", "open"], ["e", "edit the reply"], ["a", "focus Approve (Enter twice to post)"],
+     ["c", "ask for changes"], ["Esc", "cancel, or back to the queue"], ["/", "filter the queue"]].forEach(function (p) {
+      var kb = el("kbd", null, p[0]); k.appendChild(kb); k.appendChild(el("span", null, p[1]));
+    });
+    c.appendChild(k);
+    var tog = mk("Letter shortcuts: " + (S.keys ? "on" : "off"), "btn sm", function () {
+      S.keys = !S.keys; try { localStorage.setItem("ralph.keys", S.keys ? "on" : "off"); } catch (e) { /* private window */ }
+      renderDetail(true); var again = document.getElementById("keys-toggle"); if (again) again.focus();
+    }, { "aria-pressed": String(S.keys) });
+    tog.id = "keys-toggle"; tog.style.marginTop = "14px"; c.appendChild(tog);
+    return c;
+  }
+
+  function sec(title, node, hint, right) {
+    var s = el("section", "sec"), h = el("div", "sec-h");
+    h.appendChild(el("h2", null, title));
+    if (hint) h.appendChild(el("span", "hint", hint));
+    if (right) { var r = el("span", "right"); (Array.isArray(right) ? right : [right]).forEach(function (n) { r.appendChild(n); }); h.appendChild(r); }
+    s.appendChild(h); s.appendChild(node);
+    return s;
+  }
+  function notice(kind, html, action) {
+    var n = el("div", "notice " + kind); var d = el("div"); d.innerHTML = html; n.appendChild(d);
+    if (action) n.appendChild(action);
+    return n;
+  }
+  /* Messages newer than the draft, counted the way ralph-post's freshness check
+     counts them: the operator's own replies do not hold a post. */
+  function newerMessages(meta, full) {
+    var base = parseFloat(meta.based_on_ts || "0");
+    if (!full || !base) return [];
+    return full.messages.filter(function (m) { return parseFloat(m.ts) > base && !m.is_me; });
+  }
+  function link(label, href, id) { var a = el("a", "btn sm"); a.appendChild(withArrow(label, "↗")); a.href = href; a.target = "_blank"; a.rel = "noopener"; if (id) a.id = id; return a; }
+
+  function buildDetail(meta, full) {
+    var u = ui(meta.id), out = frag([]);
+    if (u.flashSeq !== undefined && u.flashSeq !== meta.journal_seq) { u.flash = null; }
+
+    var back = mk("", "btn sm quiet back", function () { location.hash = ""; }); back.id = "back"; back.appendChild(withArrow("Queue", "←", true));
+    out.appendChild(back);
+
+    var head = el("div", "dhead"), line = el("div", "line");
+    var chip = el("span", "chip " + meta.status); chip.appendChild(el("i")); chip.appendChild(document.createTextNode(LABEL[meta.status] || meta.status));
+    line.appendChild(chip);
+    if (meta.running) line.appendChild(el("span", "tag run", "agent running"));
+    if (meta.fix && meta.fix.running) line.appendChild(el("span", "tag run", "fix running"));
+    var links = el("span", "links");
+    if (meta.fix && meta.fix.pr_url) links.appendChild(link(meta.fix.pr_number ? "PR #" + meta.fix.pr_number : "Pull request", meta.fix.pr_url, "pr-" + meta.id));
+    if (meta.permalink) links.appendChild(link("Open in Slack", meta.permalink, "slack-" + meta.id));
+    if (TTYD) links.appendChild(link("Claude console", TTYD + "/?arg=" + encodeURIComponent(meta.id), "console-" + meta.id));
+    line.appendChild(links);
+    head.appendChild(line);
+    head.appendChild(el("h1", null, meta.draft_topic || meta.topic || unslack(meta.question || "").split("\n")[0] || meta.id));
+    var m = el("div", "meta");
+    m.innerHTML = "<span>in <b>#" + esc(meta.channel_name || "?") + "</b></span>"
+      + (meta.customer ? "<span>customer <b>" + esc(meta.customer) + "</b></span>" : "")
+      + "<span>asked by <b>" + esc(meta.asker_name || "?") + "</b></span>"
+      + "<span title='" + esc(fmtTime(askedAt(meta))) + "'>" + esc(ago(askedAt(meta))) + " ago</span>"
+      + "<span title='" + esc(meta.id) + "' class='num'>" + (meta.attempts || 0) + " run" + (meta.attempts === 1 ? "" : "s") + " · " + money(meta.cost_usd) + "</span>";
+    head.appendChild(m);
+    out.appendChild(head);
+
+    /* notices: what happened, and what the buttons below can and cannot do */
+    if (u.flash) out.appendChild(notice(u.flash.kind, u.flash.html));
+    if (meta.status === "posted" && meta.posted) {
+      out.appendChild(notice("ok", "<b>Posted" + (meta.posted.edited_by_human ? " with your edits" : "") + "</b> " + esc(ago(meta.posted.at)) + " ago"
+        + (meta.posted.permalink ? " · <a target='_blank' rel='noopener' href='" + esc(meta.posted.permalink) + "'>open the reply ↗</a>" : "")));
+    }
+    if (meta.status === "approved" || meta.status === "posting") {
+      out.appendChild(notice("info", "<b>Sending.</b> ralph-post is dry-running the target, checking the thread has not moved, and re-running the sanitizer. "
+        + (S.queue && S.queue.paused ? "<b>ralph is paused</b>, so this waits until you resume." : "This pane updates when it lands.")));
+    }
+    if (meta.status === "needs_review") {
+      out.appendChild(notice("", "<b>Held for review.</b> " + esc(meta.reason || "The thread moved after this draft was written.")
+        + " Approve is not offered: ralph-post re-checks the thread and would hold it again. <b>Re-assess</b> reads the thread and drafts anew, or close it if the question is answered."));
+    }
+    if (meta.status === "needs_human") out.appendChild(notice("bad", "<b>Needs a human.</b> " + esc(meta.reason || "ralph stopped without a draft.")));
+    if (meta.status === "superseded") out.appendChild(notice("plain", "<b>Superseded.</b> " + esc(meta.reason || "Someone answered in the thread first.")));
+    if (meta.status === "closed") out.appendChild(notice("plain", "<b>Closed.</b> " + esc(meta.reason || meta.human_instructions || "Closed by hand.")));
+    if (meta.status === "rejected") out.appendChild(notice("plain", "<b>Rejected.</b> " + esc(meta.human_instructions || "Nothing was posted.")));
+    if (meta.status === "investigating") {
+      var due = meta.next_due_at ? Date.parse(meta.next_due_at) : 0;
+      if (meta.running) out.appendChild(notice("info", "<b>Agent running</b> — attempt " + (meta.attempts || 1) + (meta.model ? " on " + esc(shortModel(meta.model)) : "") + ". A draft appears here when it finishes."));
+      else if (meta.last_decision === "snooze" && due > Date.now()) out.appendChild(notice("plain", "<b>Snoozed.</b> ralph looks at it again at " + esc(fmtTime(meta.next_due_at)) + "."));
+      else if (due > Date.now()) out.appendChild(notice("plain", "<b>Waiting to run</b> — next attempt at " + esc(fmtTime(meta.next_due_at)) + " (backoff after attempt " + (meta.attempts || 0) + ")."));
+      else out.appendChild(notice("plain", "<b>Queued.</b> The next tick launches a run."));
+    }
+    if (meta.human_instructions && meta.last_decision === "revise" && TERMINAL.indexOf(meta.status) === -1)
+      out.appendChild(notice("plain", "<b>You asked for changes:</b> " + esc(meta.human_instructions)));
+    var newer = newerMessages(meta, full);
+    if (newer.length && DRAFT_STATES.indexOf(meta.status) !== -1) {
+      var who = newer.map(function (x) { return x.name; }).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(", ");
+      out.appendChild(notice("", "<b>" + newer.length + (newer.length === 1 ? " reply" : " replies") + " since this draft</b> from " + esc(who)
+        + " · marked in the thread below." + (meta.status === "awaiting_approval"
+          ? (full.own_user_id ? " Posting will be held until ralph re-reads the thread; the next tick does that." : " Posting will be held unless the newer replies are your own.") : "")));
+    }
+
+    if (!full) { out.appendChild(el("div", "notice plain", "Loading the case file…")); return out; }
+    var isDraft = DRAFT_STATES.indexOf(meta.status) !== -1;
+    if (isDraft) out.appendChild(replyCard(meta, full, meta.status === "awaiting_approval"));
+    out.appendChild(threadCard(meta, full));
+    out.appendChild(whyCard(meta, full));
+    var fc = fixCard(meta, full); if (fc) out.appendChild(fc);
+    if (!isDraft) { var last = lastReply(meta, full); if (last) out.appendChild(last); }
+    out.appendChild(historyBlock(meta, full));
+    var bar = actbar(meta, full); if (bar) out.appendChild(bar);
+    return out;
+  }
+
+  /* the reply: preview by default, textarea on Edit, never both */
+  function curEdit(meta, full) {
+    var e = S.edits[meta.id];
+    if (e && e.hash === meta.draft_hash) return e.text;
+    return full.draft || "";
+  }
+  /* Mirrors lib/sanitize.py. The page is not the authority — ralph-post runs the
+     real sanitizer immediately before sending — but an edit that would be
+     refused there has to say so here, while it can still be fixed, rather than
+     failing after the approver has tapped post. "refused" and "worth a look"
+     are kept apart so a house-style note never reads like a blocker. */
+  var SRC_EXT = "(?:c|h|cc|cpp|hpp|go|rs|py|ts|tsx|js|jsx|java|rb|cs|kt|swift|php|m|mm)";
+  var RE_SRC = new RegExp("\\b[\\w.-]+/[\\w./-]*\\." + SRC_EXT + "\\b(?::\\d+(?:-\\d+)?)?|\\b[\\w-]+\\." + SRC_EXT + ":\\d+", "i");
+  var RE_PR = /\b(?:PR|pull request|merge request|MR)\s*#?\s*\d+|\(#\d+\)/i;
+  var RE_HASH = /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/;
+  var RE_FN = /\b[A-Za-z_][A-Za-z0-9_]{2,}\(\)/;
+  function advisory(text, max, target) {
+    var w = [];
+    if (text.length > max) w.push({ bad: true, t: "over the " + num(max) + " character limit" });
+    if (/<!(here|channel|everyone)|(^|\s)@(here|channel|everyone)\b/.test(text)) w.push({ bad: true, t: "contains a channel broadcast, which the sanitizer refuses" });
+    if (/<!subteam\^/.test(text)) w.push({ bad: true, t: "mentions a user group, which the sanitizer refuses" });
+    var src = RE_SRC.exec(text);
+    if (src) w.push({ bad: true, t: "names a source file (" + src[0] + "), which the sanitizer refuses" });
+    var pr = RE_PR.exec(text);
+    if (pr) w.push({ bad: true, t: "cites " + pr[0] + ", which the sanitizer refuses" });
+    if (target && text.length > target) w.push({ t: "longer than the " + num(target) + "-character target — shorter is better" });
+    if (RE_HASH.test(text)) w.push({ t: "looks like it contains a commit hash" });
+    if (RE_FN.test(text)) w.push({ t: "names a function, usually our detail rather than theirs" });
+    return w;
+  }
+  function replyCard(meta, full, editable) {
+    var u = ui(meta.id), max = full.max_chars || 2800, base = full.draft || "", text = curEdit(meta, full);
+    var stale = S.edits[meta.id] && S.edits[meta.id].hash !== meta.draft_hash;
+    var card = el("div", "card reply" + (editable ? "" : " ro"));
+    var right = [];
+    if (editable) {
+      var editBtn = mk(u.mode === "edit" ? "Preview" : "Edit", "btn sm", function () { u.mode = u.mode === "edit" ? "preview" : "edit"; renderDetail(true);
+        if (u.mode === "edit") { var ta = document.getElementById("draft-" + meta.id); if (ta) ta.focus(); } });
+      editBtn.id = "edit-" + meta.id;
+      right.push(editBtn);
+    }
+    var hint = meta.kind === "question" ? "a clarifying question, not an answer" : meta.kind === "holding" ? "a holding reply" : null;
+    var s = sec(editable ? "Reply to post" : "Draft on hold", card, hint, right);
+
+    if (stale) {
+      var old = S.edits[meta.id];
+      card.appendChild(notice("", "<b>ralph wrote a new draft</b> after you edited the previous one. The new draft is shown; your edit is kept until you leave.",
+        mk("Restore my edit", "btn sm", function () { S.edits[meta.id] = { hash: meta.draft_hash, text: old.text }; u.mode = "edit"; renderDetail(true); }, { id: "restore-" + meta.id })));
+    }
+    if (editable && u.mode === "edit") {
+      var ta = document.createElement("textarea");
+      ta.id = "draft-" + meta.id; ta.value = text; ta.setAttribute("aria-label", "Reply text, Slack markdown"); ta.spellcheck = true;
+      ta.addEventListener("input", function () {
+        S.edits[meta.id] = { hash: meta.draft_hash, text: ta.value };
+        syncFoot(meta, full, ta.value); autosize(ta);
+      });
+      card.appendChild(ta);
+      requestAnimationFrame(function () { autosize(ta); });
+    } else {
+      var prev = el("div", "prev"); prev.innerHTML = mrkdwn(text) || "<span style='color:var(--muted)'>Empty reply.</span>"; card.appendChild(prev);
+    }
+    var foot = el("div", "foot"); foot.id = "foot-" + meta.id; card.appendChild(foot);
+    syncFoot(meta, full, text, foot);   // the card is still detached here: pass the node
+    return s;
+  }
+  function autosize(ta) { ta.style.height = "auto"; ta.style.height = Math.max(220, ta.scrollHeight + 2) + "px"; }
+  function syncFoot(meta, full, text, footEl) {
+    var foot = footEl || document.getElementById("foot-" + meta.id); if (!foot) return;
+    var max = full.max_chars || 2800, base = full.draft || "", changed = text !== base;
+    var warns = advisory(text, max, full.target_chars || 0);
+    foot.textContent = "";
+    var st = el("span", changed ? "edited" : "", changed ? "edited by you" : "ralph's draft, unchanged"); foot.appendChild(st);
+    var n = el("span", "num" + (text.length > max ? " over" : ""), num(text.length) + " / " + num(max)); foot.appendChild(n);
+    warns.forEach(function (w) { foot.appendChild(el("span", w.bad ? "adv" : "adv soft", (w.bad ? "⚠ " : "· ") + w.t)); });
+    var right = el("span", "right");
+    if (changed && meta.status === "awaiting_approval") right.appendChild(mk("Revert to ralph's draft", "btn sm quiet", function () {
+      delete S.edits[meta.id]; renderDetail(true); var e2 = document.getElementById("edit-" + meta.id); if (e2) e2.focus();
+    }, { id: "revert-" + meta.id }));
+    foot.appendChild(right);
+    var ap = document.getElementById("approve-" + meta.id);
+    if (ap) { ap.textContent = changed ? "Post edited reply" : "Approve & post"; ap.disabled = !text.trim() || text.length > max; }
+  }
+
+  /* the thread as it stands, with the messages newer than the draft marked */
+  function threadCard(meta, full) {
+    var u = ui(meta.id), msgs = full.messages || [], base = parseFloat(meta.based_on_ts || "0");
+    var card = el("div", "card thread");
+    var LIMIT = 6, hidden = 0;
+    var show = msgs;
+    if (!u.showAll && msgs.length > LIMIT) { hidden = msgs.length - LIMIT; show = [msgs[0]].concat(msgs.slice(-(LIMIT - 1))); }
+    var dividerDone = false;
+    show.forEach(function (msg, i) {
+      if (i === 1 && hidden) { var mb = mk("Show " + hidden + " earlier " + (hidden === 1 ? "message" : "messages"), "more", function () { u.showAll = true; renderDetail(true); var f = document.querySelector("#detail .thread .msg:nth-child(2)"); if (f) { f.tabIndex = -1; f.focus(); } }); mb.id = "more-" + meta.id; card.appendChild(mb); }
+      var isNew = base && parseFloat(msg.ts) > base && !msg.is_me;
+      if (isNew && !dividerDone && DRAFT_STATES.indexOf(meta.status) !== -1) { card.appendChild(el("div", "divider", "draft written here")); dividerDone = true; }
+      var d = el("div", "msg" + (msg.is_asker ? " asker" : "") + (msg.is_bot ? " bot" : "") + (isNew && DRAFT_STATES.indexOf(meta.status) !== -1 ? " new" : ""));
+      var who = el("div", "who");
+      who.appendChild(el("b", null, msg.name || msg.user || "?"));
+      if (msg.is_asker) who.appendChild(el("span", null, "asker"));
+      if (msg.is_me) who.appendChild(el("span", null, "you"));
+      var t = el("span", null, fmtTime(parseFloat(msg.ts))); t.title = msg.ts; who.appendChild(t);
+      if (msg.files) who.appendChild(el("span", null, msg.files + (msg.files === 1 ? " attachment" : " attachments")));
+      d.appendChild(who);
+      var txt = el("div", "txt"); txt.innerHTML = mrkdwn(unslack(msg.text || "")) || "<span style='color:var(--muted)'>(no text)</span>";
+      d.appendChild(txt);
+      card.appendChild(d);
+    });
+    if (!msgs.length) {
+      var q = el("div", "msg asker"); q.innerHTML = "<div class='who'><b>" + esc(meta.asker_name || "?") + "</b><span>asker</span></div><div class='txt'>" + mrkdwn(unslack(meta.question || "")) + "</div>";
+      card.appendChild(q);
+    }
+    var hint = msgs.length + (msgs.length === 1 ? " message" : " messages") + (full.messages && full.messages.length >= 40 ? " (last 40)" : "");
+    return sec("Thread", card, hint, meta.permalink ? link("Open in Slack", meta.permalink) : null);
+  }
+
+  /* why ralph says this: the latest run's write-up, evidence, what is missing */
+  function latestNotes(full) {
+    var notes = full.notes || "";
+    var parts = notes.split(/^## run .*$/m);
+    return (parts.length > 1 ? parts[parts.length - 1] : notes).trim();
+  }
+  function whyCard(meta, full) {
+    var u = ui(meta.id), runs = full.runs || [], last = null;
+    for (var i = runs.length - 1; i >= 0; i--) { if (runs[i].status || (runs[i].evidence && runs[i].evidence.length)) { last = runs[i]; break; } }
+    if (!last) last = runs[runs.length - 1] || null;
+    var wrap = frag([]);
+    var text = (last && last.summary_md) || latestNotes(full);
+    var facts = el("div", "facts");
+    var conf = Number(meta.confidence || 0);
+    facts.innerHTML = (meta.opened_via && !meta.draft_hash ? "<div><b>—</b><span>filed by hand</span></div>"
+        : "<div><b>" + conf.toFixed(2) + "</b><span>" + (meta.draft_hash ? "draft" : "triage") + " confidence</span></div>")
+      + "<div><b>" + (meta.attempts || 0) + "</b><span>" + (meta.attempts === 1 ? "run" : "runs") + (meta.attempts_in_round && meta.attempts_in_round !== meta.attempts ? " (" + meta.attempts_in_round + " this round)" : "") + "</span></div>"
+      + "<div><b>" + money(meta.cost_usd) + "</b><span>spent</span></div>"
+      + "<div><b>" + esc(shortModel(meta.model) || "—") + "</b><span>model</span></div>";
+    wrap.appendChild(sec("Why ralph says this", facts));
+    if (text) {
+      var card = el("div", "card"), body = el("div", "md" + (!u.showWhy && text.length > 1200 ? " clamp" : ""));
+      body.innerHTML = md(text); card.appendChild(body);
+      if (!u.showWhy && text.length > 1200) { var wb = mk("Show the whole write-up", "more-md", function () { u.showWhy = true; renderDetail(true); }); wb.id = "morewhy-" + meta.id; card.appendChild(wb); }
+      var s = el("section", "sec"); s.style.marginTop = "10px"; s.appendChild(card); wrap.appendChild(s);
+    }
+    if (last && last.evidence && last.evidence.length) {
+      var ul = el("ul", "ev card");
+      last.evidence.forEach(function (e) {
+        var li = el("li"), a = el("span", "anchor");
+        String(e.label || "").split("/").forEach(function (piece, i, arr) { a.appendChild(document.createTextNode(piece + (i < arr.length - 1 ? "/" : ""))); if (i < arr.length - 1) a.appendChild(document.createElement("wbr")); });
+        li.appendChild(a); if (e.note) li.appendChild(el("span", "note", e.note)); ul.appendChild(li);
+      });
+      wrap.appendChild(sec("Evidence", ul, last.evidence.length + " " + (last.evidence.length === 1 ? "anchor" : "anchors")));
+    }
+    if (last && last.missing_info && last.missing_info.length) {
+      var um = el("ul", "miss card"); last.missing_info.forEach(function (x) { um.appendChild(el("li", null, x)); });
+      wrap.appendChild(sec("Still missing", um));
+    }
+    if (!text && !(last && last.evidence && last.evidence.length)) {
+      var none = el("div", "notice plain", meta.running ? "The first run has not finished yet." : "No run has written anything yet.");
+      wrap.appendChild(none);
+    }
+    return wrap;
+  }
+
+  /* a finished row: the reply that actually went out, or the draft that did not */
+  function lastReply(meta, full) {
+    var body = null, label = null;
+    if (meta.status === "posted") {
+      for (var i = full.journal.length - 1; i >= 0; i--) { var ev = full.journal[i]; if (ev.event === "decision" && ev.action === "approve") { body = ev.body_md || null; break; } }
+      body = body || full.draft; label = "Posted reply" + (meta.posted && meta.posted.edited_by_human ? " (with your edits)" : "");
+    } else if (full.draft) { body = full.draft; label = TERMINAL.indexOf(meta.status) !== -1 ? "Draft that was not posted" : "Last draft"; }
+    if (!body) return null;
+    var card = el("div", "card reply ro"), prev = el("div", "prev"); prev.innerHTML = mrkdwn(body); card.appendChild(prev);
+    return sec(label, card);
+  }
+
+  /* fix: /solve on what the investigation found, ending in a draft PR. A side
+     track — nothing here changes the reply's status, and nothing reaches Slack. */
+  var FIXLABEL = { requested: "starting", running: "running", pr_open: "draft PR open", pr_merged: "PR merged",
+                   no_fix: "no change needed", blocked: "blocked", failed: "failed", killed: "stopped" };
+  function repoName(p) { return String(p || "").replace(/\/+$/, "").split("/").pop(); }
+  function fixCard(meta, full) {
+    var fx = meta.fix; if (!fx) return null;
+    var card = el("div", "card fixcard"), line = el("div", "fixline");
+    var good = fx.status === "pr_open" || fx.status === "no_fix" || fx.status === "pr_merged";
+    line.appendChild(el("span", fx.running ? "tag run" : good ? "tag ok" : "tag bad", FIXLABEL[fx.status] || fx.status || "?"));
+    if (fx.status === "pr_open" && typeof fx.ai_approved === "boolean")
+      line.appendChild(el("span", fx.ai_approved ? "tag ok" : "tag new", fx.ai_approved ? "AI-approved" : "not AI-approved"));
+    if (fx.pr_state && fx.pr_state !== "OPEN") line.appendChild(el("span", "tag", "PR " + String(fx.pr_state).toLowerCase()));
+    if (fx.review_rounds) line.appendChild(el("span", null, fx.review_rounds + (fx.review_rounds === 1 ? " review round" : " review rounds")));
+    line.appendChild(el("span", "mono", repoName(fx.repo) + " · " + (fx.branch || "")));
+    if (fx.pr_url) { var r = el("span", "right"); r.appendChild(link(fx.pr_number ? "PR #" + fx.pr_number : "Pull request", fx.pr_url)); line.appendChild(r); }
+    card.appendChild(line);
+    if (fx.running) {
+      card.appendChild(el("div", "md", "/solve is working in a worktree of " + repoName(fx.repo) + (fx.model ? " on " + shortModel(fx.model) : "")
+        + ": it checks the cause, writes the fix, opens a draft PR and runs AI review until that passes. This can take an hour; the card updates when it finishes."));
+    } else if (fx.summary_md) {
+      var body = el("div", "md"); body.innerHTML = md(fx.summary_md); card.appendChild(body);
+    }
+    var recs = (full && full.fixes) || [], rec = recs.length ? recs[recs.length - 1] : null;
+    if (!fx.running && rec && rec.run_id === fx.run_id) {
+      if (rec.tests_md) { var t = el("div", "md"); t.innerHTML = "<h4>Testing</h4>" + md(rec.tests_md); card.appendChild(t); }
+      (rec.escalations || []).forEach(function (x) { card.appendChild(el("div", "warn", "Left for you: " + x)); });
+    }
+    if (!fx.running && fx.error) card.appendChild(el("div", "warn", fx.error));
+    if (!fx.running) (fx.warnings || []).forEach(function (w) { card.appendChild(el("div", "warn", "⚠ " + w)); });
+    var hint = (fx.runs || 1) + (fx.runs === 1 || !fx.runs ? " run" : " runs") + (fx.cost_usd ? " · " + money(fx.cost_usd) : "") + " · merging is yours";
+    return sec("Fix", card, hint);
+  }
+
+  /* history: runs, the journal as sentences, the raw case file */
+  function describe(ev) {
+    var r = ev.reason ? " <span class='r'>— " + esc(ev.reason) + "</span>" : "";
+    switch (ev.event) {
+      case "created": return "<b>" + (ev.via ? "Filed by hand" : "Picked up") + "</b> from #" + esc(ev.channel_name || "?") + ", asked by " + esc(ev.asker_name || "?") + (ev.triage_confidence ? " <span class='r'>(triage " + Number(ev.triage_confidence).toFixed(2) + ")</span>" : "");
+      case "scheduled": return "<b>Scheduled</b>" + (ev.note ? " <span class='r'>— " + esc(ev.note) + "</span>" : "") + (ev.next_due_at ? " <span class='r'>for " + esc(fmtTime(ev.next_due_at)) + "</span>" : "");
+      case "run_started": return "<b>Run " + (ev.attempt || "") + " started</b>" + (ev.model ? " <span class='r'>on " + esc(shortModel(ev.model)) + "</span>" : "");
+      case "run_finished": return "<b>Run finished</b> <span class='r'>" + esc(ev.status || "") + (ev.cost_usd ? " · " + money(ev.cost_usd) : "") + "</span>";
+      case "drafted": return "<b>Drafted a reply</b> <span class='r'>confidence " + Number(ev.confidence || 0).toFixed(2) + (ev.kind && ev.kind !== "answer" ? " · " + esc(ev.kind) : "") + "</span>";
+      case "decision": return "<b>You: " + esc(ev.action) + "</b>" + (ev.edited_by_human ? " <span class='r'>with edits</span>" : "") + r;
+      case "post_claimed": return "<b>Sending</b>";
+      case "posted": return "<b>Posted</b>" + (ev.edited_by_human ? " <span class='r'>with your edits</span>" : "") + (ev.permalink ? " · <a target='_blank' rel='noopener' href='" + esc(ev.permalink) + "'>open ↗</a>" : "") + (ev.note ? " <span class='r'>— " + esc(ev.note) + "</span>" : "");
+      case "pushed": return "<b>Pushed to the dashboard</b>";
+      case "needs_review": return "<b>Held for review</b>" + r;
+      case "needs_human": return "<b>Needs a human</b>" + r;
+      case "superseded": return "<b>Superseded</b>" + r;
+      case "closed": return "<b>Closed</b>" + r;
+      case "fix_requested": return "<b>" + (ev.via === "cli" ? "Fix requested" : "You: Fix it") + "</b>" + (ev.repo ? " <span class='r'>in " + esc(String(ev.repo).split("/").pop()) + "</span>" : "") + (ev.note ? " <span class='r'>— " + esc(ev.note) + "</span>" : "");
+      case "fix_started": return "<b>Fix run started</b>" + (ev.model ? " <span class='r'>on " + esc(shortModel(ev.model)) + "</span>" : "");
+      case "fix_finished": return "<b>Fix run finished</b> <span class='r'>" + esc(FIXLABEL[ev.status] || ev.status || "") + (ev.cost_usd ? " · " + money(ev.cost_usd) : "") + "</span>"
+        + (ev.pr_url ? " · <a target='_blank' rel='noopener' href='" + esc(ev.pr_url) + "'>PR" + (ev.pr_number ? " #" + esc(ev.pr_number) : "") + " ↗</a>" : "") + (ev.error ? " <span class='r'>— " + esc(ev.error) + "</span>" : "");
+      case "reopened": return "<b>Reopened</b>" + (ev.from_status ? " <span class='r'>after it was " + esc(ev.from_status) + "</span>" : "") + r;
+      default: return "<b>" + esc(ev.event) + "</b>" + r;
+    }
+  }
+  function historyBlock(meta, full) {
+    var u = ui(meta.id), d = el("details", "hist"); d.open = !!u.showHist;
+    d.addEventListener("toggle", function () { u.showHist = d.open; });
+    var sm = el("summary", null, "History · " + full.journal.length + " events · " + (full.runs || []).length + (full.runs && full.runs.length === 1 ? " run" : " runs"));
+    sm.id = "hist-" + meta.id; d.appendChild(sm);
+    if (full.runs && full.runs.length) {
+      var started = {}, finished = {};
+      full.journal.forEach(function (ev) { if (ev.event === "run_started") started[ev.run_id] = ev.at; if (ev.event === "run_finished") finished[ev.run_id] = ev.at; });
+      var t = el("table", "tbl"), wrap = el("div", "card tblwrap");
+      t.innerHTML = "<thead><tr><th>Run</th><th>Model</th><th>Outcome</th><th>Took</th><th>Cost</th></tr></thead>";
+      var tb = el("tbody");
+      full.runs.forEach(function (r, i) {
+        var a = Date.parse(started[r.run_id] || r.started_at), b = Date.parse(finished[r.run_id] || "");
+        var took = !isNaN(a) && !isNaN(b) ? Math.max(0, Math.round((b - a) / 1000)) : null;
+        var tr = el("tr");
+        tr.innerHTML = "<td><span class='mono'>" + (i + 1) + "</span> · " + esc(fmtTime(r.started_at)) + "</td><td>" + esc(shortModel(r.model)) + "</td><td>"
+          + esc(r.status || (r.error ? "error" : "—")) + (r.error ? " <span class='r' title='" + esc(r.error) + "'>⚠</span>" : "") + "</td><td class='num'>"
+          + (took === null ? "—" : took >= 60 ? Math.round(took / 60) + "m " + (took % 60) + "s" : took + "s") + "</td><td class='num'>" + money(r.cost_usd) + "</td>";
+        tb.appendChild(tr);
+      });
+      t.appendChild(tb); wrap.appendChild(t);
+      d.appendChild(sec("Runs", wrap));
+    }
+    var tl = el("ol", "tl card");
+    full.journal.forEach(function (ev) {
+      var li = el("li"), when = el("span", "when", fmtTime(ev.at)); when.title = ev.at; li.appendChild(when);
+      var what = el("span", "what"); what.innerHTML = describe(ev); li.appendChild(what); tl.appendChild(li);
+    });
+    d.appendChild(sec("Journal", tl, "the audit trail, append-only"));
+    if (full.notes) { var n = el("pre", "raw card", full.notes); d.appendChild(sec("Case file", n, "notes.md — every run inherits this")); }
+    return d;
+  }
+
+  /* ---- actions ------------------------------------------------------------------
+     One Approve button that posts what is in the editor. It arms on the first
+     press — the bar turns red and names the destination — and posts on the second,
+     never within 400ms of arming, never from a held key. Esc, Cancel, a click
+     elsewhere, a route change or 8s disarm it. Reject and Close each take a
+     reason; Reopen, on a finished row, is what brings either back. */
+  function actbar(meta, full) {
+    var u = ui(meta.id), st = meta.status, bar = el("div", "actbar");
+    if (u.pending) bar.setAttribute("aria-busy", "true");
+    // Anything that changed the row underneath a live arm disarms it: the
+    // operator re-reads before confirming.
+    if (u.armedAt && u.armedSeq !== meta.journal_seq) u.armedAt = 0;
+    // The reopen box belongs to finished rows and every other box to live ones,
+    // so a box left open across a status change never offers the wrong action.
+    // Fix it is offered on every row but a mid-send one, so its box is the
+    // exception to both rules — and it closes once a fix is running.
+    if (u.box === "fix" && meta.fix && meta.fix.running) u.box = null;
+    if (u.box && !u.armedAt && st !== "approved" && st !== "posting" && (u.box === "fix" || (TERMINAL.indexOf(st) === -1) === (u.box !== "reopen"))) {
+      bar.appendChild(composerBox(meta, full, u.box)); return bar;
+    }
+    if (st === "awaiting_approval") {
+      if (u.armedAt) {
+        var arm = el("div", "arm"); arm.setAttribute("role", "alertdialog"); arm.setAttribute("aria-label", "Confirm posting");
+        var dest = el("div", "dest"); dest.id = "dest-" + meta.id; arm.setAttribute("aria-describedby", dest.id);
+        var warn = [];
+        if (S.queue && S.queue.paused) warn.push("ralph is paused — this goes out when you resume.");
+        var newer = newerMessages(meta, full); if (newer.length) warn.push(newer.length + " newer " + (newer.length === 1 ? "reply" : "replies") + " in the thread — ralph-post " + (full.own_user_id ? "will" : "may") + " hold it for review.");
+        if (S.edits[meta.id] && S.edits[meta.id].hash === meta.draft_hash && S.edits[meta.id].text !== full.draft) warn.push("Posting your edited text.");
+        advisory(curEdit(meta, full), (full && full.max_chars) || 2800, 0)
+          .filter(function (w) { return w.bad; })
+          .forEach(function (w) { warn.push("The sanitizer will refuse this: it " + w.t.replace(/, which the sanitizer refuses$/, "") + "."); });
+        dest.innerHTML = "Post to <b>#" + esc(meta.channel_name || "?") + "</b> in <b>" + esc(meta.asker_name || "?") + "</b>'s thread, as you."
+          + (warn.length ? "<small>" + warn.map(esc).join(" ") + "</small>" : "");
+        arm.appendChild(dest);
+        var confirm = mk(u.pending ? "Posting…" : "Confirm & post", "btn danger", function () {
+          if (!u.armedAt || u.pending || Date.now() - u.armedAt < 400 || u.needKeyUp) return;
+          u.armedAt = 0;
+          confirm.disabled = true;
+          send(meta, "approve", { body_md: curEdit(meta, full), draft_hash: meta.draft_hash, run_id: meta.run_id },
+               S.queue && S.queue.paused ? "Approved — it posts when you resume ralph." : "Approved — ralph-post is sending it.");
+        });
+        confirm.id = "confirm-" + meta.id; confirm.disabled = !!u.pending;
+        confirm.addEventListener("keydown", function (e) { if (e.repeat) e.preventDefault(); });
+        arm.appendChild(confirm);
+        var cancel = mk("Cancel", "btn", function () { u.armedAt = 0; renderDetail(true); focusAct(); }); cancel.id = "cancel-" + meta.id; cancel.disabled = !!u.pending;
+        arm.appendChild(cancel);
+        bar.appendChild(arm);
+        // Focus lands on Confirm once, on the arming gesture — never again on a
+        // rebuild, or a tick elsewhere would put Enter onto the button that posts.
+        if (u.focusConfirm) { u.focusConfirm = false; setTimeout(function () { var c = document.getElementById("confirm-" + meta.id); if (c) c.focus(); }, 0); }
+      } else {
+        var text = full ? curEdit(meta, full) : "", max = (full && full.max_chars) || 2800;
+        var ap = mk(u.pending ? "Working…" : "Approve & post", "btn primary", function (e) {
+          e.stopPropagation();
+          u.armedAt = Date.now(); u.armedSeq = meta.journal_seq; u.box = null; u.needKeyUp = e.detail === 0; u.focusConfirm = true;
+          renderDetail(true);
+          setTimeout(function () { if (u.armedAt && Date.now() - u.armedAt >= 8000) { u.armedAt = 0; renderDetail(); } }, 8100);
+        });
+        ap.id = "approve-" + meta.id; ap.disabled = !!u.pending || !full || !text.trim() || text.length > max;
+        if (!u.pending && S.edits[meta.id] && S.edits[meta.id].hash === meta.draft_hash && text !== full.draft) ap.textContent = "Post edited reply";
+        bar.appendChild(ap);
+        bar.appendChild(boxBtn(meta, "ask", "Ask for changes", "btn"));
+        bar.appendChild(actBtn(meta, "snooze", u.pending === "snooze" ? "Snoozing…" : "Snooze 24h", "btn", function () { send(meta, "snooze", {}, "Snoozed — ralph looks again tomorrow."); }));
+        bar.appendChild(fixBtn(meta));
+        bar.appendChild(rightGroup([boxBtn(meta, "reject", "Reject", "btn quiet warn"), boxBtn(meta, "close", "Close", "btn quiet")]));
+      }
+    } else if (st === "needs_review") {
+      bar.appendChild(actBtn(meta, "rerun", u.pending === "rerun" ? "Queuing…" : "Re-assess with the latest thread", "btn primary", function () { rerun(meta); }));
+      bar.appendChild(boxBtn(meta, "ask", "Ask for changes", "btn"));
+      bar.appendChild(fixBtn(meta));
+      bar.appendChild(rightGroup([boxBtn(meta, "reject", "Reject", "btn quiet warn"), boxBtn(meta, "close", "Close", "btn quiet")]));
+    } else if (st === "needs_human") {
+      bar.appendChild(actBtn(meta, "rerun", u.pending === "rerun" ? "Queuing…" : "Re-assess with the latest thread", "btn primary", function () { rerun(meta); }));
+      bar.appendChild(boxBtn(meta, "ask", "Retry with a note", "btn"));
+      bar.appendChild(fixBtn(meta));
+      bar.appendChild(rightGroup([boxBtn(meta, "close", "Close", "btn quiet")]));
+    } else if (st === "investigating") {
+      var snoozed = meta.last_decision === "snooze" && meta.next_due_at && Date.parse(meta.next_due_at) > Date.now();
+      var run = actBtn(meta, "rerun", meta.running ? "Agent running…" : u.pending === "rerun" ? "Queuing…" : snoozed ? "Wake now" : "Run now", "btn", function () { rerun(meta); });
+      run.disabled = !!meta.running || !!u.pending; bar.appendChild(run);
+      bar.appendChild(fixBtn(meta));
+      bar.appendChild(rightGroup([boxBtn(meta, "close", "Close", "btn quiet")]));
+    } else if (TERMINAL.indexOf(st) !== -1) {
+      bar.appendChild(boxBtn(meta, "reopen", "Reopen", "btn"));
+      bar.appendChild(fixBtn(meta));
+    } else return null;
+    if (u.pending) bar.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
+    return bar;
+  }
+  function openPr(meta) { return meta.fix && meta.fix.pr_url && meta.fix.pr_state === "OPEN" ? meta.fix : null; }
+  function fixBtn(meta) {
+    var fx = meta.fix || {};
+    var b = boxBtn(meta, "fix", fx.running ? "Fix running…" : openPr(meta) ? "Continue the fix" : "Fix it", "btn");
+    if (fx.running) b.disabled = true;
+    b.title = "Run /solve on what ralph found: a worktree, the fix, a draft PR and an AI review loop. It never merges, and nothing reaches Slack.";
+    return b;
+  }
+  function actBtn(meta, kind, label, cls, fn) { var b = mk(label, cls, fn); b.id = kind + "-" + meta.id; b.disabled = !!ui(meta.id).pending; return b; }
+  function rightGroup(btns) { var r = el("span", "right"); btns.forEach(function (b) { r.appendChild(b); }); return r; }
+  function boxBtn(meta, kind, label, cls) {
+    var u = ui(meta.id);
+    var b = mk(label, cls, function () { u.box = u.box === kind ? null : kind; u.armedAt = 0; renderDetail(true);
+      var ta = document.getElementById("box-" + meta.id); if (ta) ta.focus(); });
+    b.id = kind + "-" + meta.id; b.setAttribute("aria-expanded", String(u.box === kind)); b.disabled = !!u.pending;
+    return b;
+  }
+  function composerBox(meta, full, kind) {
+    var u = ui(meta.id), box = el("div", "box card"), lab = el("label"), ta = document.createElement("textarea");
+    ta.id = "box-" + meta.id; lab.htmlFor = ta.id;
+    var copy = {
+      ask: { label: "What should change?", why: "Goes straight into the next run's prompt; the reply is redrafted with the whole thread.", ph: "Shorter, and don't promise a release date.", ok: "Send back", need: 3 },
+      reject: { label: "Reject this draft — why? (optional)", why: "Nothing is posted and ralph stops working on it. The reason lands in the journal.", ph: "Wrong root cause; I'll answer this one.", ok: "Reject draft", need: 0 },
+      close: { label: "Close it — why? (optional)", why: "ralph stops working on it. Reopen brings it back if the thread moves on.", ph: "Maxime answered it in the thread.", ok: "Close investigation", need: 0 },
+      fix: { label: "Fix it — anything the fix should know? (optional)",
+             why: openPr(meta) ? "Continues PR #" + openPr(meta).pr_number + " in " + repoName(openPr(meta).repo) + ": /solve pushes new commits to the same branch and runs the AI review again. Nothing is merged, and nothing reaches Slack."
+                  : "Runs /solve in a fresh worktree: it checks ralph's root cause, writes the fix, opens a draft PR and runs AI review until that passes — often an hour. Nothing is merged, and nothing reaches Slack.",
+             ph: "The cause is right; keep the change to the collector and add a regression test.", ok: "Start fix", need: 0 },
+      reopen: { label: "Reopen it — what should ralph look at? (optional)", why: "ralph investigates again with the thread as it stands now. Your note goes into the next run's prompt.", ph: "They followed up asking about Windows too.", ok: "Reopen investigation", need: 0 },
+    }[kind];
+    lab.textContent = copy.label; box.appendChild(lab);
+    box.appendChild(el("div", "why", copy.why));
+    // Which repo, only when there is a choice to make: a continuing fix is
+    // pinned to its PR's repo, and one configured repo needs no picker.
+    var repos = (full && full.fix_repos) || [], pick = null;
+    if (kind === "fix" && !openPr(meta) && repos.length > 1) {
+      pick = document.createElement("select"); pick.id = "boxrepo-" + meta.id; pick.setAttribute("aria-label", "Repository to fix");
+      repos.forEach(function (r) { var o = el("option", null, r.name); o.value = r.path; pick.appendChild(o); });
+      pick.value = u.text.fixRepo || (meta.fix && meta.fix.repo) || repos[0].path;
+      pick.disabled = !!u.pending;
+      pick.addEventListener("change", function () { u.text.fixRepo = pick.value; });
+      box.appendChild(pick);
+    }
+    ta.placeholder = copy.ph; ta.value = u.text[kind] || ""; ta.disabled = !!u.pending;
+    ta.addEventListener("input", function () { u.text[kind] = ta.value; var okb = document.getElementById("boxok-" + meta.id); if (okb) okb.disabled = ta.value.trim().length < copy.need; });
+    box.appendChild(ta);
+    var acts = el("div", "acts");
+    var okb = mk(u.pending ? "Sending…" : copy.ok, "btn " + (kind === "ask" || kind === "reopen" || kind === "fix" ? "primary" : "danger"), function () {
+      if (u.pending) return;
+      var reason = ta.value.trim();
+      okb.disabled = true;
+      if (kind === "ask") send(meta, "revise", { reason: reason }, "Sent back — the next tick redrafts with your note.");
+      else if (kind === "reopen") requeue(meta, "reopen", function () { return Backend.reopen(meta.id, reason); }, "Reopened — the next tick re-reads the thread and runs again.");
+      else if (kind === "fix") requeue(meta, "fix", function () { return Backend.fix(meta.id, pick ? pick.value : "", reason); }, "Fix started — the draft PR shows up here when /solve is done.");
+      else if (kind === "reject") send(meta, "reject", { reason: reason || "rejected from the console" }, "Rejected. Nothing was posted.");
+      else send(meta, "close", { reason: reason || "closed by hand" }, "Closed. ralph stops working on it.");
+    });
+    okb.id = "boxok-" + meta.id; okb.disabled = !!u.pending || ta.value.trim().length < copy.need; acts.appendChild(okb);
+    var cancel = mk("Cancel", "btn", function () { u.box = null; delete u.text[kind]; renderDetail(true); focusAct(); }); cancel.id = "boxcancel-" + meta.id; cancel.disabled = !!u.pending;
+    acts.appendChild(cancel);
+    box.appendChild(acts);
+    return box;
+  }
+  document.addEventListener("keyup", function () { if (S.sel && S.ui[S.sel]) S.ui[S.sel].needKeyUp = false; });
+  document.addEventListener("click", function (e) {
+    if (!S.sel) return; var u = S.ui[S.sel]; if (!u || !u.armedAt || Date.now() - u.armedAt < 150) return;
+    if (!e.target.closest || !e.target.closest(".arm")) { u.armedAt = 0; renderDetail(true); }
+  });
+
+  function send(meta, action, extra, okMsg) {
+    var u = ui(meta.id), payload = Object.assign({ action: action }, extra || {});
+    if (u.pending) return Promise.resolve();
+    u.pending = action; u.armedAt = 0; renderDetail(true);
+    return Backend.decide(meta.id, payload).then(function (res) {
+      u.pending = null;
+      if (!res || !res.ok) { toast("Refused: " + ((res && res.error) || "unknown error"), "bad"); renderDetail(true); focusAct(); return; }
+      u.box = null; u.text = {};
+      if (action !== "snooze") delete S.edits[meta.id];
+      delete S.details[meta.id];
+      S.touched[meta.id] = true;
+      toast(okMsg, "ok");
+      return refresh().then(function () { if (S.sel === meta.id) focusDetail(); });
+    });
+  }
+  function rerun(meta) {
+    requeue(meta, "rerun", function () { return Backend.rerun(meta.id); }, "Queued — the next tick re-reads the thread and runs again.");
+  }
+  function requeue(meta, kind, call, okMsg) {
+    var u = ui(meta.id);
+    if (u.pending) return;
+    u.pending = kind; renderDetail(true);
+    call().then(function (res) {
+      u.pending = null;
+      if (!res || !res.ok) { toast("Refused: " + ((res && res.error) || "unknown error"), "bad"); renderDetail(true); focusAct(); return; }
+      u.box = null; u.text = {};
+      toast(okMsg, "ok");
+      S.touched[meta.id] = true;
+      delete S.details[meta.id];
+      refresh().then(function () { if (S.sel === meta.id) focusDetail(); });
+    });
+  }
+
+  /* ---- toasts ----------------------------------------------------------------- */
+  function toast(msg, kind) {
+    var host = document.getElementById("toasts"), t = el("div", "toast" + (kind === "bad" ? " bad" : ""));
+    t.appendChild(el("span", null, msg));
+    var x = mk("×", null, function () { t.remove(); }, { "aria-label": "Dismiss" }); t.appendChild(x);
+    host.appendChild(t);
+    setTimeout(function () { t.remove(); }, kind === "bad" ? 12000 : 6000);
+  }
+
+  /* ---- triage log: why didn't ralph pick that up? --------------------------------- */
+  function loadSeen() {
+    Backend.seen(S.seenVerdict, S.seenVerdict === "excluded").then(function (r) { if (r && r.rows) { S.seen = r; if (S.view === "seen") renderDetail(); } else toast("Could not load the triage log", "bad"); });
+  }
+  function seenView() {
+    var out = frag([]), r = S.seen;
+    out.appendChild(mk("← Queue", "btn sm quiet back", function () { location.hash = ""; }));
+    var head = el("div", "dhead"); head.appendChild(el("h1", null, "Triage log"));
+    var m = el("div", "meta");
+    m.innerHTML = r ? "<span><b>" + num(r.total) + "</b> messages seen</span>" + Object.keys(r.tally).sort().map(function (k) { return "<span>" + esc(k) + " <b>" + num(r.tally[k]) + "</b></span>"; }).join("")
+                    : "Loading…";
+    head.appendChild(m); out.appendChild(head);
+    out.appendChild(el("p", null, "Every message ralph read gets a line: excluded by the free pre-filter (DMs, bots, your own posts), skipped, triaged as not a question, or tracked. This is how the triage threshold gets tuned."));
+    var chips = el("div", "chips");
+    [["", "questions only"], ["tracked", "tracked"], ["triage_no", "triage said no"], ["skip", "skipped"], ["excluded", "excluded"]].forEach(function (c) {
+      chips.appendChild(mk(c[1], "chipbtn", function () { S.seenVerdict = c[0]; S.seen = null; renderDetail(true); loadSeen(); }, { "aria-pressed": String(S.seenVerdict === c[0]) }));
+    });
+    out.appendChild(chips);
+    if (!r) return out;
+    var wrap = el("div", "card tblwrap"), t = el("table", "tbl");
+    t.innerHTML = "<thead><tr><th>When</th><th>Channel</th><th>Verdict</th><th>Why</th></tr></thead>";
+    var tb = el("tbody");
+    r.rows.forEach(function (row) {
+      var tr = el("tr"), inv = row.cid + "-" + String(row.ts || "").replace(".", "_");
+      tr.innerHTML = "<td class='mono' title='" + esc(row.t) + "'>" + esc(fmtTime(row.t)) + "</td><td>#" + esc(row.channel_name || row.cid) + "</td><td>"
+        + (row.verdict === "tracked" ? "<a href='#inv/" + encodeURIComponent(inv) + "'>tracked</a>" : esc(row.verdict)) + "</td><td class='seen-why'>" + esc(unslack(row.why || "")) + "</td>";
+      tb.appendChild(tr);
+    });
+    if (!r.rows.length) { var tr0 = el("tr"); tr0.innerHTML = "<td colspan='4' style='color:var(--muted)'>Nothing with that verdict.</td>"; tb.appendChild(tr0); }
+    t.appendChild(tb); wrap.appendChild(t);
+    var s = el("section", "sec"); s.appendChild(wrap); out.appendChild(s);
+    return out;
+  }
+
+  /* ---- live updates ----------------------------------------------------------- */
+  function render() { renderHeader(); renderRail(); renderDetail(); }
+  function loadDetail(id) {
+    return Backend.detail(id).then(function (d) {
+      if (!d || !d.meta) { toast("Could not load " + id + ": " + ((d && d.error) || "unknown error"), "bad"); return; }
+      // Two fetches for one id can land out of order; never let the older win.
+      var have = S.details[id];
+      if (have && (have.meta.journal_seq || 0) > (d.meta.journal_seq || 0)) return;
+      S.details[id] = d; if (id === S.sel) renderDetail();
+    });
+  }
+  /* Outcomes the daemon produces while the page is open, for rows the operator
+     touched: the toast host is a live region, so these are announced too. */
+  function announceFlips(q) {
+    var now = {};
+    q.groups.forEach(function (g) { g.items.forEach(function (m) { now[m.id] = m; }); });
+    Object.keys(now).forEach(function (id) {
+      var was = S.statuses[id], m = now[id];
+      if (was && was !== m.status && (S.touched[id] || id === S.sel)) {
+        var t = m.draft_topic || m.topic || id;
+        if (m.status === "posted") toast("Posted: " + t, "ok");
+        else if (m.status === "needs_review") toast("Held for review: " + t + (m.reason ? " — " + m.reason : ""), "bad");
+        else if (m.status === "needs_human") toast("Needs a human: " + t + (m.reason ? " — " + m.reason : ""), "bad");
+        else if (m.status === "awaiting_approval" && S.touched[id]) toast("New draft ready: " + t, "ok");
+      }
+    });
+    S.statuses = {}; Object.keys(now).forEach(function (id) { S.statuses[id] = now[id].status; });
+  }
+  function refresh() {
+    return Backend.queue().then(function (q) {
+      if (!q || !q.groups) { if (q && q.error) toast(q.error, "bad"); return; }
+      announceFlips(q);
+      S.queue = q;
+      var key = JSON.stringify(q.groups) + "|" + q.paused, changed = key !== S.queueKey; S.queueKey = key;
+      renderHeader();
+      if (changed) renderRail();
+      Object.keys(S.details).forEach(function (k) { if (k !== S.sel) delete S.details[k]; });
+      if (S.sel) {
+        var m = metaOf(S.sel), d = S.details[S.sel];
+        if (m && (!d || d.meta.journal_seq !== m.journal_seq || d.meta.updated_at !== m.updated_at || !!d.meta.running !== !!m.running)) return loadDetail(S.sel);
+      }
+      if (changed) renderDetail();
+    });
+  }
+
+  document.getElementById("search").addEventListener("input", function () { S.q = this.value.trim().toLowerCase(); renderRail(); });
+  var resumeArmed = 0;
+  document.getElementById("pause").addEventListener("click", function () {
+    var b = this, on = !(S.queue && S.queue.paused);
+    if (!on) {
+      // Resuming lets every approved draft post with no further human step —
+      // say how many, and ask twice.
+      var queued = 0;
+      (S.queue ? S.queue.groups : []).forEach(function (g) { if (g.key === "approved" || g.key === "posting") queued += g.items.length; });
+      if (queued && Date.now() - resumeArmed > 6000) {
+        resumeArmed = Date.now(); b.textContent = "Resume — " + queued + " approved will post";
+        setTimeout(function () { if (Date.now() - resumeArmed >= 6000) { resumeArmed = 0; renderHeader(); } }, 6100);
+        return;
+      }
+    }
+    resumeArmed = 0;
+    Backend.pause(on).then(function (res) { if (!res || !res.ok) toast("Refused: " + ((res && res.error) || "unknown error"), "bad"); else toast(on ? "Paused. Slack is still read; nothing runs or posts." : "Resumed.", "ok"); refresh(); });
+  });
+  document.getElementById("tick").addEventListener("click", function () {
+    var b = this; b.disabled = true; b.dataset.busy = "1"; b.textContent = "Ticking…";
+    var seen = S.queue && S.queue.heartbeat && S.queue.heartbeat.last_tick_at, done = false;
+    function restore() { if (done) return; done = true; b.textContent = "Tick now"; delete b.dataset.busy; b.disabled = !!(S.queue && S.queue.paused); refresh(); }
+    Backend.tick().then(function (res) {
+      if (!res || !res.ok) { restore(); toast((res && res.error) || "could not start a tick", "bad"); return; }
+      // The tick runs detached; the heartbeat moving is what says it finished.
+      var poll = setInterval(function () { Backend.queue().then(function (q) { if (q && q.heartbeat && q.heartbeat.last_tick_at !== seen) { clearInterval(poll); S.queue = q; restore(); } }); }, 1500);
+      setTimeout(function () { clearInterval(poll); restore(); }, 45000);
+    });
+  });
+  // Filing by hand reads the thread from Slack, which takes a few seconds; on
+  // success the new row is opened, so what was filed is what is on screen.
+  document.getElementById("file-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var input = document.getElementById("file-link"), b = document.getElementById("file-go"), link = input.value.trim();
+    if (!link || b.disabled) return;
+    b.disabled = true; input.disabled = true; b.textContent = "Filing…";
+    Backend.open(link).then(function (res) {
+      b.disabled = false; input.disabled = false; b.textContent = "File";
+      if (!res || !res.ok) {
+        toast("Not filed: " + ((res && res.error) || "unknown error"), "bad");
+        if (res && res.id) goto(res.id);
+        return;
+      }
+      input.value = "";
+      toast("Filed — the next tick investigates it.", "ok");
+      refresh().then(function () { goto(res.id); });
+    });
+  });
+  window.addEventListener("hashchange", route);
+  function barHeight() { document.documentElement.style.setProperty("--bar-h", document.querySelector(".topwrap").offsetHeight + "px"); }
+  window.addEventListener("resize", barHeight); barHeight();
+  setInterval(function () { if (S.queue) { renderHeader(); refreshAges(); } }, 30000);
+  setInterval(refresh, 60000);   // safety net, independent of the event stream
+
+  route();
+  refresh().then(function () {
+    if (!S.sel && S.view === "queue" && window.innerWidth >= 880 && S.queue) {
+      for (var i = 0; i < S.queue.groups.length; i++) {
+        var g = S.queue.groups[i];
+        if (DRAFT_STATES.indexOf(g.key) !== -1 && g.items.length) { goto(g.items[0].id); break; }
+      }
+    }
+  });
+  try {
+    var es = new EventSource("/api/events");
+    es.addEventListener("changed", function () { refresh(); });
+    // Every (re)connection catches up: a change that landed while the stream
+    // was down, or between the first fetch and the handshake, is not announced
+    // by the seeded server. queueKey dedups, so an unchanged queue costs no render.
+    es.onopen = function () { S.sseOk = true; renderHeader(); refresh(); };
+    es.onerror = function () { if (S.sseOk) { S.sseOk = false; renderHeader(); } };
+  } catch (e) { setInterval(refresh, 5000); }
+})();
+</script>
+</body>
+</html>

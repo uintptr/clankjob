@@ -16,10 +16,13 @@ clankjob-storage = { path = "crates/storage" }
 
 # External crates
 anyhow = "1.0.104"
+base64 = "0.23.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 humantime = "2.4.0"
 humantime-serde = "1.1.1"
+lopdf = "0.42.0"
 minijinja = { version = "2.24.0", features = ["json"] }
+pdf-extract = "0.12.1"
 rouille = "3.6.2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 secrecy = "0.10.3"

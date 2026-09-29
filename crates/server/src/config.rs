@@ -138,9 +138,22 @@ pub struct LlmConfig {
     pub api_key: Option<SecretRef>,
     /// Default model.
     pub model: String,
+    /// Other models offered when starting a case (any model id is still accepted).
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Also offer the models the provider lists at `{base_url}/models`, refreshed hourly.
+    #[serde(default = "default_true")]
+    pub discover_models: bool,
+    /// The model can see images, so cases can show it image files (design §7.5).
+    #[serde(default)]
+    pub vision: bool,
     /// Maximum time for one completion.
     #[serde(default = "default_llm_timeout", with = "humantime_serde")]
     pub timeout: Duration,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_llm_timeout() -> Duration {
@@ -162,6 +175,14 @@ pub struct Config {
     /// Address to listen on.
     #[serde(default = "default_listen")]
     pub listen: String,
+    /// Address users reach the server at, e.g. `https://clank.acme.com` behind a reverse
+    /// proxy. Browser pages on this origin may call the API.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    /// Other origins allowed to call the API from a browser (CORS), e.g. a separately
+    /// hosted UI or a development server.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
     /// Directory for the database and files.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -240,7 +261,31 @@ impl Config {
         if config.workers == 0 {
             return Err(ConfigError::Invalid("`workers` must be at least 1".to_owned()));
         }
+        let urls = config.public_url.iter().chain(&config.allowed_origins);
+        if let Some(bad) = urls.into_iter().find(|url| crate::cors::origin_of(url).is_none()) {
+            return Err(ConfigError::Invalid(format!(
+                "\"{bad}\" is not a URL like https://clank.acme.com (in `public_url` or `allowed_origins`)"
+            )));
+        }
         Ok(config)
+    }
+
+    /// Origins allowed to call the API from a browser: `public_url` plus `allowed_origins`,
+    /// normalized to `scheme://host[:port]`.
+    #[must_use]
+    pub fn cors_origins(&self) -> Vec<String> {
+        let mut origins: Vec<String> = Vec::with_capacity(self.allowed_origins.len().saturating_add(1));
+        for origin in self
+            .public_url
+            .iter()
+            .chain(&self.allowed_origins)
+            .filter_map(|url| crate::cors::origin_of(url))
+        {
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        origins
     }
 
     /// Read and parse a configuration file.
@@ -288,6 +333,31 @@ mod tests {
         assert_eq!(config.budgets, Budgets::default());
         assert_eq!(config.llm["default"].timeout, Duration::from_mins(5));
         assert_eq!(config.llm["default"].api_key, None);
+        assert!(config.llm["default"].models.is_empty());
+        assert!(config.llm["default"].discover_models);
+        assert!(config.cors_origins().is_empty());
+    }
+
+    #[test]
+    fn public_url_and_allowed_origins_become_cors_origins() {
+        let text = format!(
+            "public_url = \"https://Clank.acme.com/\"\n\
+             allowed_origins = [\"http://localhost:5173\", \"https://clank.acme.com\"]\n{MINIMAL}"
+        );
+
+        let config = Config::parse(text).unwrap();
+
+        assert_eq!(
+            config.cors_origins(),
+            ["https://clank.acme.com", "http://localhost:5173"]
+        );
+    }
+
+    #[test]
+    fn a_public_url_without_scheme_is_rejected() {
+        let text = format!("public_url = \"clank.acme.com\"\n{MINIMAL}");
+
+        assert!(matches!(Config::parse(text), Err(ConfigError::Invalid(_))));
     }
 
     #[test]
@@ -330,6 +400,19 @@ mod tests {
         assert_eq!(
             config.budgets.max_turns_per_activation,
             Budgets::default().max_turns_per_activation
+        );
+    }
+
+    #[test]
+    fn example_config_in_the_repository_is_valid() {
+        let config = Config::parse(include_str!("../../../clankjob.example.toml")).unwrap();
+
+        assert_eq!(config.llm["default"].base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(
+            config.api.tokens[0],
+            SecretRef::Env {
+                env: "CLANKJOB_TOKEN".to_owned()
+            }
         );
     }
 

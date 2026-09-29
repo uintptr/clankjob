@@ -1,0 +1,10 @@
+## Instructions from the owner
+
+Follow these like the goal. The owner can edit them while the case runs; this is the
+current version.
+{% for instruction in instructions %}
+
+### {{ instruction.name }}
+
+{{ instruction.content | trim }}
+{% endfor %}

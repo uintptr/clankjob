@@ -1,0 +1,20 @@
+# Discord plugin instances (design section 9.4). Copy to config.toml in this
+# directory (it is git-ignored) and fill it in. Each [instances.<name>] is one
+# channel; cases pick it by name, e.g. human_channels = ["discord_joe"].
+
+[instances.discord_joe]
+# The token is the whole bot: keep it out of this file. Resolved by the server
+# from /run/secrets/discord_bot_token, or use { env = "DISCORD_BOT_TOKEN" }.
+bot_token = { secret = "discord_bot_token" }
+
+# Right-click the channel -> Copy Channel ID (Developer Mode on).
+channel_id = "123456789012345678"
+
+# Right-click yourself -> Copy User ID. Only these users can answer.
+allowed_responders = ["234567890123456789"]
+
+# @-mention the responders on questions and approvals (default true).
+mention = true
+
+# poll_interval = "20s"
+# notify_on = ["completed", "failed", "budget_exceeded"]

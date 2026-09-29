@@ -10,9 +10,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use clankjob_core::case::{Budgets, CaseNote, Usage};
-use clankjob_core::event::WakeReason;
-use clankjob_core::ids::{HumanRequestId, WaitConditionId};
+use clankjob_core::case::{Budgets, CaseNote, Instruction, Usage};
+use clankjob_core::event::{InstructionChange, WakeReason};
+use clankjob_core::file::FileKind;
+use clankjob_core::ids::{CaseId, FileId, HumanRequestId, InstructionId, WaitConditionId};
 use clankjob_core::llm::ToolSpec;
 use minijinja::{Environment, UndefinedBehavior};
 use serde::Serialize;
@@ -26,14 +27,20 @@ pub const CASE_HEADER: &str = "case_header";
 pub const WAKE: &str = "wake";
 /// Template sent when the LLM answers without calling a tool.
 pub const NUDGE: &str = "nudge";
+/// Template for the owner's instructions, always in the system prompt.
+pub const INSTRUCTIONS: &str = "instructions";
+/// Template listing the files added to a case, in the system prompt.
+pub const FILES: &str = "files";
 
 /// Name prefix of profile templates, e.g. `profiles/quotes`.
 const PROFILE_PREFIX: &str = "profiles/";
 
 /// Built-in templates. `include_str!` embeds each file in the binary at compile time.
-const BUILTINS: [(&str, &str); 4] = [
+const BUILTINS: [(&str, &str); 6] = [
     (SYSTEM, include_str!("../prompts/system.md.j2")),
     (CASE_HEADER, include_str!("../prompts/case_header.md.j2")),
+    (INSTRUCTIONS, include_str!("../prompts/instructions.md.j2")),
+    (FILES, include_str!("../prompts/files.md.j2")),
     (WAKE, include_str!("../prompts/wake.md.j2")),
     (NUDGE, include_str!("../prompts/nudge.md.j2")),
 ];
@@ -106,6 +113,10 @@ pub struct PromptContext<'a> {
     pub notes: &'a [CaseNote],
     /// Tools available to the LLM.
     pub tools: &'a [ToolSpec],
+    /// The owner's instructions for the case.
+    pub instructions: &'a [Instruction],
+    /// Files added to the case, as presented to the agent.
+    pub files: &'a [crate::files::FileView],
     /// Why the case woke up; only set when rendering the `wake` template.
     pub wake: Option<&'a WakeReason>,
 }
@@ -148,8 +159,12 @@ fn render_source(name: &str, source: &str, context: &PromptContext<'_>) -> Resul
         })
 }
 
-fn sha256_hex(content: &str) -> String {
-    let digest = Sha256::digest(content.as_bytes());
+/// SHA-256 of some bytes, hex encoded.
+pub(crate) fn sha256_hex<B>(content: B) -> String
+where
+    B: AsRef<[u8]>,
+{
+    let digest = Sha256::digest(content.as_ref());
     digest.iter().fold(String::with_capacity(64), |mut hex, byte| {
         // Writing to a String cannot fail, so the result is ignored.
         let _ = write!(hex, "{byte:02x}");
@@ -175,6 +190,22 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         description: "A tool.".to_owned(),
         parameters: serde_json::json!({"type": "object"}),
     }];
+    let files = [crate::files::FileView {
+        name: "notes.md".to_owned(),
+        kind: FileKind::Text,
+        size: "1 KB".to_owned(),
+        pages: Some(1),
+        access: crate::files::Access::ReadFile,
+        note: None,
+    }];
+    let instructions = [Instruction {
+        id: InstructionId::generate(),
+        case_id: CaseId::generate(),
+        name: "tone.md".to_owned(),
+        content: "Be polite.".to_owned(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }];
     let base = PromptContext {
         now: "2026-01-01T00:00:00Z".to_owned(),
         case: CaseView {
@@ -187,6 +218,8 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         usage: &usage,
         notes: &notes,
         tools: &tools,
+        instructions: &instructions,
+        files: &files,
         wake: None,
     };
     match role_of(name) {
@@ -213,6 +246,16 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
                     kind: "core.timer".to_owned(),
                 },
                 WakeReason::Manual,
+                WakeReason::InstructionsChanged {
+                    instruction_id: InstructionId::generate(),
+                    name: "tone.md".to_owned(),
+                    change: InstructionChange::Updated,
+                },
+                WakeReason::FileAdded {
+                    file_id: FileId::generate(),
+                    name: "panel.jpg".to_owned(),
+                    kind: FileKind::Image,
+                },
             ];
             reasons.iter().try_for_each(|reason| {
                 render_source(
@@ -417,6 +460,8 @@ mod tests {
             usage,
             notes: &[],
             tools: &[],
+            instructions: &[],
+            files: &[],
             wake: None,
         }
     }
@@ -535,6 +580,66 @@ mod tests {
 
         assert!(text.contains("- price: 1450"));
         assert!(text.contains("- Owner: joe"));
+    }
+
+    #[test]
+    fn files_template_lists_files_without_their_content() {
+        let set = PromptSet::builtin();
+        let (budgets, usage) = (Budgets::default(), Usage::default());
+        let view = |name: &str, kind, access, pages| crate::files::FileView {
+            name: name.to_owned(),
+            kind,
+            size: "2 KB".to_owned(),
+            pages,
+            access,
+            note: None,
+        };
+        let files = [
+            view("contract.pdf", FileKind::Pdf, crate::files::Access::ReadFile, Some(1)),
+            view("panel.jpg", FileKind::Image, crate::files::Access::ViewImage, None),
+        ];
+
+        let text = set
+            .render(
+                FILES,
+                &PromptContext {
+                    files: &files,
+                    ..context(&budgets, &usage)
+                },
+            )
+            .unwrap();
+
+        assert!(text.starts_with("## Files"));
+        assert!(text.contains("- `contract.pdf`: pdf, 2 KB, 1 page. Read it with `read_file`.\n"));
+        assert!(text.ends_with("- `panel.jpg`: image, 2 KB. Look at it with `view_image`."));
+    }
+
+    #[test]
+    fn instructions_template_includes_every_instruction_in_full() {
+        let set = PromptSet::builtin();
+        let (budgets, usage) = (Budgets::default(), Usage::default());
+        let instruction = |name: &str, content: &str| Instruction {
+            id: InstructionId::generate(),
+            case_id: CaseId::generate(),
+            name: name.to_owned(),
+            content: content.to_owned(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let instructions = [instruction("tone.md", "Be polite.\n"), instruction("budget.md", "Max $1,500.")];
+
+        let text = set
+            .render(
+                INSTRUCTIONS,
+                &PromptContext {
+                    instructions: &instructions,
+                    ..context(&budgets, &usage)
+                },
+            )
+            .unwrap();
+
+        assert!(text.starts_with("## Instructions from the owner"));
+        assert!(text.contains("### tone.md\n\nBe polite.\n\n### budget.md\n\nMax $1,500."));
     }
 
     #[test]

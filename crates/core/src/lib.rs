@@ -58,6 +58,7 @@ macro_rules! string_enum {
 
 pub mod case;
 pub mod event;
+pub mod file;
 pub mod human;
 pub mod ids;
 pub mod llm;

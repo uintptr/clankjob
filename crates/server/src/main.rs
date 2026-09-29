@@ -21,11 +21,17 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 mod api;
+mod catalog;
 mod config;
+mod cors;
+mod web;
 
 use config::{Config, ProviderKind};
 
 const DEFAULT_CONFIG_PATH: &str = "/config/clankjob.toml";
+
+/// How often provider model lists (e.g. OpenRouter's catalog) are fetched again.
+const MODEL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_hours(1);
 
 /// Log as JSON when `CLANKJOB_LOG_FORMAT=json` (containers), as text otherwise.
 /// The level comes from `RUST_LOG`, defaulting to `info`.
@@ -64,6 +70,7 @@ fn build_providers(config: &Config) -> anyhow::Result<HashMap<String, Arc<dyn Ll
                     api_key,
                     model: llm.model.clone(),
                     timeout: llm.timeout,
+                    vision: llm.vision,
                 })),
             };
             Ok((name.clone(), provider))
@@ -82,6 +89,18 @@ fn run() -> anyhow::Result<()> {
         .collect::<Result<_, _>>()
         .context("API tokens")?;
     let providers = build_providers(&config)?;
+    let catalog = Arc::new(catalog::Catalog::new(
+        config
+            .llm
+            .iter()
+            .map(|(name, llm)| catalog::CatalogLlm {
+                name: name.clone(),
+                model: llm.model.clone(),
+                suggested: llm.models.clone(),
+                provider: providers.get(name).filter(|_| llm.discover_models).map(Arc::clone),
+            })
+            .collect(),
+    ));
 
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("creating data directory {}", config.data_dir.display()))?;
@@ -96,7 +115,8 @@ fn run() -> anyhow::Result<()> {
         ..EngineSettings::default()
     };
     // Rejected prompt files are logged by the engine as they are loaded.
-    let engine = Engine::new(db, providers, config.prompts_dir.clone(), settings);
+    let files_dir = config.data_dir.join("files");
+    let engine = Engine::new(db, providers, config.prompts_dir.clone(), files_dir, settings);
     let workers = engine.start().context("starting engine threads")?;
 
     let defaults = api::CaseDefaults {
@@ -104,10 +124,19 @@ fn run() -> anyhow::Result<()> {
         profile: config.default_profile.clone(),
         budgets: config.budgets,
     };
-    let state = api::AppState::new(engine.clone(), tokens, defaults);
-    let server = rouille::Server::new(&config.listen, move |request| api::handle(&state, request))
-        .map_err(|error| anyhow!("cannot listen on {}: {error}", config.listen))?;
-    tracing::info!(address = %server.server_addr(), "listening");
+    catalog::spawn_refresher(Arc::clone(&catalog), MODEL_REFRESH_INTERVAL).context("starting the model catalog")?;
+    let state = api::AppState::new(engine.clone(), tokens, defaults, catalog);
+    let cors = cors::Cors::new(config.cors_origins());
+    let server = rouille::Server::new(&config.listen, move |request| {
+        if let Some(preflight) = cors.preflight(request) {
+            return preflight;
+        }
+        let response = web::serve(request).unwrap_or_else(|| api::handle(&state, request));
+        cors.apply(request, response)
+    })
+    .map_err(|error| anyhow!("cannot listen on {}: {error}", config.listen))?;
+    let public_url = config.public_url.as_deref().unwrap_or("not set");
+    tracing::info!(address = %server.server_addr(), public_url, "listening");
     let (server_thread, stop_server) = server.stoppable();
 
     let mut signals = Signals::new([SIGTERM, SIGINT, SIGHUP]).context("installing signal handlers")?;

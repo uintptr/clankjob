@@ -1,0 +1,13 @@
+# clankjob plugin manifest (design section 9.3).
+id = "discord"
+name = "Discord"
+version = "0.1.0"
+runtime = "python"             # standard library only, Python 3.11+
+protocol = 1                   # plugin protocol version (design section 9.8)
+entrypoint = "discord_plugin.py"
+config_schema = "schema.json"
+concurrency = 1
+
+# No LLM tools and no wait conditions: Discord is a human channel. The server
+# delivers questions and approvals here and polls for the answers (section 10.3).
+[human_channel]

@@ -1,0 +1,91 @@
+# clankjob configuration example.
+#
+# Copy it and edit your copy (clankjob.toml is git-ignored):
+#
+#     cp clankjob.example.toml clankjob.toml
+#     export CLANKJOB_TOKEN=dev-token
+#     export OPENROUTER_API_KEY=sk-or-...
+#     cargo run -p clankjob-server -- clankjob.toml
+#
+# Then open http://127.0.0.1:8080 and sign in with your token.
+#
+# Secrets are never written in this file. They are references resolved at startup:
+#     { env = "NAME" }       an environment variable
+#     { secret = "name" }    a file in `secrets_dir` (Docker secrets)
+
+# Address the API and web UI listen on. Use "0.0.0.0:8080" inside a container.
+listen = "127.0.0.1:8080"
+
+# The address people use to reach the server, e.g. behind a reverse proxy that
+# terminates TLS. The web UI is served from the same origin as the API, so it never
+# needs CORS; browser pages on this origin are also allowed to call the API.
+# public_url = "https://clank.acme.com"
+
+# Other origins whose pages may call the API from a browser (CORS), e.g. a UI hosted
+# elsewhere or a development server. Everything else is blocked by the browser.
+# allowed_origins = ["http://localhost:5173"]
+
+# Where the SQLite database lives. Created if missing.
+data_dir = "./data"
+
+# Optional: prompt overrides and profiles (see README, "Tuning behaviour with prompts").
+# prompts_dir = "./prompts"
+
+# Where `{ secret = "…" }` references are read from.
+# secrets_dir = "/run/secrets"
+
+# Threads running activations. Each one can run one case at a time.
+workers = 4
+
+# How long to wait for running activations when shutting down.
+shutdown_grace = "30s"
+
+# Used by cases that don't name their own LLM or profile.
+default_llm = "default"
+# default_profile = "quotes"   # must exist as prompts/profiles/quotes.md
+
+[api]
+# Bearer tokens accepted by the API and the web UI sign-in. At least one is required.
+tokens = [{ env = "CLANKJOB_TOKEN" }]
+
+# LLMs. Each [llm.<name>] can be picked per case; `default_llm` names the fallback.
+# Any OpenAI-compatible endpoint works. The model must support tool calling.
+
+# OpenRouter: one key, many models. Model ids are listed on openrouter.ai/models.
+[llm.default]
+provider = "openai-compatible"
+base_url = "https://openrouter.ai/api/v1"
+api_key = { env = "OPENROUTER_API_KEY" }
+model = "openai/gpt-4.1-mini"
+# The web UI offers every tool-capable model the provider lists at {base_url}/models,
+# with prices, refreshed hourly. Set to false to offer only `model` and `models`.
+discover_models = true
+# Pinned at the top of the list, before the discovered models. Optional.
+models = ["openai/gpt-4.1", "openai/gpt-4.1-nano", "google/gemini-2.5-flash"]
+timeout = "5m"
+# The model can see images: cases can then show it image files with `view_image`.
+# Check the model supports image input first (OpenRouter lists it as an input modality).
+vision = false
+
+# A local model with Ollama. No key needed. Discovery lists the models you pulled.
+# [llm.local]
+# provider = "openai-compatible"
+# base_url = "http://localhost:11434/v1"
+# model = "qwen3:14b"
+
+# OpenAI directly. Its model list doesn't say which models can call tools and includes
+# embedding, image and audio models, so offer a curated list instead.
+# [llm.openai]
+# provider = "openai-compatible"
+# base_url = "https://api.openai.com/v1"
+# api_key = { env = "OPENAI_API_KEY" }
+# model = "gpt-4.1-mini"
+# discover_models = false
+# models = ["gpt-4.1", "gpt-4.1-nano"]
+
+# Limits for cases that don't set their own. A case that exceeds one fails; send it a
+# message to reopen it after raising the limit.
+[budgets]
+max_activations = 20  # wake-ups that reach the LLM, over the case's life
+max_turns_per_activation = 30  # LLM calls within one wake-up
+max_total_tokens = 2000000  # input + output tokens, over the case's life

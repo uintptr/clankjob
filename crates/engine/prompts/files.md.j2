@@ -1,0 +1,9 @@
+## Files
+
+Material the owner added to this case. It is not included here, to save space: read only
+what you need, with the tools.
+
+{% for file in files %}
+- `{{ file.name }}`: {{ file.kind }}, {{ file.size }}{{ (", " ~ file.pages ~ (" page" if file.pages == 1 else " pages")) if file.pages else "" }}. {% if file.access == "read_file" %}Read it with `read_file`.{% elif file.access == "view_image" %}Look at it with `view_image`.{% else %}{{ file.note }}{% endif %}
+
+{% endfor %}

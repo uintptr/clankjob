@@ -11,6 +11,7 @@ use std::thread;
 use chrono::Utc;
 use clankjob_core::case::{Case, CaseState};
 use clankjob_core::event::{Event, EventBody, ToolResult};
+use clankjob_core::file::{CaseFile, FileKind};
 use clankjob_core::ids::{ActivationId, CaseId, HumanRequestId, WaitConditionId};
 use clankjob_core::llm::{CompletionRequest, CompletionResponse, LlmError, LlmProvider, TokenUsage, ToolCall};
 use clankjob_core::wait::{HUMAN_INPUT_KIND, WaitCondition, WaitConditionSpec, WaitStatus};
@@ -18,8 +19,11 @@ use clankjob_storage::{self as storage, Connection, begin_write, commit};
 use serde_json::{Value, json};
 
 use crate::context::{build_messages, pending_tool_calls};
-use crate::prompts::{CASE_HEADER, CaseView, PromptContext, PromptSet, SYSTEM};
-use crate::tools::{AskHumanArgs, CoreTool, add, core_tool_specs, schedule};
+use crate::files::{FileStore, chunk, find, views};
+use crate::prompts::{CASE_HEADER, CaseView, FILES, INSTRUCTIONS, PromptContext, PromptSet, SYSTEM};
+use crate::tools::{
+    AskHumanArgs, CoreTool, DEFAULT_READ_CHARS, MAX_READ_CHARS, ReadFileArgs, add, core_tool_specs, schedule,
+};
 use crate::transitions::{ClaimedCase, change_state, load_case};
 use crate::{Result, Shared, later};
 
@@ -132,8 +136,53 @@ fn ask_human(connection: &Connection, case: &Case, args: &AskHumanArgs) -> Resul
     ))
 }
 
+/// What the file tools need to know about the case.
+struct FileEnv<'a> {
+    files: &'a [CaseFile],
+    vision: bool,
+}
+
+/// `read_file`: a chunk of a text file or PDF.
+fn read_file(env: &FileEnv<'_>, args: &ReadFileArgs) -> ToolExecution {
+    let file = match find(env.files, &args.file) {
+        Ok(file) => file,
+        Err(message) => return ToolExecution::error(message),
+    };
+    let Some(text) = &file.text else {
+        let why = if file.kind == FileKind::Image {
+            "is an image: use `view_image`"
+        } else {
+            "has no text layer (probably a scan)"
+        };
+        return ToolExecution::error(format!("`{}` {why}", file.name));
+    };
+    let max_chars = args.max_chars.unwrap_or(DEFAULT_READ_CHARS).clamp(1, MAX_READ_CHARS);
+    let (part, next_offset) = chunk(text, args.offset, max_chars);
+    ToolExecution::ok(json!({
+        "file": file.name,
+        "offset": args.offset,
+        "text": part,
+        "next_offset": next_offset,
+        "total_chars": file.text_chars,
+    }))
+}
+
+/// `view_image`: the image itself is attached when the conversation is rebuilt.
+fn view_image(env: &FileEnv<'_>, wanted: &str) -> ToolExecution {
+    if !env.vision {
+        return ToolExecution::error("the current model cannot see images".to_owned());
+    }
+    match find(env.files, wanted) {
+        Ok(file) if file.kind == FileKind::Image => {
+            ToolExecution::ok(json!({ "status": "shown", "file": file.name, "image_file_id": file.id }))
+        }
+        Ok(file) => ToolExecution::error(format!("`{}` is not an image: use `read_file`", file.name)),
+        Err(message) => ToolExecution::error(message),
+    }
+}
+
 /// Run one core tool call inside the caller's transaction.
-fn execute(connection: &Connection, case: &Case, call: &ToolCall) -> Result<ToolExecution> {
+fn execute(connection: &Connection, case: &Case, call: &ToolCall, env: &FileEnv<'_>) -> Result<ToolExecution> {
     let tool = match CoreTool::parse(call) {
         Ok(tool) => tool,
         Err(message) => return Ok(ToolExecution::error(message)),
@@ -167,6 +216,8 @@ fn execute(connection: &Connection, case: &Case, call: &ToolCall) -> Result<Tool
             let existed = storage::notes::delete_note(connection, &case.id, &args.key)?;
             ToolExecution::ok(json!({ "deleted": existed }))
         }
+        CoreTool::ReadFile(args) => read_file(env, &args),
+        CoreTool::ViewImage(args) => view_image(env, &args.file),
     })
 }
 
@@ -177,9 +228,14 @@ fn build_request(
     case: &Case,
     events: &[Event],
     model: String,
+    vision: bool,
+    store: &FileStore,
 ) -> Result<CompletionRequest> {
     let notes = storage::notes::list_notes(connection, &case.id)?;
-    let tools = core_tool_specs();
+    let instructions = storage::instructions::list_instructions(connection, &case.id)?;
+    let files = storage::files::list_files(connection, &case.id)?;
+    let file_views = views(&files, vision);
+    let tools = core_tool_specs(!files.is_empty(), vision);
     let context = PromptContext {
         now: Utc::now().to_rfc3339(),
         case: CaseView {
@@ -192,6 +248,8 @@ fn build_request(
         usage: &case.usage,
         notes: &notes,
         tools: &tools,
+        instructions: &instructions,
+        files: &file_views,
         wake: None,
     };
     let mut sections = vec![prompts.render(SYSTEM, &context)?];
@@ -202,10 +260,18 @@ fn build_request(
         None => {}
     }
     sections.push(prompts.render(CASE_HEADER, &context)?);
+    if !instructions.is_empty() {
+        sections.push(prompts.render(INSTRUCTIONS, &context)?);
+    }
+    if !files.is_empty() {
+        sections.push(prompts.render(FILES, &context)?);
+    }
+    let image =
+        |id: &clankjob_core::ids::FileId| files.iter().find(|file| &file.id == id).and_then(|file| store.image(file));
     Ok(CompletionRequest {
         model,
         system: sections.join("\n\n"),
-        messages: build_messages(events, prompts, &context)?,
+        messages: build_messages(events, prompts, &context, &image)?,
         tools,
     })
 }
@@ -271,7 +337,13 @@ impl Activation<'_> {
                 // Cancelled meanwhile; dropping the transaction rolls it back.
                 return Ok(Flow::Stop);
             }
-            let execution = execute(&transaction, &case, call)?;
+            let files = storage::files::list_files(&transaction, &case.id)?;
+            let vision = self
+                .shared
+                .providers
+                .get(&case.llm)
+                .is_some_and(|provider| provider.supports_images());
+            let execution = execute(&transaction, &case, call, &FileEnv { files: &files, vision })?;
             let result = ToolResult {
                 tool_call_id: call.id.clone(),
                 tool_name: call.name.clone(),
@@ -408,7 +480,16 @@ impl Activation<'_> {
             return self.fail(&case, &format!("LLM `{}` is not configured", case.llm));
         };
         let model = case.model.clone().unwrap_or_else(|| provider.default_model().to_owned());
-        let request = build_request(self.connection, &self.prompts, &case, &events, model)?;
+        let vision = provider.supports_images();
+        let request = build_request(
+            self.connection,
+            &self.prompts,
+            &case,
+            &events,
+            model,
+            vision,
+            &self.shared.files,
+        )?;
         let lease_until = later(Utc::now(), self.shared.settings.lease);
         storage::queue::renew_lease(self.connection, &case.id, lease_until)?;
         self.turns = self.turns.saturating_add(1);
@@ -510,6 +591,7 @@ mod tests {
             llm: "default".to_owned(),
             model: None,
             budgets,
+            instructions: Vec::new(),
         };
         engine.create_case(connection, &new_case).unwrap()
     }
@@ -579,7 +661,9 @@ mod tests {
         let requests = provider.requests.lock().unwrap();
         let second = requests.last().unwrap();
         assert!(second.system.contains("- electrician: bob@sparky.ca"));
-        assert!(matches!(second.messages.last(), Some(Message::User { text }) if text.contains("`core.timer` fired")));
+        assert!(
+            matches!(second.messages.last(), Some(Message::User { text, .. }) if text.contains("`core.timer` fired"))
+        );
     }
 
     #[test]
@@ -613,6 +697,231 @@ mod tests {
             body,
             EventBody::Wake(clankjob_core::event::WakeReason::HumanAnswer { answer, .. }) if answer == "Yes"
         )));
+    }
+
+    #[test]
+    fn files_added_mid_case_wake_it_and_are_readable_and_viewable() {
+        // Arrange: a sleeping case, then three files arrive.
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let sleep = json!({"conditions": [{"kind": "core.timer", "params": {"after": "1d"}}], "reason": "wait"});
+        let provider = ScriptedProvider::with_vision([
+            Ok(reply(&[("sleep", sleep)])),
+            Ok(reply(&[(
+                "read_file",
+                json!({"file": "contract.txt", "offset": 5, "max_chars": 10}),
+            )])),
+            Ok(reply(&[("view_image", json!({"file": "PANEL.png"}))])),
+            Ok(reply(&[("complete", json!({"summary": "done"}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let case = create(&engine, &mut connection, Budgets::default());
+        assert_eq!(activate(&engine, &mut connection).state, CaseState::Sleeping);
+        let long = format!("start{}", "x".repeat(20_000));
+        engine
+            .add_file(&mut connection, &case.id, "tone.md", b"Never offer more than $1,500.")
+            .unwrap();
+        engine
+            .add_file(&mut connection, &case.id, "contract.txt", long.as_bytes())
+            .unwrap();
+        engine
+            .add_file(
+                &mut connection,
+                &case.id,
+                "uploads/panel.png",
+                b"\x89PNG\r\n\x1a\nbytes",
+            )
+            .unwrap();
+
+        // Act
+        let done = activate(&engine, &mut connection);
+
+        // Assert
+        assert_eq!(done.state, CaseState::Completed);
+        let requests = provider.requests.lock().unwrap();
+        let first = &requests[1];
+        // Files are listed, never pasted into the prompt, however small.
+        assert!(first.system.contains("- `tone.md`: text, 29 B. Read it with `read_file`."));
+        assert!(
+            first
+                .system
+                .contains("- `contract.txt`: text, 20 KB. Read it with `read_file`.")
+        );
+        assert!(!first.system.contains("Never offer more than $1,500."));
+        assert!(first.tools.iter().any(|tool| tool.name == "view_image"));
+        let wakes = first
+            .messages
+            .iter()
+            .filter(|message| matches!(message, Message::User { text, .. } if text.contains("The owner added a file")));
+        assert_eq!(wakes.count(), 3);
+        assert!(matches!(
+            requests[2].messages.last(),
+            Some(Message::Tool { content, .. }) if content.contains(r#""text":"xxxxxxxxxx""#) && content.contains(r#""next_offset":15"#)
+        ));
+        assert!(matches!(
+            requests[3].messages.last(),
+            Some(Message::User { images, .. }) if images.first().is_some_and(|image| image.media_type == "image/png")
+        ));
+    }
+
+    fn new_case_with(instructions: Vec<clankjob_core::case::NewInstruction>) -> NewCase {
+        NewCase {
+            title: "Quote".to_owned(),
+            goal: "Get a quote".to_owned(),
+            owner: None,
+            profile: None,
+            llm: "default".to_owned(),
+            model: None,
+            budgets: Budgets::default(),
+            instructions,
+        }
+    }
+
+    fn instruction(name: &str, content: &str) -> clankjob_core::case::NewInstruction {
+        clankjob_core::case::NewInstruction {
+            name: name.to_owned(),
+            content: content.to_owned(),
+        }
+    }
+
+    #[test]
+    fn instructions_are_followed_from_the_first_run_and_edits_wake_the_case() {
+        // Arrange: created with one instruction, then the agent sleeps.
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let sleep = json!({"conditions": [{"kind": "core.timer", "params": {"after": "1d"}}], "reason": "wait"});
+        let provider = ScriptedProvider::new([
+            Ok(reply(&[("sleep", sleep.clone())])),
+            Ok(reply(&[("sleep", sleep)])),
+            Ok(reply(&[("complete", json!({"summary": "done"}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let case = engine
+            .create_case(
+                &mut connection,
+                &new_case_with(vec![instruction("tone.md", "Be polite.")]),
+            )
+            .unwrap();
+        activate(&engine, &mut connection);
+        let tone = storage::instructions::list_instructions(&connection, &case.id)
+            .unwrap()
+            .remove(0);
+
+        // Act: edit it, which wakes the case; then add and remove another.
+        engine
+            .change_instruction(
+                &mut connection,
+                &case.id,
+                Some(&tone.id),
+                Some(&instruction("tone.md", "Be firm.")),
+            )
+            .unwrap();
+        activate(&engine, &mut connection);
+        let extra = engine
+            .change_instruction(
+                &mut connection,
+                &case.id,
+                None,
+                Some(&instruction("budget.md", "Max $1,500.")),
+            )
+            .unwrap()
+            .unwrap();
+        engine
+            .change_instruction(&mut connection, &case.id, Some(&extra.id), None)
+            .unwrap();
+        activate(&engine, &mut connection);
+
+        // Assert
+        let requests = provider.requests.lock().unwrap();
+        assert!(requests[0].system.contains("## Instructions from the owner"));
+        assert!(requests[0].system.contains("### tone.md\n\nBe polite."));
+        assert!(requests[1].system.contains("### tone.md\n\nBe firm."));
+        assert!(matches!(
+            requests[1].messages.last(),
+            Some(Message::User { text, .. }) if text.contains("The owner updated the instruction `tone.md`")
+        ));
+        assert!(!requests[2].system.contains("budget.md"));
+        assert!(matches!(
+            requests[2].messages.last(),
+            Some(Message::User { text, .. }) if text.contains("The owner removed the instruction `budget.md`")
+        ));
+    }
+
+    #[test]
+    fn instruction_limits_are_enforced() {
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let engine = engine(&test_db, ScriptedProvider::new([]));
+        let too_long = "x".repeat(crate::MAX_INSTRUCTION_CHARS + 1);
+        let near_limit = "y".repeat(crate::MAX_INSTRUCTION_CHARS);
+
+        let created = engine.create_case(&mut connection, &new_case_with(vec![instruction("big.md", &too_long)]));
+        let case = engine
+            .create_case(
+                &mut connection,
+                &new_case_with(vec![instruction("a.md", &near_limit), instruction("b.md", &near_limit)]),
+            )
+            .unwrap();
+        let over_total =
+            engine.change_instruction(&mut connection, &case.id, None, Some(&instruction("c.md", &near_limit)));
+        let empty = engine.change_instruction(&mut connection, &case.id, None, Some(&instruction("d.md", "  ")));
+        let missing = engine.change_instruction(
+            &mut connection,
+            &case.id,
+            Some(&clankjob_core::ids::InstructionId::generate()),
+            None,
+        );
+
+        assert!(matches!(created, Err(crate::EngineError::InvalidInstruction(_))));
+        assert!(
+            matches!(over_total, Err(crate::EngineError::InvalidInstruction(message)) if message.contains("use files"))
+        );
+        assert!(matches!(empty, Err(crate::EngineError::InvalidInstruction(_))));
+        assert!(matches!(missing, Err(crate::EngineError::InstructionNotFound(_))));
+    }
+
+    #[test]
+    fn bad_files_and_cancelled_cases_are_refused() {
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let engine = engine(&test_db, ScriptedProvider::new([]));
+        let case = create(&engine, &mut connection, Budgets::default());
+
+        let binary = engine.add_file(&mut connection, &case.id, "app.exe", b"MZ\x90\x00\xff\xfe");
+        let empty = engine.add_file(&mut connection, &case.id, "empty.txt", b"");
+        engine.cancel_case(&mut connection, &case.id).unwrap();
+        let cancelled = engine.add_file(&mut connection, &case.id, "late.txt", b"too late");
+
+        assert!(matches!(binary, Err(crate::EngineError::InvalidFile(_))));
+        assert!(matches!(empty, Err(crate::EngineError::InvalidFile(_))));
+        assert!(matches!(cancelled, Err(crate::EngineError::InvalidState { .. })));
+        assert!(storage::files::list_files(&connection, &case.id).unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(&test_db.files_dir).map_or(0, Iterator::count), 0);
+    }
+
+    #[test]
+    fn view_image_is_refused_without_vision() {
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let provider = ScriptedProvider::new([
+            Ok(reply(&[("view_image", json!({"file": "panel.png"}))])),
+            Ok(reply(&[("complete", json!({"summary": "done"}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let case = create(&engine, &mut connection, Budgets::default());
+        engine
+            .add_file(&mut connection, &case.id, "panel.png", b"\x89PNG\r\n\x1a\n")
+            .unwrap();
+
+        activate(&engine, &mut connection);
+
+        let requests = provider.requests.lock().unwrap();
+        assert!(!requests[0].tools.iter().any(|tool| tool.name == "view_image"));
+        assert!(requests[0].system.contains("cannot see images"));
+        assert!(matches!(
+            requests[1].messages.last(),
+            Some(Message::Tool { content, .. }) if content.contains("cannot see images")
+        ));
     }
 
     #[test]

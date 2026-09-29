@@ -17,6 +17,12 @@ You were woken up because the condition `{{ wake.kind }}` fired.
 You were woken up because the wait for `{{ wake.kind }}` timed out before it happened.
 {% elif wake.reason == "manual" %}
 The owner woke you up. Review the situation and decide what to do next.
+{% elif wake.reason == "instructions_changed" %}
+The owner {{ wake.change }} the instruction `{{ wake.name }}`. Your instructions show the
+current version: check whether it changes what you should do.
+{% elif wake.reason == "file_added" %}
+The owner added a file to the case: `{{ wake.name }}` ({{ wake.kind }}). It is listed under "Files" in
+your instructions.
 {% endif %}
 
 (Time: {{ now }})

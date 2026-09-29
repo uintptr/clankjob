@@ -86,3 +86,31 @@ CREATE TABLE human_requests (
 );
 CREATE INDEX human_requests_case ON human_requests (case_id, status);
 CREATE INDEX human_requests_status ON human_requests (status, created_at);
+
+-- Owner-written guidance, always in the case's system prompt (design §7.5). Added when
+-- the case is created or later, and editable.
+CREATE TABLE instructions (
+    id          TEXT PRIMARY KEY,
+    case_id     TEXT NOT NULL REFERENCES cases (id),
+    name        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+CREATE INDEX instructions_case ON instructions (case_id);
+
+-- Files added to a case while it runs (design §7.5). Bytes live on disk under the
+-- data directory.
+CREATE TABLE files (
+    id          TEXT PRIMARY KEY,
+    case_id     TEXT NOT NULL REFERENCES cases (id),
+    name        TEXT NOT NULL,
+    media_type  TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    sha256      TEXT NOT NULL,
+    text        TEXT,
+    pages       INTEGER,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX files_case ON files (case_id);
