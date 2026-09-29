@@ -128,6 +128,9 @@ plugin/<id>/
   `requires_config = true` in `plugin.toml`: it stays unloaded, with a note on the Plugins
   page, until its `config.toml` exists, so the agent is never offered tools that can only
   fail. The Docker image bundles every plugin without its `config.toml`.
+- **Python 3.11.** The Docker image runs plugins with Debian bookworm's Python 3.11, so
+  no 3.12+ syntax or library (e.g. the same quotes nested inside an f-string). CI runs
+  every plugin's tests on 3.11.
 - **Secrets never go in `config.toml`.** Use `{ env = "NAME" }` or `{ secret = "name" }`;
   the example file shows the reference, never a placeholder that looks like a value.
 - **Self-contained.** A plugin directory must work when copied or mounted alone, so it

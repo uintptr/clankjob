@@ -7,6 +7,43 @@ repository (without settings), Python and `uv` for plugins, and the programs beh
 document tools (ExifTool, Poppler, Tesseract OCR, pandoc, FFmpeg). On the server you only
 need Docker with Compose; nothing is built there.
 
+## Quick setup with deploy.py
+
+`deploy.py` (Python 3.11+, standard library only) does the whole setup: it downloads the
+plugins and templates, asks for your settings and secrets, and writes everything Docker
+Compose needs.
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/uintptr/clankjob/main/deploy/deploy.py
+python3 deploy.py ~/clankjob
+```
+
+It asks for your public URL, LLM endpoint, model and API key, generates the token you sign
+in with, and offers to configure each plugin (email, Discord, …), walking through its
+example settings. Secrets are typed hidden and only written to `.env` (mode 600). It
+creates:
+
+```
+~/clankjob/
+  compose.yaml      the published image, with ./plugins and ./prompts mounted
+  clankjob.toml     server settings
+  .env              secrets
+  plugins/<id>/     every plugin; config.toml for the ones you configured
+  prompts/          your prompt overrides and profiles
+  data/             database and case files
+```
+
+Run it again at any time to update the plugins or configure one you skipped
+(`--configure email`); it never overwrites a setting or secret you already have. Other
+options: `--ref v1.2.3` (plugins of a release), `--image-tag 1.2`, `--port 8081`,
+`--source ~/src/clankjob` (a local checkout), `--yes` (no questions). Then:
+
+```sh
+cd ~/clankjob && docker compose up -d
+```
+
+The rest of this page does the same by hand.
+
 ## First start
 
 ```sh

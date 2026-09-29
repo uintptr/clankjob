@@ -233,7 +233,9 @@ def approval_content(title: str, summary: str, details: object, case_url: str | 
     block = ""
     if details is not None:
         rendered = details if isinstance(details, str) else json.dumps(details, indent=2)
-        block = f"\n```\n{truncate(rendered.replace('```', "'''"), 1000)}\n```"
+        # Built outside the f-string: nesting the same quotes needs Python 3.12.
+        fenced = truncate(rendered.replace("```", "'''"), 1000)
+        block = f"\n```\n{fenced}\n```"
     return (f"**{truncate(title, 200)}** wants your approval\n"
             f"{truncate(summary, 500)}{block}\n"
             f"-# React {APPROVE} to approve or {REJECT} to reject. To edit it first, use the web UI.{link_line(case_url)}")

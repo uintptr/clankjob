@@ -3,9 +3,10 @@
 # channel; cases pick it by name, e.g. human_channels = ["discord_joe"].
 
 [instances.discord_joe]
-# The token is the whole bot: keep it out of this file. Resolved by the server
-# from /run/secrets/discord_bot_token, or use { env = "DISCORD_BOT_TOKEN" }.
-bot_token = { secret = "discord_bot_token" }
+# The token is the whole bot: keep it out of this file. Resolved by the server from
+# the environment (.env with Docker), or use { secret = "discord_bot_token" } for a
+# file in the secrets directory.
+bot_token = { env = "DISCORD_BOT_TOKEN" }
 
 # Right-click the channel -> Copy Channel ID (Developer Mode on).
 channel_id = "123456789012345678"

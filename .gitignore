@@ -4,3 +4,5 @@
 clankjob.toml
 plugin/*/config.toml
 token
+__pycache__/
+*.pyc

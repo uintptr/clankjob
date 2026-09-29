@@ -238,7 +238,9 @@ The web UI is on <http://127.0.0.1:8080>; put a reverse proxy with TLS in front 
 **On a server, without the source:** the image is published to
 `ghcr.io/uintptr/clankjob` (amd64 and arm64) by GitHub Actions. Download
 [`deploy/compose.yaml`](deploy/compose.yaml), write `clankjob.toml` and `.env`, and run
-`docker compose up -d`; [deploy/README.md](deploy/README.md) walks through it.
+`docker compose up -d`; [deploy/README.md](deploy/README.md) walks through it. Or let
+[`deploy/deploy.py`](deploy/deploy.py) do it: it downloads the plugins, asks for your
+settings and secrets, and writes everything.
 
 ## Development
 

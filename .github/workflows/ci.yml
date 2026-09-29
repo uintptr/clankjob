@@ -28,15 +28,15 @@ jobs:
       # The plugin host's tests start small Python and shell scripts.
       - run: cargo test --workspace --locked
 
-  plugins:
+  python:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        plugin: [discord, email, documents]
+        dir: [plugin/discord, plugin/email, plugin/documents, deploy]
     defaults:
       run:
-        working-directory: plugin/${{ matrix.plugin }}
+        working-directory: ${{ matrix.dir }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,4 +45,5 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: python -m unittest -v
       - run: uvx ruff check .
-      - run: uvx basedpyright .
+      # Errors fail the build; warnings are reported but allowed (agent/AGENT_python.md).
+      - run: uvx basedpyright --level error .
