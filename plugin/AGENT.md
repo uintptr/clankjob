@@ -24,6 +24,7 @@ Current checks:
 | -------------------- | ------------------------------------------------------------------------------------ |
 | `discord`            | token, channel type, Message Content intent, bot permissions, responders; `--notify` |
 | `email`              | IMAP login, folders listed and configured ones present, SMTP login                   |
+| `documents`          | the programs its tools drive, Tesseract languages, an OCR round trip                 |
 | `youtube_transcribe` | `uv` on PATH, the script runs, YouTube serves video details and caption tracks       |
 
 ### The contract
@@ -123,6 +124,10 @@ plugin/<id>/
   guides/*.md            optional instructions the agent reads with `read_guide`
 ```
 
+- **A plugin that cannot work unconfigured** (email needs a mailbox) sets
+  `requires_config = true` in `plugin.toml`: it stays unloaded, with a note on the Plugins
+  page, until its `config.toml` exists, so the agent is never offered tools that can only
+  fail. The Docker image bundles every plugin without its `config.toml`.
 - **Secrets never go in `config.toml`.** Use `{ env = "NAME" }` or `{ secret = "name" }`;
   the example file shows the reference, never a placeholder that looks like a value.
 - **Self-contained.** A plugin directory must work when copied or mounted alone, so it

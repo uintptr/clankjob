@@ -83,7 +83,7 @@ clankjob is young. Milestone 1, the engine every case depends on, is done and te
 | Command plugins: any CLI script as a tool, e.g. YouTube transcripts | Available |
 | Email: send, reply, read, wait for replies (you approve each email) | Available |
 | Approvals: approve, edit or reject tool calls (web and Discord)     | Available |
-| Docker image                                                        | Planned   |
+| Docker image with document tools (metadata, OCR, text extraction)   | Available |
 
 The full design, including everything planned, is in [docs/design.md](docs/design.md).
 
@@ -207,10 +207,38 @@ plugin/
   discord/      Discord human channel (Python, standard library only)
   youtube_transcribe/  YouTube transcripts as tools, plus analysis guides
   email/        send and read email, wait for replies (IMAP/SMTP, approvals)
+  documents/    metadata, OCR and text of the case's files
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/
   design.md     the full design
 ```
+
+## Run it with Docker
+
+The image has the server, Python for plugins, and the programs behind the document tools
+(ExifTool, Poppler, Tesseract OCR in English and French, pandoc, FFmpeg).
+`compose.yaml` runs it from this checkout with the same `clankjob.toml`, `plugin/` and
+`data/` as `cargo run`; the image overrides the listen address and paths itself.
+
+```sh
+# secrets for the { env = ... } references, next to compose.yaml (git-ignored)
+cat > .env <<'EOF'
+CLANKJOB_TOKEN=change-me
+OPENROUTER_API_KEY=sk-or-...
+EOF
+
+docker compose up -d --build
+docker compose logs -f
+```
+
+The web UI is on <http://127.0.0.1:8080>; put a reverse proxy with TLS in front for
+`public_url`. Stop any `cargo run` first: both would use `data/`. Details in
+[docs/design.md §18](docs/design.md).
+
+**On a server, without the source:** the image is published to
+`ghcr.io/uintptr/clankjob` (amd64 and arm64) by GitHub Actions. Download
+[`deploy/compose.yaml`](deploy/compose.yaml), write `clankjob.toml` and `.env`, and run
+`docker compose up -d`; [deploy/README.md](deploy/README.md) walks through it.
 
 ## Development
 

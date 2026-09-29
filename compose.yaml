@@ -1,0 +1,39 @@
+# Run clankjob in Docker from this checkout (design §18).
+#
+#   docker compose up -d --build     # build and start
+#   docker compose logs -f           # follow the log
+#   docker compose down              # stop (waits for running steps, see stop_grace_period)
+#
+# It uses the same clankjob.toml, plugins and data as a local `cargo run`: the image
+# overrides the listen address and paths with its own. Run one or the other, never both
+# on the same data directory.
+#
+# Secrets come from .env next to this file (git-ignored), e.g.:
+#   CLANKJOB_TOKEN=...
+#   OPENROUTER_API_KEY=...
+#   DISCORD_BOT_TOKEN=...
+#   EMAIL_PASSWORD=...
+
+services:
+  clankjob:
+    build: .
+    image: clankjob:latest
+    restart: unless-stopped
+    # Longer than shutdown_grace in clankjob.toml, so running LLM calls can finish.
+    stop_grace_period: 60s
+    # Must own ./data on the host (usually your user).
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      # Behind a reverse proxy (TLS, public_url), publish on localhost only.
+      - "127.0.0.1:8080:8080"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./clankjob.toml:/config/clankjob.toml:ro
+      - ./plugin:/plugins:ro
+      - ./data:/data
+      # Optional prompt overrides and profiles:
+      # - ./prompts:/prompts:ro
+      # Optional Docker secrets for `{ secret = "name" }` references:
+      # - ./secrets:/run/secrets:ro

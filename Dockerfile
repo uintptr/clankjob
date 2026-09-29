@@ -1,0 +1,82 @@
+# clankjob server image (design §18.3). Published as ghcr.io/uintptr/clankjob by
+# .github/workflows/docker.yml; deploy/compose.yaml runs it.
+#
+#   docker build -t clankjob .
+#
+# The web UI is compiled into the binary, and the plugins of this repository are bundled
+# in /plugins without any configuration. Settings, secrets, prompts and data are mounted:
+# /config/clankjob.toml, /plugins/<id>/config.toml, /prompts (read-only), /data.
+
+# ---- build ---------------------------------------------------------------------------
+FROM rust:1-slim-bookworm AS build
+WORKDIR /src
+COPY . .
+# Cache mounts keep the registry and build outputs between builds; the binary is copied
+# out because the target directory is not part of the image layer.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p clankjob-server \
+    && cp target/release/clankjob /usr/local/bin/clankjob
+
+# ---- runtime -------------------------------------------------------------------------
+FROM debian:bookworm-slim
+
+LABEL org.opencontainers.image.source="https://github.com/uintptr/clankjob" \
+      org.opencontainers.image.description="clankjob: AI agents that know how to wait"
+
+# python3: the plugins (Discord, email and documents use the standard library only).
+# uv: plugins whose scripts need dependencies (youtube_transcribe).
+# tini: PID 1 that reaps plugin processes and forwards signals to the server.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates python3 tini tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# Programs for the tools that work on case files (plugin/documents): metadata of
+# images, PDFs and office files; PDF inspection, text and rendering; OCR in English and
+# French; conversion of Word, ODT, RTF, HTML…; audio and video details. Their own layer,
+# so changing it does not rebuild the one above.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+    file \
+    libimage-exiftool-perl \
+    poppler-utils \
+    qpdf \
+    tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra \
+    imagemagick \
+    pandoc \
+    ffmpeg \
+    jq unzip \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=build /usr/local/bin/clankjob /usr/local/bin/clankjob
+
+# A fixed, non-root user; match it to the owner of the host's data directory with
+# `user:` in compose.yaml (default 1000:1000).
+RUN groupadd --gid 1000 clankjob \
+    && useradd --uid 1000 --gid 1000 --home-dir /home/clankjob --create-home --shell /usr/sbin/nologin clankjob \
+    && mkdir -p /config /plugins /prompts /data \
+    && chown clankjob:clankjob /data
+
+# Container paths override the ones in clankjob.toml, so the same file works for a local
+# `cargo run` and here (design §18.2).
+# The bundled plugins, last because they change most often. .dockerignore leaves out
+# their config.toml files: settings are mounted per plugin, or /plugins as a whole.
+COPY plugin/ /plugins/
+
+ENV CLANKJOB_CONFIG=/config/clankjob.toml \
+    CLANKJOB_LISTEN=0.0.0.0:8080 \
+    CLANKJOB_DATA_DIR=/data \
+    CLANKJOB_PLUGINS_DIR=/plugins \
+    CLANKJOB_PROMPTS_DIR=/prompts \
+    UV_CACHE_DIR=/data/cache/uv \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER clankjob
+WORKDIR /data
+EXPOSE 8080
+VOLUME ["/data"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4)"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/clankjob"]

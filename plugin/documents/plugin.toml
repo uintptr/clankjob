@@ -1,0 +1,91 @@
+# clankjob plugin manifest (design section 9.9): tools on a case's own files.
+id = "documents"
+name = "Documents (metadata, OCR, text)"
+version = "0.1.0"
+runtime = "command"
+requires = ["python3", "file"]
+
+[[tools]]
+name = "file_metadata"
+description = """Metadata of a case file: type, size, and everything ExifTool finds — for photos \
+the camera, date taken and GPS position; for PDFs and office files the author, title, \
+software and dates; for audio and video the duration and codecs."""
+command = ["./docs_tool.py", "metadata", "{file}"]
+output = "json"
+timeout = "1m"
+
+[tools.args.file]
+type = "file"
+description = "The file."
+required = true
+
+[[tools]]
+name = "pdf_info"
+description = "Facts about a PDF case file: number of pages, title, author, producer, dates, page size, encryption."
+command = ["./docs_tool.py", "pdf-info", "{file}"]
+output = "json"
+timeout = "1m"
+
+[tools.args.file]
+type = "file"
+description = "The PDF."
+required = true
+
+[[tools]]
+name = "ocr"
+description = """Read the text in an image or a scanned PDF (one without a text layer, which \
+`read_file` cannot read) with OCR. For PDFs, pages `first` to `last` (10 pages by default, \
+at most 30 per call). Long results are saved as a case file to read with `read_file`. \
+OCR can misread numbers and names: flag the ones that matter."""
+command = ["./docs_tool.py", "ocr", "{file}"]
+output = "auto"
+file_name = "ocr-{file}.txt"
+timeout = "5m"
+
+[tools.options]
+lang = ["--lang={lang}"]
+first = ["--first={first}"]
+last = ["--last={last}"]
+
+[tools.args.file]
+type = "file"
+description = "The image or PDF."
+required = true
+
+[tools.args.lang]
+description = "Tesseract languages, e.g. `eng`, `fra`, `eng+fra` (default `eng+fra`)."
+
+[tools.args.first]
+type = "integer"
+description = "For a PDF: the first page to read (default 1)."
+
+[tools.args.last]
+type = "integer"
+description = "For a PDF: the last page to read (default: first + 9)."
+
+[[tools]]
+name = "document_to_text"
+description = """Convert a document case file to plain text: Word (.docx), OpenDocument (.odt), \
+RTF, HTML, EPUB, PowerPoint (.pptx), Excel (.xlsx), and PDFs with a text layer (keeping the \
+layout of tables). Long results are saved as a case file to read with `read_file`."""
+command = ["./docs_tool.py", "to-text", "{file}"]
+output = "auto"
+file_name = "text-{file}.txt"
+timeout = "2m"
+
+[tools.args.file]
+type = "file"
+description = "The document."
+required = true
+
+[[tools]]
+name = "media_info"
+description = "Technical details of an audio or video case file: duration, format, codecs, resolution, streams."
+command = ["./docs_tool.py", "media-info", "{file}"]
+output = "json"
+timeout = "1m"
+
+[tools.args.file]
+type = "file"
+description = "The audio or video file."
+required = true

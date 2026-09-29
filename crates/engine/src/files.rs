@@ -140,7 +140,9 @@ impl FileStore {
         }
     }
 
-    fn path(&self, id: &FileId) -> PathBuf {
+    /// Where a file's bytes are, e.g. for a plugin tool to read.
+    #[must_use]
+    pub fn path(&self, id: &FileId) -> PathBuf {
         self.dir.join(id.as_str())
     }
 

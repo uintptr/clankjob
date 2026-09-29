@@ -24,8 +24,18 @@ pub const PROTOCOL: u64 = 1;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Environment variables passed through to plugin processes. Everything else, server
-/// secrets included, is left out.
-pub(crate) const PASSED_ENV: &[&str] = &["PATH", "HOME", "TZ", "LANG", "LC_ALL", "SYSTEMROOT"];
+/// secrets included, is left out. The cache locations let `uv`-run plugins keep their
+/// dependencies on the data volume in a container (design §18.3).
+pub(crate) const PASSED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TZ",
+    "LANG",
+    "LC_ALL",
+    "SYSTEMROOT",
+    "UV_CACHE_DIR",
+    "XDG_CACHE_HOME",
+];
 
 /// Start the child in its own process group, so a Ctrl+C in the server's terminal reaches
 /// only the server, which then stops its plugins itself (with `shutdown`) instead of each

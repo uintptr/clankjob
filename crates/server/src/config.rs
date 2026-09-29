@@ -295,6 +295,58 @@ impl Config {
         origins
     }
 
+    /// Let environment variables override where the server listens and keeps its files, so
+    /// one `clankjob.toml` serves both a local run and the container, whose image sets
+    /// these to its own paths (design §18.2). Unset or empty variables change nothing.
+    ///
+    /// | Variable               | Overrides     |
+    /// | ---------------------- | ------------- |
+    /// | `CLANKJOB_LISTEN`      | `listen`      |
+    /// | `CLANKJOB_DATA_DIR`    | `data_dir`    |
+    /// | `CLANKJOB_PLUGINS_DIR` | `plugins_dir` |
+    /// | `CLANKJOB_PROMPTS_DIR` | `prompts_dir` |
+    /// | `CLANKJOB_SECRETS_DIR` | `secrets_dir` |
+    ///
+    /// # Arguments
+    ///
+    /// * `lookup` - Reads a variable, e.g. `|name| std::env::var(name).ok()`
+    ///
+    /// # Returns
+    ///
+    /// The names of the variables that took effect, for the startup log
+    pub fn apply_overrides<F>(&mut self, lookup: F) -> Vec<&'static str>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let get = |name: &str| {
+            lookup(name)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        let mut applied = Vec::new();
+        if let Some(listen) = get("CLANKJOB_LISTEN") {
+            self.listen = listen;
+            applied.push("CLANKJOB_LISTEN");
+        }
+        if let Some(dir) = get("CLANKJOB_DATA_DIR") {
+            self.data_dir = PathBuf::from(dir);
+            applied.push("CLANKJOB_DATA_DIR");
+        }
+        if let Some(dir) = get("CLANKJOB_PLUGINS_DIR") {
+            self.plugins_dir = Some(PathBuf::from(dir));
+            applied.push("CLANKJOB_PLUGINS_DIR");
+        }
+        if let Some(dir) = get("CLANKJOB_PROMPTS_DIR") {
+            self.prompts_dir = Some(PathBuf::from(dir));
+            applied.push("CLANKJOB_PROMPTS_DIR");
+        }
+        if let Some(dir) = get("CLANKJOB_SECRETS_DIR") {
+            self.secrets_dir = PathBuf::from(dir);
+            applied.push("CLANKJOB_SECRETS_DIR");
+        }
+        applied
+    }
+
     /// Read and parse a configuration file.
     ///
     /// # Errors
@@ -329,6 +381,32 @@ mod tests {
         base_url = "http://localhost:11434/v1"
         model = "llama3"
     "#;
+
+    #[test]
+    fn environment_variables_override_paths_and_listen_address() {
+        // Arrange
+        let mut config =
+            Config::parse(format!("listen = \"127.0.0.1:8080\"\ndata_dir = \"./data\"\n{MINIMAL}")).unwrap();
+        let env = std::collections::HashMap::from([
+            ("CLANKJOB_LISTEN", "0.0.0.0:8080"),
+            ("CLANKJOB_DATA_DIR", "/data"),
+            ("CLANKJOB_PLUGINS_DIR", "/plugins"),
+            ("CLANKJOB_PROMPTS_DIR", " "),
+        ]);
+
+        // Act
+        let applied = config.apply_overrides(|name| env.get(name).map(|value| (*value).to_owned()));
+
+        // Assert
+        assert_eq!(
+            applied,
+            ["CLANKJOB_LISTEN", "CLANKJOB_DATA_DIR", "CLANKJOB_PLUGINS_DIR"]
+        );
+        assert_eq!(config.listen, "0.0.0.0:8080");
+        assert_eq!(config.data_dir, PathBuf::from("/data"));
+        assert_eq!(config.plugins_dir, Some(PathBuf::from("/plugins")));
+        assert_eq!(config.prompts_dir, None, "an empty variable changes nothing");
+    }
 
     #[test]
     fn minimal_config_gets_defaults() {

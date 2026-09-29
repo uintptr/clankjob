@@ -1,0 +1,12 @@
+# Only what the image needs goes into the build context: never data, settings or secrets.
+*
+!Cargo.toml
+!Cargo.lock
+!clippy.toml
+!crates/
+!web/
+!plugin/
+web/example.html
+plugin/*/config.toml
+**/__pycache__
+**/*.pyc

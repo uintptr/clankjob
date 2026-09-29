@@ -72,6 +72,10 @@ struct Manifest {
     /// Programs that must be on `PATH`, e.g. `uv`.
     #[serde(default)]
     requires: Vec<String>,
+    /// The plugin is useless without its `config.toml` (e.g. email needs a mailbox): until
+    /// the file exists it is not loaded, and the Plugins page says why.
+    #[serde(default)]
+    requires_config: bool,
 }
 
 /// A guide: `[[guides]]` in `plugin.toml`.
@@ -510,6 +514,11 @@ fn load_command_plugin(
     status: &mut PluginStatus,
 ) -> Result<(), String> {
     let config_path = dir.join("config.toml");
+    if manifest.requires_config && !config_path.is_file() {
+        tracing::info!(plugin = %manifest.id, "not configured: no config.toml");
+        status.note = Some("not configured: copy config.example.toml to config.toml and fill it in".to_owned());
+        return Ok(());
+    }
     let env = if config_path.is_file() {
         let config: PluginConfig = read_toml(&config_path)?;
         let Value::Object(resolved) = resolve(toml::Value::Table(config.env), secrets_dir, "env")? else {
@@ -854,7 +863,7 @@ for line in sys.stdin:
         // Act
         let loaded = load(root.path(), root.path());
         let tools = loaded.tools();
-        let output = tools[0].run(&json!({})).unwrap();
+        let output = tools[0].run(&json!({}), &clankjob_core::tool::ToolContext::default()).unwrap();
 
         // Assert
         assert_eq!(
@@ -871,6 +880,30 @@ for line in sys.stdin:
             ("echo_env", "calls")
         );
         assert_eq!(youtube.provides, ["tools"]);
+    }
+
+    #[test]
+    fn a_plugin_that_requires_config_is_skipped_until_it_has_one() {
+        // Arrange
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("mail");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            "id = \"mail\"\nruntime = \"command\"\nrequires_config = true\n\
+             [[tools]]\nname = \"send\"\ndescription = \"Send.\"\ncommand = [\"sh\", \"-c\", \"true\"]\n",
+        )
+        .unwrap();
+
+        // Act
+        let without = load(root.path(), root.path());
+        std::fs::write(dir.join("config.toml"), "[env]\nMAIL = \"x\"\n").unwrap();
+        let with = load(root.path(), root.path());
+
+        // Assert
+        assert!(without.tools().is_empty());
+        assert!(without.statuses()[0].note.as_deref().unwrap().starts_with("not configured"));
+        assert_eq!(with.tools().len(), 1);
     }
 
     #[test]

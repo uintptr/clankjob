@@ -3,6 +3,7 @@
 //! The engine only knows the [`PluginTool`] trait; the plugin host implements it, e.g. by
 //! running a command line.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -25,6 +26,24 @@ pub enum ToolOutput {
         /// Shown to the LLM, e.g. a preview.
         summary: Value,
     },
+}
+
+/// A file of the case, as a plugin tool can use it (e.g. to OCR a scanned PDF).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseFileRef {
+    /// Its name in the case, e.g. `quote.pdf`; what the LLM refers to it by.
+    pub name: String,
+    /// Where its bytes are on disk (named by id, without extension).
+    pub path: PathBuf,
+    /// Its detected media type, e.g. `application/pdf`.
+    pub media_type: String,
+}
+
+/// What a plugin tool call can see of its case.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolContext {
+    /// The case's files, for arguments of type `file`.
+    pub files: Vec<CaseFileRef>,
 }
 
 /// A tool offered by a plugin.
@@ -53,10 +72,15 @@ pub trait PluginTool: Send + Sync {
 
     /// Run it. Blocks until done or until the tool's timeout. MUST NOT call the LLM.
     ///
+    /// # Arguments
+    ///
+    /// * `arguments` - As given by the LLM
+    /// * `context` - The case's files, for arguments that name one
+    ///
     /// # Errors
     ///
     /// Returns a message for the LLM (invalid arguments, the command failed, …).
-    fn run(&self, arguments: &Value) -> Result<ToolOutput, String>;
+    fn run(&self, arguments: &Value, context: &ToolContext) -> Result<ToolOutput, String>;
 }
 
 /// Instructions a plugin offers for a kind of task, read by the LLM on demand with

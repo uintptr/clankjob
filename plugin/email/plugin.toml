@@ -4,6 +4,8 @@ name = "Email (IMAP/SMTP)"
 version = "0.1.0"
 runtime = "command"
 requires = ["python3"]
+# Without a mailbox in config.toml the tools could only fail: stay unloaded until then.
+requires_config = true
 
 # ---- tools ------------------------------------------------------------------
 

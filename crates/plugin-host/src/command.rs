@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clankjob_core::llm::ToolSpec;
-use clankjob_core::tool::{CheckOutcome, PluginCondition, PluginTool, ToolOutput};
+use clankjob_core::tool::{CaseFileRef, CheckOutcome, PluginCondition, PluginTool, ToolContext, ToolOutput};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -70,6 +70,9 @@ pub enum ArgType {
     Number,
     /// `true` or `false`; with `options`, adds the option's arguments when true.
     Boolean,
+    /// The name of one of the case's files; the command gets a path to it, named as in
+    /// the case (e.g. `/tmp/clankjob-…/quote.pdf`).
+    File,
 }
 
 /// A declared argument: `[tools.args.<name>]`.
@@ -210,18 +213,107 @@ pub fn require(program: &str) -> Result<(), String> {
     locate(program, Path::new(".")).map(drop)
 }
 
+/// Where file arguments are linked for one call; removed when dropped.
+struct LinkedFiles {
+    dir: Option<PathBuf>,
+}
+
+impl Drop for LinkedFiles {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            // Only links live here; the case's files themselves are untouched.
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Distinguishes the link directories of concurrent calls.
+static NEXT_LINK_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Find a case file the LLM named: exact name first, then ignoring case.
+fn find_file<'a>(context: &'a ToolContext, wanted: &str) -> Result<&'a CaseFileRef, String> {
+    context
+        .files
+        .iter()
+        .find(|file| file.name == wanted)
+        .or_else(|| context.files.iter().find(|file| file.name.eq_ignore_ascii_case(wanted)))
+        .ok_or_else(|| {
+            if context.files.is_empty() {
+                format!("no case file named `{wanted}`: the case has no files")
+            } else {
+                let names: Vec<&str> = context.files.iter().map(|file| file.name.as_str()).collect();
+                format!("no case file named `{wanted}`; the case's files: {}", names.join(", "))
+            }
+        })
+}
+
+/// Replace the value of every `file` argument with a path to that case file, linked
+/// under its own name in a fresh private directory, since the store names files by id
+/// and many tools go by the extension.
+fn link_files(
+    args: &BTreeMap<String, ArgManifest>,
+    values: &mut BTreeMap<String, String>,
+    context: &ToolContext,
+) -> Result<LinkedFiles, String> {
+    let mut linked = LinkedFiles { dir: None };
+    for (name, declared) in args {
+        if declared.kind != ArgType::File {
+            continue;
+        }
+        let Some(value) = values.get_mut(name) else { continue };
+        let file = find_file(context, value)?;
+        let dir = if let Some(dir) = &linked.dir {
+            dir.clone()
+        } else {
+            let number = NEXT_LINK_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("clankjob-{}-{number}", std::process::id()));
+            std::fs::create_dir_all(&dir).map_err(|error| format!("cannot prepare `{name}`: {error}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            linked.dir = Some(dir.clone());
+            dir
+        };
+        // Case file names are already a single path component; stay safe regardless.
+        let file_name = file_name_part(&file.name);
+        let file_name = if file_name.is_empty() {
+            "file".to_owned()
+        } else {
+            file_name
+        };
+        let link = dir.join(format!("{name}-{file_name}"));
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&file.path, &link);
+        #[cfg(not(unix))]
+        let made = std::fs::copy(&file.path, &link).map(drop);
+        made.map_err(|error| format!("cannot prepare `{}`: {error}", file.name))?;
+        *value = link.to_string_lossy().into_owned();
+    }
+    Ok(linked)
+}
+
 /// JSON Schema of declared arguments, as shown to the LLM.
 fn schema_of(args: &BTreeMap<String, ArgManifest>) -> Value {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for (arg, declared) in args {
         let kind = match declared.kind {
-            ArgType::String => "string",
+            ArgType::String | ArgType::File => "string",
             ArgType::Integer => "integer",
             ArgType::Number => "number",
             ArgType::Boolean => "boolean",
         };
-        let mut schema = json!({ "type": kind, "description": declared.description });
+        let description = if declared.kind == ArgType::File {
+            format!(
+                "{} (the name of one of the case's files, as listed under Files)",
+                declared.description
+            )
+        } else {
+            declared.description.clone()
+        };
+        let mut schema = json!({ "type": kind, "description": description });
         if let Some(object) = schema.as_object_mut() {
             if !declared.choices.is_empty() {
                 object.insert("enum".to_owned(), json!(declared.choices));
@@ -286,7 +378,7 @@ fn check_values(
             Some(value) => value,
         };
         let text = match (declared.kind, value) {
-            (ArgType::String, Value::String(text)) => text.trim().to_owned(),
+            (ArgType::String | ArgType::File, Value::String(text)) => text.trim().to_owned(),
             (ArgType::Integer, Value::Number(number)) if number.is_i64() || number.is_u64() => number.to_string(),
             (ArgType::Number, Value::Number(number)) => number.to_string(),
             (ArgType::Boolean, Value::Bool(flag)) => flag.to_string(),
@@ -589,11 +681,15 @@ impl PluginTool for CommandTool {
         self.values(arguments).map(drop)
     }
 
-    fn run(&self, arguments: &Value) -> Result<ToolOutput, String> {
-        let values = self.values(arguments)?;
+    fn run(&self, arguments: &Value, context: &ToolContext) -> Result<ToolOutput, String> {
+        let names = self.values(arguments)?;
+        let mut values = names.clone();
+        // Kept alive until the command has finished; removes the links when dropped.
+        let _links = link_files(&self.manifest.args, &mut values, context)?;
         let output = self
             .runner
             .run(&argv_of(&self.manifest.command, &self.manifest.options, &values), None)?;
+        let values = names;
         let chars = output.chars().count();
         let inline = match self.manifest.output {
             OutputMode::Json => {
@@ -804,7 +900,9 @@ mod tests {
         let (_dir, tool) = tool("");
 
         // Act
-        let short = tool.run(&json!({ "video": "abc def", "lang": "de" })).unwrap();
+        let short = tool
+            .run(&json!({ "video": "abc def", "lang": "de" }), &ToolContext::default())
+            .unwrap();
 
         // Assert
         let ToolOutput::Json(value) = short else {
@@ -823,8 +921,10 @@ mod tests {
     fn empty_optional_arguments_count_as_not_given() {
         let (_dir, tool) = tool("");
 
-        let blank_option = tool.run(&json!({ "video": "abc", "lang": " " })).unwrap();
-        let blank_required = tool.run(&json!({ "video": "" })).unwrap_err();
+        let blank_option = tool
+            .run(&json!({ "video": "abc", "lang": " " }), &ToolContext::default())
+            .unwrap();
+        let blank_required = tool.run(&json!({ "video": "" }), &ToolContext::default()).unwrap_err();
 
         let ToolOutput::Json(value) = blank_option else {
             unreachable!("expected inline output")
@@ -847,7 +947,7 @@ mod tests {
             json!({ "video": "x", "shell": "rm" }),
         ]
         .iter()
-        .map(|arguments| tool.run(arguments).unwrap_err())
+        .map(|arguments| tool.run(arguments, &ToolContext::default()).unwrap_err())
         .collect();
 
         assert_eq!(errors[0], "`video` is required");
@@ -862,9 +962,9 @@ mod tests {
         let (_dir, tool) = tool("timeout = \"1s\"");
 
         // Act
-        let long = tool.run(&json!({ "video": "long" })).unwrap();
-        let failed = tool.run(&json!({ "video": "fail" })).unwrap_err();
-        let slow = tool.run(&json!({ "video": "slow" })).unwrap_err();
+        let long = tool.run(&json!({ "video": "long" }), &ToolContext::default()).unwrap();
+        let failed = tool.run(&json!({ "video": "fail" }), &ToolContext::default()).unwrap_err();
+        let slow = tool.run(&json!({ "video": "slow" }), &ToolContext::default()).unwrap_err();
 
         // Assert
         let ToolOutput::File { name, content, summary } = long else {
@@ -895,7 +995,7 @@ mod tests {
 
         // Assert
         assert_eq!(
-            tool.run(&json!({})).unwrap(),
+            tool.run(&json!({}), &ToolContext::default()).unwrap(),
             ToolOutput::Json(json!({ "output": "hello\n", "truncated": false }))
         );
     }
@@ -929,7 +1029,7 @@ mod tests {
 
         // Act
         let summary = tool.approval_summary(&args);
-        let output = tool.run(&args).unwrap();
+        let output = tool.run(&args, &ToolContext::default()).unwrap();
         let long = tool.validate(&json!({ "to": "bob@x.ca", "body": "x".repeat(5001) }));
         let dash = tool.validate(&json!({ "to": "-oProxyCommand=evil", "body": "hi" }));
 
@@ -990,6 +1090,48 @@ mod tests {
         );
         assert_eq!(condition.validate(&json!({})).unwrap_err(), "`thread` is required");
         assert_eq!(condition.params_schema()["required"], json!(["thread"]));
+    }
+
+    #[test]
+    fn file_arguments_get_a_path_named_like_the_case_file() {
+        // Arrange: the store names files by id, without extension
+        let dir = tempfile::tempdir().unwrap();
+        script(
+            dir.path(),
+            "show.sh",
+            "#!/bin/sh\nbasename \"$1\"\ncat \"$1\"\necho\necho \"$1\" > seen_path\n",
+        );
+        let stored = dir.path().join("01J9STOREDBYID");
+        std::fs::write(&stored, "Total: $1,450").unwrap();
+        let context = ToolContext {
+            files: vec![CaseFileRef {
+                name: "Quote.pdf".to_owned(),
+                path: stored,
+                media_type: "application/pdf".to_owned(),
+            }],
+        };
+        let text = "name = \"show\"\ndescription = \"d\"\ncommand = [\"./show.sh\", \"{document}\"]\n\
+                    [args.document]\ntype = \"file\"\ndescription = \"The document\"\nrequired = true\n";
+        let tool = CommandTool::new("docs", dir.path(), manifest(text), BTreeMap::new()).unwrap();
+
+        // Act
+        let output = tool.run(&json!({ "document": "quote.pdf" }), &context).unwrap();
+        let missing = tool.run(&json!({ "document": "invoice.pdf" }), &context).unwrap_err();
+
+        // Assert
+        let ToolOutput::Json(value) = output else {
+            unreachable!("expected inline output")
+        };
+        assert_eq!(value["output"], "document-Quote.pdf\nTotal: $1,450\n");
+        let seen = std::fs::read_to_string(dir.path().join("seen_path")).unwrap();
+        assert!(!Path::new(seen.trim()).exists(), "the link is removed after the call");
+        assert_eq!(missing, "no case file named `invoice.pdf`; the case's files: Quote.pdf");
+        assert!(
+            tool.spec().parameters["properties"]["document"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("the name of one of the case's files")
+        );
     }
 
     #[test]

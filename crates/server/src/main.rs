@@ -82,7 +82,11 @@ fn build_providers(config: &Config) -> anyhow::Result<HashMap<String, Arc<dyn Ll
 
 fn run() -> anyhow::Result<()> {
     let path = config_path();
-    let config = Config::load(&path).with_context(|| format!("loading {}", path.display()))?;
+    let mut config = Config::load(&path).with_context(|| format!("loading {}", path.display()))?;
+    let overridden = config.apply_overrides(|name| std::env::var(name).ok());
+    if !overridden.is_empty() {
+        tracing::info!(variables = ?overridden, "configuration overridden by the environment");
+    }
     let tokens: Vec<SecretString> = config
         .api
         .tokens

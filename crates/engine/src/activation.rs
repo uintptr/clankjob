@@ -15,7 +15,7 @@ use clankjob_core::file::{CaseFile, FileKind};
 use clankjob_core::human::Execution;
 use clankjob_core::ids::{ActivationId, CaseId, FileId, HumanRequestId, WaitConditionId};
 use clankjob_core::llm::{CompletionRequest, CompletionResponse, LlmError, LlmProvider, TokenUsage, ToolCall};
-use clankjob_core::tool::{Guide, ToolOutput};
+use clankjob_core::tool::{CaseFileRef, Guide, ToolContext, ToolOutput};
 use clankjob_core::wait::{HUMAN_INPUT_KIND, WaitCondition, WaitConditionSpec, WaitStatus};
 use clankjob_storage::{self as storage, Connection, begin_write, commit};
 use serde_json::{Value, json};
@@ -568,6 +568,22 @@ impl Activation<'_> {
         PluginCall::Ran(self.run_timed(tool.as_ref(), &call.name, &call.arguments))
     }
 
+    /// The case's files as plugin tools see them. A database error becomes a tool error.
+    fn tool_context(&self) -> std::result::Result<ToolContext, String> {
+        let files = storage::files::list_files(self.connection, &self.case_id)
+            .map_err(|error| format!("cannot list the case's files: {error}"))?;
+        Ok(ToolContext {
+            files: files
+                .into_iter()
+                .map(|file| CaseFileRef {
+                    path: self.shared.files.path(&file.id),
+                    name: file.name,
+                    media_type: file.media_type,
+                })
+                .collect(),
+        })
+    }
+
     /// Run a plugin tool and log how long it took.
     fn run_timed(
         &self,
@@ -576,7 +592,8 @@ impl Activation<'_> {
         arguments: &Value,
     ) -> std::result::Result<ToolOutput, String> {
         let started = std::time::Instant::now();
-        let output = tool.run(arguments);
+        let context = self.tool_context()?;
+        let output = tool.run(arguments, &context);
         let elapsed_ms = started.elapsed().as_millis();
         match &output {
             Ok(_) => {
@@ -900,7 +917,7 @@ mod tests {
             &self.spec
         }
 
-        fn run(&self, arguments: &Value) -> std::result::Result<ToolOutput, String> {
+        fn run(&self, arguments: &Value, _context: &ToolContext) -> std::result::Result<ToolOutput, String> {
             match arguments.get("video").and_then(Value::as_str) {
                 Some("info") => Ok(ToolOutput::Json(json!({ "title": "Earnings call" }))),
                 Some(video) => Ok(ToolOutput::File {
@@ -1003,7 +1020,7 @@ mod tests {
             arguments.get("to").map(drop).ok_or_else(|| "`to` is required".to_owned())
         }
 
-        fn run(&self, arguments: &Value) -> std::result::Result<ToolOutput, String> {
+        fn run(&self, arguments: &Value, _context: &ToolContext) -> std::result::Result<ToolOutput, String> {
             self.sent.lock().unwrap().push(arguments.clone());
             Ok(ToolOutput::Json(json!({ "message_id": "<1@x>" })))
         }

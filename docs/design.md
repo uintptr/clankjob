@@ -46,7 +46,7 @@ marked **(built)**, **(partly built)** or **(planned)**.
 | Web client                                                               | Built                 | §15       |
 | SQLite storage                                                           | Built                 | §16       |
 | `public_url`, CORS, CSP, body limits                                     | Built                 | §17.3     |
-| Docker image and compose file                                            | Planned               | §18       |
+| Docker image (with document tools) and compose file                      | Built                 | §18       |
 
 ______________________________________________________________________
 
@@ -689,6 +689,12 @@ plugin's manifest, its configuration and, for external plugins, its code:
     test_email_tool.py
     guides/email.md
     README.md
+  documents/                   command plugin: metadata, OCR, text of case files (`file` args)
+    plugin.toml
+    check_config.py
+    docs_tool.py
+    test_docs_tool.py
+    README.md
   youtube_transcribe/          command plugin: tools and guides (§9.9)
     plugin.toml
     check_config.py
@@ -907,7 +913,7 @@ lang = ["--lang", "{lang}"]
 description = "YouTube URL or 11-character video id."
 required = true
 
-[tools.args.lang]                     # type: string (default) | integer | number | boolean
+[tools.args.lang]                     # type: string (default) | integer | number | boolean | file
 description = "Caption language code, e.g. `de`."
 
 [[guides]]
@@ -937,6 +943,11 @@ file = "guides/earnings-call-analysis.md"
   whose values may be secret references (e.g. `YT_PROXY_URL = { env = "YT_PROXY_URL" }`).
   stdin is closed; stdout and stderr are read up to 8 MB. On timeout the process is
   killed. A non-zero exit is a tool error for the LLM, carrying the end of stderr.
+- **Case files.** An argument of `type = "file"` takes the name of one of the case's
+  files (exact, then ignoring case; any other name is an error listing the case's files).
+  The command gets a path to it, linked under its own name (so its extension survives)
+  in a private temporary directory that is removed after the call; the store itself
+  keeps files by id. Plugin tools receive the case's files for this in a `ToolContext`.
 - **Approval.** `requires_approval = true` makes every call wait for the owner (§9.7);
   `approval = "Email {to}: {subject}"` is the summary shown to them, with placeholders of
   missing optional arguments dropped.
@@ -1526,21 +1537,25 @@ on one port. It reads its configuration from the path given as its first argumen
 `$CLANKJOB_CONFIG`, else `/config/clankjob.toml`. `clankjob.example.toml` in the
 repository documents every option.
 
-### 18.1 Container layout (planned)
+### 18.1 Container layout (built)
 
-A Docker image is not built yet. The intended layout:
+`Dockerfile` and `compose.yaml` are at the root of the repository. The compose file runs
+the image from a checkout, with the same files as a local `cargo run`:
 
 ```
-host: /opt/clankjob/                container
-  config/clankjob.toml         →   /config/clankjob.toml   read-only   server settings
-  plugin/<id>/...              →   /plugins/<id>/...       read-only   plugins + their config (§9.3)
-  prompts/...                  →   /prompts/...            read-only   prompt overrides, profiles (§7.4)
-  secrets/                     →   /run/secrets/           read-only   Docker secrets
-  data/                        →   /data/                  read-write  clankjob.db, files/, cache/
+host (the checkout)                  container
+  clankjob.toml                →    /config/clankjob.toml   read-only   server settings
+  plugin/<id>/...              →    /plugins/<id>/...       read-only   plugins + their config (§9.3)
+  prompts/... (optional)       →    /prompts/...            read-only   prompt overrides, profiles (§7.4)
+  secrets/ (optional)          →    /run/secrets/           read-only   Docker secrets
+  data/                        →    /data/                  read-write  clankjob.db, files/, user_prompt.md, cache/
+  .env                         →    environment                         secrets for `{ env = … }`
 ```
 
-`/data` is the only writable mount and holds all runtime state: the database and the
-bytes of case files. Everything else can be rebuilt from the host directories.
+`/data` is the only writable mount and holds all runtime state: the database, the bytes
+of case files, the owner's prompt and the `uv` cache (`UV_CACHE_DIR=/data/cache/uv`, so
+plugin dependencies survive container restarts). The image creates empty `/plugins` and
+`/prompts`, so either can be left unmounted.
 
 ### 18.2 Server configuration (built)
 
@@ -1579,21 +1594,34 @@ max_total_tokens = 2000000
 ```
 
 Unknown keys are rejected at startup, so a typo is an error, not a silently ignored
-setting. `public_url` and `allowed_origins` must be `http(s)://` URLs. Secrets are
+setting. Environment variables override the listen address and the directories, so one
+file serves both a local run and the container, whose image sets them: `CLANKJOB_LISTEN`
+(`0.0.0.0:8080`), `CLANKJOB_DATA_DIR` (`/data`), `CLANKJOB_PLUGINS_DIR` (`/plugins`),
+`CLANKJOB_PROMPTS_DIR` (`/prompts`) and `CLANKJOB_SECRETS_DIR`; the startup log lists the
+ones that took effect. `public_url` and `allowed_origins` must be `http(s)://` URLs. Secrets are
 `{ secret = "name" }` (a file in `secrets_dir`), `{ env = "NAME" }`, or a literal string
 (accepted, but logged as a warning). Planned: `check_workers`, with plugin wait
 conditions.
 
-### 18.3 Image (planned)
+### 18.3 Image (built)
 
-- Multi-stage build: compile the release binary (the web client is embedded), then copy
-  it into a slim runtime image (debian-slim) with `python3`, `uv` and CA certificates.
-  Python is there for external plugins (§9.8).
-- Runs as a non-root user with a fixed UID/GID. The host's `data/` directory must be
-  writable by that UID, and `config/`, `plugin/` and `secrets/` readable.
-- One port is exposed. TLS is terminated by a reverse proxy (Caddy, Traefik, nginx).
-- Every integration is outbound (IMAP, SMTP, Discord REST, the LLM API), so no other
-  inbound ports and no public URL are needed for them.
+- **Multi-stage build.** `rust:1-slim-bookworm` compiles the release binary (the web client
+  is embedded) with BuildKit cache mounts for the registry and target directory; the
+  binary is copied into `debian:bookworm-slim`. `.dockerignore` lets only `Cargo.*`,
+  `crates/` and `web/` into the build context: never data, configs or secrets.
+- **Runtime.** `python3` for plugins, `uv` for plugins with dependencies, CA certificates,
+  `tzdata`, and `tini` as PID 1, which reaps plugin processes and passes signals to the
+  server.
+- **Tools for case files.** `file`, ExifTool, Poppler (`pdfinfo`, `pdftotext`,
+  `pdftoppm`), `qpdf`, Tesseract with English and French, ImageMagick, `pandoc`, FFmpeg
+  (`ffprobe`), `jq` and `unzip`, in their own layer. The `documents` plugin turns them into
+  tools (metadata, OCR, text extraction, media details; `plugin/documents/README.md`).
+- **User.** A non-root `clankjob` user (UID/GID 1000); `compose.yaml` runs as
+  `${UID:-1000}:${GID:-1000}`, which must own the host's `data/`.
+- **Health.** `HEALTHCHECK` calls `/healthz` with Python (no curl in the image).
+- One port is exposed (8080), published on localhost by the compose file: TLS is
+  terminated by a reverse proxy (Caddy, Traefik, nginx) in front. Every integration is
+  outbound (IMAP, SMTP, Discord REST, the LLM API), so no other port is needed.
 
 ### 18.4 Operational rules
 
@@ -1619,34 +1647,37 @@ conditions.
   or changed secret in the environment still needs a restart. Planned: reloading
   `clankjob.toml` without a restart.
 
-### 18.5 Compose example (planned)
+### 18.5 Published image and CI (built)
 
-```yaml
-services:
-  clankjob:
-    image: clankjob:latest
-    restart: unless-stopped
-    stop_grace_period: 60s
-    user: "1000:1000"
-    ports: ["127.0.0.1:8080:8080"]
-    environment:
-      CLANKJOB_LOG_FORMAT: json
-    volumes:
-      - ./config:/config:ro
-      - ./plugin:/plugins:ro
-      - ./prompts:/prompts:ro
-      - ./data:/data
-    secrets: [api_token, llm_api_key, yahoo_app_password, discord_bot_token]
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
-      interval: 30s
+- **CI** (`.github/workflows/ci.yml`): every push to `main` and every pull request runs
+  `cargo fmt --check`, clippy with `-D warnings` and the Rust tests, and for each Python
+  plugin its tests, ruff and basedpyright.
+- **Image** (`.github/workflows/docker.yml`): pushes to `main` and `v*` tags build the image
+  natively on amd64 and arm64 runners, push each by digest, and join them into one
+  multi-platform image at `ghcr.io/uintptr/clankjob`: `latest` and `sha-<commit>` from
+  `main`, `1.2.3` and `1.2` from a `v1.2.3` tag. Layers are cached per platform in the
+  GitHub Actions cache.
+- **Bundled plugins.** The image carries the repository's `plugin/` in `/plugins`, without
+  any `config.toml` (excluded by `.dockerignore`). Settings are mounted per plugin
+  (`/plugins/<id>/config.toml`), or a whole directory replaces `/plugins`. Plugins that
+  cannot work unconfigured set `requires_config` and stay unloaded until then.
+- **Deploying without the source** (`deploy/compose.yaml`, `deploy/README.md`): download
+  the compose file and `clankjob.example.toml`, write `.env`, `mkdir data`, and
+  `docker compose up -d`; `docker compose pull` updates.
 
-secrets:
-  api_token:          { file: ./secrets/api_token }
-  llm_api_key:        { file: ./secrets/llm_api_key }
-  yahoo_app_password: { file: ./secrets/yahoo_app_password }
-  discord_bot_token:  { file: ./secrets/discord_bot_token }
+### 18.6 Running it from a checkout (built)
+
+```sh
+docker compose up -d --build     # build and start
+docker compose logs -f           # follow the log
+docker compose exec clankjob /plugins/documents/check_config.py   # any plugin's check
+docker compose down              # stop: waits for running steps (stop_grace_period 60s)
 ```
+
+Secrets live in `.env` next to `compose.yaml` (git-ignored), for the `{ env = … }`
+references in `clankjob.toml` and the plugins' `config.toml`. Docker secrets work too:
+mount `./secrets` on `/run/secrets` and use `{ secret = … }`. Stop any local
+`cargo run` first: both would use the same `data/` (§18.4).
 
 ______________________________________________________________________
 
