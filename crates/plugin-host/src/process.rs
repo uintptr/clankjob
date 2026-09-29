@@ -27,6 +27,19 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 /// secrets included, is left out.
 pub(crate) const PASSED_ENV: &[&str] = &["PATH", "HOME", "TZ", "LANG", "LC_ALL", "SYSTEMROOT"];
 
+/// Start the child in its own process group, so a Ctrl+C in the server's terminal reaches
+/// only the server, which then stops its plugins itself (with `shutdown`) instead of each
+/// one dying mid-call with a traceback.
+pub(crate) fn own_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
 /// A running plugin process. Dropping it kills the process.
 struct Running {
     child: Child,
@@ -117,6 +130,12 @@ impl ProcessPlugin {
         }
     }
 
+    /// Stop starting the process: from now on calls fail instead of (re)starting it. Does not
+    /// wait for a call in progress; [`ProcessPlugin::shutdown`] stops the process itself.
+    pub fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+    }
+
     /// Ask the process to exit, and kill it if it does not. Later calls fail instead of
     /// starting it again.
     pub fn shutdown(&self) {
@@ -141,6 +160,7 @@ impl ProcessPlugin {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        own_process_group(&mut command);
         for name in PASSED_ENV {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -291,6 +311,16 @@ for line in sys.stdin:
         assert_eq!(echo["env"], json!([]), "server environment must not leak");
         assert_eq!(error, ChannelError::retryable("nope"));
         plugin.shutdown();
+    }
+
+    #[test]
+    fn a_retired_plugin_is_not_started_again() {
+        let (_dir, plugin) = plugin();
+
+        plugin.retire();
+        let error = plugin.call("echo", &json!(1), Duration::from_secs(5)).unwrap_err();
+
+        assert!(error.retryable && error.message.contains("reloaded"));
     }
 
     #[test]

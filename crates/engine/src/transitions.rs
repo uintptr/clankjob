@@ -7,10 +7,10 @@ use chrono::{DateTime, Utc};
 use clankjob_core::case::{Case, CaseState, Instruction, NewCase, NewInstruction};
 use clankjob_core::event::{EventBody, InstructionChange, WakeReason};
 use clankjob_core::file::CaseFile;
-use clankjob_core::human::{HumanRequest, HumanRequestStatus};
+use clankjob_core::human::{HumanRequest, HumanRequestKind, HumanRequestStatus};
 use clankjob_core::ids::{ActivationId, CaseId, HumanRequestId, InstructionId};
 use clankjob_core::wait::{HUMAN_INPUT_KIND, WaitCondition, WaitStatus};
-use clankjob_storage::human::Answer;
+use clankjob_storage::human::{Answer, Verdict};
 use clankjob_storage::{self as storage, Connection, begin_write, commit};
 use serde_json::Value;
 
@@ -133,7 +133,9 @@ pub fn post_message(connection: &mut Connection, case_id: &CaseId, text: &str, n
     let transaction = begin_write(connection)?;
     let case = load_case(&transaction, case_id)?;
     let open = storage::human::list_requests(&transaction, Some(HumanRequestStatus::Open), Some(case_id))?;
-    match open.first() {
+    // A message answers an open question; an open approval needs a decision, so a message
+    // wakes the case instead (dropping the approval).
+    match open.iter().find(|request| request.kind == HumanRequestKind::Question) {
         Some(request) => answer_open_request(
             &transaction,
             request,
@@ -181,11 +183,62 @@ pub fn answer_request(
     let transaction = begin_write(connection)?;
     let request = storage::human::get_request(&transaction, request_id)?
         .ok_or_else(|| EngineError::RequestNotFound(request_id.clone()))?;
+    if request.kind == HumanRequestKind::Approval {
+        return Err(EngineError::NotAQuestion(request_id.clone()));
+    }
     answer_open_request(&transaction, &request, answer, now)?;
     let answered = storage::human::get_request(&transaction, request_id)?
         .ok_or_else(|| EngineError::RequestNotFound(request_id.clone()))?;
     commit(transaction)?;
     Ok(answered)
+}
+
+/// Record the owner's decision on an approval and wake its case (the first answer wins).
+/// An approved call runs at the start of the case's next activation.
+///
+/// # Errors
+///
+/// Returns [`EngineError::RequestNotFound`], [`EngineError::AlreadyResolved`] if it was
+/// already decided or dropped, [`EngineError::NotAnApproval`] for a question, or
+/// [`EngineError::Storage`].
+pub fn decide_approval(
+    connection: &mut Connection,
+    request_id: &HumanRequestId,
+    verdict: Verdict<'_>,
+    now: DateTime<Utc>,
+) -> Result<HumanRequest> {
+    let transaction = begin_write(connection)?;
+    let request = storage::human::get_request(&transaction, request_id)?
+        .ok_or_else(|| EngineError::RequestNotFound(request_id.clone()))?;
+    if request.kind != HumanRequestKind::Approval {
+        return Err(EngineError::NotAnApproval(request_id.clone()));
+    }
+    if !storage::human::decide_approval(&transaction, request_id, verdict, now)? {
+        return Err(EngineError::AlreadyResolved(request_id.clone()));
+    }
+    storage::waits::resolve_waits_of_kind(&transaction, &request.case_id, HUMAN_INPUT_KIND, WaitStatus::Fired)?;
+    let outcome = serde_json::json!({
+        "status": "answered",
+        "decision": verdict.decision,
+        "via": verdict.via,
+        "responder": verdict.responder,
+    });
+    crate::channels::queue_resolution(&transaction, &request.case_id, &request.id, &outcome, now)?;
+    let edited = verdict.args.filter(|args| Some(*args) != request.args.as_ref());
+    let reason = WakeReason::ApprovalDecided {
+        request_id: request.id.clone(),
+        tool: request.tool.clone().unwrap_or_default(),
+        decision: verdict.decision,
+        comment: verdict.comment.map(str::to_owned),
+        edited_args: edited.cloned(),
+        via: Some(verdict.via.to_owned()),
+    };
+    let case = load_case(&transaction, &request.case_id)?;
+    wake(&transaction, &case, reason, now)?;
+    let decided = storage::human::get_request(&transaction, request_id)?
+        .ok_or_else(|| EngineError::RequestNotFound(request_id.clone()))?;
+    commit(transaction)?;
+    Ok(decided)
 }
 
 /// Store a file's row and wake its case, which reopens a finished case like a message.

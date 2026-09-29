@@ -14,9 +14,10 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use clankjob_core::case::{Case, CaseState};
 use clankjob_core::channel::{ChannelDelivery, ChannelError, ChannelReply, DeliveryKind, DeliveryStatus, HumanChannel};
+use clankjob_core::human::Decision;
 use clankjob_core::human::HumanRequestStatus;
 use clankjob_core::ids::{CaseId, HumanRequestId};
-use clankjob_storage::human::Answer;
+use clankjob_storage::human::{Answer, Verdict};
 use clankjob_storage::{self as storage, Connection};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -219,6 +220,30 @@ pub(crate) fn queue_question(
     now: DateTime<Utc>,
 ) -> Result<()> {
     let payload = json!({ "kind": "question", "case_title": case.title, "text": question });
+    queue_request(connection, case, request_id, &payload, now)
+}
+
+/// Queue a new approval for every channel of its case: what the call will do, and its
+/// arguments as details.
+pub(crate) fn queue_approval(
+    connection: &Connection,
+    case: &Case,
+    request_id: &HumanRequestId,
+    summary: &str,
+    args: &Value,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let payload = json!({ "kind": "approval", "case_title": case.title, "text": summary, "details": args });
+    queue_request(connection, case, request_id, &payload, now)
+}
+
+fn queue_request(
+    connection: &Connection,
+    case: &Case,
+    request_id: &HumanRequestId,
+    payload: &Value,
+    now: DateTime<Utc>,
+) -> Result<()> {
     for channel in &case.human_channels {
         storage::channels::insert_delivery(
             connection,
@@ -226,7 +251,7 @@ pub(crate) fn queue_question(
             Some(request_id),
             channel,
             DeliveryKind::Request,
-            &payload,
+            payload,
             now,
         )?;
     }
@@ -491,19 +516,45 @@ fn poll(shared: &Shared, connection: &mut Connection, name: &str, channel: &dyn 
             tracing::warn!(channel = %name, responder = %reply.responder, "reply from someone not allowed to answer; ignored");
             continue;
         }
-        let Some(text) = reply_text(name, reply) else {
-            tracing::warn!(channel = %name, request_id = %reply.request_id, "reply without text (approvals are not supported yet); ignored");
-            continue;
+        let outcome = match (reply.decision.as_deref(), reply_text(name, reply)) {
+            (Some(decision), _) => {
+                let decision = match decision {
+                    "approve" => Decision::Approve,
+                    "reject" => Decision::Reject,
+                    other => {
+                        tracing::warn!(channel = %name, decision = other, "unknown decision; ignored");
+                        continue;
+                    }
+                };
+                let verdict = Verdict {
+                    decision,
+                    args: None,
+                    comment: None,
+                    via: name,
+                    responder: Some(&reply.responder),
+                };
+                transitions::decide_approval(connection, &reply.request_id, verdict, Utc::now())
+            }
+            (None, Some(text)) => {
+                let answer = Answer {
+                    text: &text,
+                    via: name,
+                    responder: Some(&reply.responder),
+                };
+                transitions::answer_request(connection, &reply.request_id, answer, Utc::now())
+            }
+            (None, None) => {
+                tracing::warn!(channel = %name, request_id = %reply.request_id, "reply without text or decision; ignored");
+                continue;
+            }
         };
-        let answer = Answer {
-            text: &text,
-            via: name,
-            responder: Some(&reply.responder),
-        };
-        match transitions::answer_request(connection, &reply.request_id, answer, Utc::now()) {
+        match outcome {
             Ok(_) => {
-                tracing::info!(channel = %name, request_id = %reply.request_id, "question answered from the channel");
+                tracing::info!(channel = %name, request_id = %reply.request_id, "request answered from the channel");
                 shared.signal.notify();
+            }
+            Err(EngineError::NotAQuestion(_) | EngineError::NotAnApproval(_)) => {
+                tracing::warn!(channel = %name, request_id = %reply.request_id, "reply does not fit the request (text for an approval, or a decision for a question); ignored");
             }
             Err(
                 EngineError::AlreadyResolved(_) | EngineError::RequestNotFound(_) | EngineError::InvalidState { .. },

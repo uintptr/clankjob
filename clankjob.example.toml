@@ -36,7 +36,9 @@ data_dir = "./data"
 
 # Plugins, one directory each. With the Discord plugin configured, questions from cases
 # are also posted to Discord and can be answered there (plugin/discord/README.md); with
-# youtube_transcribe, every case can read YouTube videos (needs `uv` on PATH).
+# youtube_transcribe, every case can read YouTube videos (needs `uv` on PATH); with
+# email (configure plugin/email/config.toml), cases send email you approve and wait for
+# replies.
 # plugins_dir = "./plugin"
 
 # Chat channels new cases send questions to, besides the web UI. Omitted: every channel

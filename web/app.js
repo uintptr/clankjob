@@ -722,7 +722,89 @@ function answerBox(requestId, onAnswered) {
     );
 }
 
+/** An approval: what the tool call will do, its arguments (editable), approve or reject. */
+function approvalCard(request, caseLink, onAnswered) {
+    const args = request.args && typeof request.args === "object" ? request.args : {};
+    let editing = false;
+    const fields = h("div", { class: "approval-args" });
+    const comment = h("input", { name: "comment", placeholder: "Comment for the agent (optional)", "aria-label": "Comment for the agent" });
+    const editButton = h("button", { class: "btn quiet", type: "button", onclick: () => toggleEdit() }, "Edit");
+    const approveButton = h("button", { class: "btn primary", type: "button", onclick: () => decide("approve") }, "Approve");
+    const inputs = new Map();
+
+    function renderFields() {
+        inputs.clear();
+        fields.replaceChildren(
+            ...Object.entries(args).map(([key, value]) => {
+                let control;
+                if (!editing) {
+                    control = h("div", { class: "value" }, typeof value === "string" ? value : pretty(value));
+                } else if (typeof value === "boolean") {
+                    control = h("input", { type: "checkbox", checked: value });
+                    inputs.set(key, () => control.checked);
+                } else if (typeof value === "number") {
+                    control = h("input", { type: "number", value: String(value) });
+                    inputs.set(key, () => Number(control.value));
+                } else if (typeof value === "string") {
+                    const long = value.length > 80 || value.includes("\n");
+                    control = long ? h("textarea", { rows: Math.min(14, value.split("\n").length + 2) }, value) : h("input", { value });
+                    inputs.set(key, () => control.value);
+                } else {
+                    control = h("div", { class: "value mono" }, pretty(value));
+                }
+                return h("div", { class: "arg" }, h("span", { class: "key" }, key), control);
+            }),
+        );
+    }
+
+    function toggleEdit() {
+        editing = !editing;
+        editButton.textContent = editing ? "Cancel edit" : "Edit";
+        approveButton.textContent = editing ? "Approve edited" : "Approve";
+        renderFields();
+    }
+
+    async function decide(decision) {
+        const body = { decision };
+        if (comment.value.trim()) body.comment = comment.value.trim();
+        if (decision === "approve" && editing) {
+            body.args = { ...args };
+            for (const [key, read] of inputs) body.args[key] = read();
+        }
+        try {
+            await api(`/human-requests/${encodeURIComponent(request.id)}/answer`, { method: "POST", body });
+            toast(decision === "approve" ? "Approved. It runs as the agent wakes up." : "Rejected. The agent is told why.");
+        } catch (error) {
+            if (error.status === 409) toast("That approval was already decided.");
+            else report(error);
+        }
+        onAnswered();
+    }
+
+    renderFields();
+    return h(
+        "div",
+        { class: "card ask approval" },
+        h("div", { class: "who" }, caseLink ? [h("a", { href: `#/cases/${encodeURIComponent(request.case_id)}` }, caseLink), " · "] : "", h("b", {}, "wants your approval"), " · ", timeEl(request.created_at)),
+        h("div", { class: "q" }, request.question),
+        h("div", { class: "hint mono" }, request.tool),
+        fields,
+        h(
+            "div",
+            { class: "box" },
+            comment,
+            h(
+                "div",
+                { class: "acts" },
+                editButton,
+                h("div", { class: "right" }, h("button", { class: "btn quiet warn", type: "button", onclick: () => decide("reject") }, "Reject"), approveButton),
+            ),
+        ),
+    );
+}
+
 function questionCard(request, caseLink, onAnswered) {
+    if (request.kind === "approval") return approvalCard(request, caseLink, onAnswered);
     return h(
         "div",
         { class: "card ask" },
@@ -765,6 +847,18 @@ function timelineRenderer(thread) {
                 return msg("human", "You", event, txt(reason.text));
             case "human_answer":
                 return msg("human", reason.via && reason.via !== "web" ? `You answered on ${reason.via}` : "You answered", event, h("div", { class: "txt muted" }, reason.question), txt(reason.answer));
+            case "approval_decided": {
+                const verb = reason.decision === "approve" ? "approved" : "rejected";
+                return msg(
+                    "human",
+                    `You ${verb} ${reason.tool}${reason.via && reason.via !== "web" ? ` on ${reason.via}` : ""}`,
+                    event,
+                    reason.comment && txt(reason.comment),
+                    reason.edited_args && h("pre", { class: "raw" }, pretty(reason.edited_args)),
+                );
+            }
+            case "approved_call_finished":
+                return msg("", reason.is_error ? `${reason.tool} failed` : `${reason.tool} ran`, event, h("pre", { class: "raw" }, pretty(reason.result)));
             case "condition_fired":
                 return msg("", "Woke up", event, txt(`The ${conditionName(reason.kind)} fired.`), reason.details.length > 0 && h("pre", { class: "raw" }, pretty(reason.details)));
             case "timed_out":
@@ -1284,13 +1378,64 @@ function inboxView(view) {
 
 // ---------------------------------------------------------------- prompts
 
+/** The owner's own prompt: added to every case's system prompt, saved as user_prompt.md. */
+function userPromptSection() {
+    const textarea = h("textarea", {
+        name: "user_prompt",
+        rows: 8,
+        placeholder: "Standing instructions for all your cases, e.g.\nMy name is Brad; sign emails as Brad.\nKeep emails short and polite.\nAsk me before agreeing to anything over $500.",
+        "aria-label": "Your prompt",
+    });
+    const counter = h("span", { class: "hint num" });
+    const saved = h("span", { class: "hint" });
+    const saveButton = h("button", { class: "btn primary", type: "submit" }, "Save");
+    let maxChars = 20000;
+    let savedContent = "";
+
+    function update() {
+        const length = textarea.value.length;
+        counter.textContent = `${length.toLocaleString()} / ${maxChars.toLocaleString()} characters`;
+        counter.classList.toggle("bad", length > maxChars);
+        saveButton.disabled = textarea.value.trim() === savedContent.trim() || length > maxChars;
+    }
+
+    function show(prompt) {
+        maxChars = prompt.max_chars;
+        savedContent = prompt.content;
+        textarea.value = prompt.content;
+        saved.replaceChildren(...(prompt.updated_at ? ["saved ", timeEl(prompt.updated_at)] : ["not written yet"]));
+        update();
+    }
+
+    textarea.addEventListener("input", update);
+    const form = h(
+        "form",
+        {
+            class: "card box",
+            onsubmit: async (event) => {
+                event.preventDefault();
+                try {
+                    show(await api("/user-prompt", { method: "PUT", body: { content: textarea.value } }));
+                    toast("Saved. Every case uses it from its next turn.");
+                } catch (error) {
+                    report(error);
+                }
+            },
+        },
+        textarea,
+        h("div", { class: "acts" }, counter, saved, h("div", { class: "right" }, saveButton)),
+    );
+    api("/user-prompt").then(show).catch(report);
+    return section("Your prompt", "added to every case's system prompt, from its next turn · data/user_prompt.md", form);
+}
+
 function promptsView(view) {
     const reloadButton = h("button", { class: "btn sm", type: "button", onclick: () => reload().catch(report) }, "Reload from disk");
     const body = pageFrame(view, "Prompts", "Every word the agents read. Override any template, or add profiles, in the prompts directory.", reloadButton);
     const errors = h("div");
     const list = h("div", { class: "card prompt-list" });
     const viewer = h("div");
-    body.append(errors, h("section", { class: "sec" }, h("div", { class: "prompt-layout" }, list, viewer)));
+    body.append(userPromptSection(), errors, section("Templates", "built in, or overridden by files in the prompts directory", h("div", { class: "prompt-layout" }, list, viewer)));
     let selected = "system";
 
     async function show(name) {
@@ -1457,12 +1602,18 @@ function pluginsView(view) {
                     [plugin.id, plugin.version && `v${plugin.version}`, plugin.runtime, ...plugin.provides.map((what) => what.replace("_", " "))].filter(Boolean).join(" · "),
                     plugin.error && h("div", { class: "notice bad" }, h("div", { class: "grow" }, h("b", {}, "Did not load. "), plugin.error)),
                     plugin.note && h("div", { class: "notice plain" }, h("div", { class: "grow" }, plugin.note)),
-                    (plugin.tools.length > 0 || plugin.guides.length > 0) &&
+                    (plugin.tools.length > 0 || plugin.guides.length > 0 || plugin.conditions.length > 0) &&
                         h(
                             "div",
                             { class: "card plugin-instance" },
                             h("div", { class: "line" }, h("span", { class: "chip completed" }, h("i"), "On"), h("span", { class: "muted" }, "Offered to every case")),
                             plugin.tools.length > 0 && h("dl", { class: "tool-list" }, plugin.tools.flatMap((tool) => [h("dt", { class: "mono" }, tool.name), h("dd", {}, tool.description)])),
+                            plugin.conditions.length > 0 &&
+                                h(
+                                    "dl",
+                                    { class: "tool-list" },
+                                    plugin.conditions.flatMap((condition) => [h("dt", {}, h("span", { class: "tag" }, "wait for"), " ", h("span", { class: "mono" }, condition.name)), h("dd", {}, condition.description)]),
+                                ),
                             plugin.guides.length > 0 &&
                                 h(
                                     "dl",

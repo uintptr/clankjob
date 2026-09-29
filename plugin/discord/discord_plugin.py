@@ -610,8 +610,10 @@ class Plugin:
         status = text_of(outcome, "status", "outcome")
         via = optional_text(outcome, "via")
         responder = optional_text(outcome, "responder")
+        decision = optional_text(outcome, "decision")
+        verb = {"approve": "Approved", "reject": "Rejected"}.get(decision or "", "Answered")
         line = {
-            "answered": f"Answered via {via or 'another channel'}{f' by {responder}' if responder else ''}",
+            "answered": f"{verb} via {via or 'another channel'}{f' by {responder}' if responder else ''}",
             "superseded": "No longer needed",
             "cancelled": "Case cancelled",
         }.get(status)
@@ -691,4 +693,12 @@ def serve(plugin: Plugin, stdin: TextIO, stdout: TextIO) -> None:
 
 
 if __name__ == "__main__":
-    serve(Plugin(), sys.stdin, sys.stdout)
+    try:
+        serve(Plugin(), sys.stdin, sys.stdout)
+    except KeyboardInterrupt:
+        # The server normally stops us with `shutdown`; a Ctrl+C that still reaches us
+        # needs no traceback.
+        sys.exit(130)
+    except BrokenPipeError:
+        # The server went away mid-reply.
+        sys.exit(1)

@@ -81,8 +81,9 @@ clankjob is young. Milestone 1, the engine every case depends on, is done and te
 | Discord: get asked, answer from chat, get notified when done        | Available |
 | Python plugins (human channels so far)                              | Available |
 | Command plugins: any CLI script as a tool, e.g. YouTube transcripts | Available |
-| Email plugin (IMAP/SMTP)                                            | Planned   |
-| Approvals, Docker image                                             | Planned   |
+| Email: send, reply, read, wait for replies (you approve each email) | Available |
+| Approvals: approve, edit or reject tool calls (web and Discord)     | Available |
+| Docker image                                                        | Planned   |
 
 The full design, including everything planned, is in [docs/design.md](docs/design.md).
 
@@ -205,6 +206,7 @@ crates/
 plugin/
   discord/      Discord human channel (Python, standard library only)
   youtube_transcribe/  YouTube transcripts as tools, plus analysis guides
+  email/        send and read email, wait for replies (IMAP/SMTP, approvals)
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/
   design.md     the full design

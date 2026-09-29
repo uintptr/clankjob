@@ -9,6 +9,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::plugin_tools::PluginTools;
+
 /// Arguments of `sleep`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,6 +190,8 @@ pub struct Schedule {
     pub next_check_at: Option<DateTime<Utc>>,
     /// Deadline; `None` for no timeout.
     pub deadline_at: Option<DateTime<Utc>>,
+    /// For a plugin condition: how often it is checked.
+    pub check_every: Option<Duration>,
 }
 
 /// `now + duration`, or a message for the LLM if the result is out of range.
@@ -204,11 +208,12 @@ pub(crate) fn add(now: DateTime<Utc>, duration: Duration) -> Result<DateTime<Utc
 ///
 /// * `spec` - The condition as requested by the LLM
 /// * `now` - Current time
+/// * `plugins` - Plugin wait conditions, besides `core.timer`
 ///
 /// # Errors
 ///
 /// Returns a message for the LLM if the kind is unknown or the parameters are invalid.
-pub fn schedule(spec: &WaitConditionSpec, now: DateTime<Utc>) -> Result<Schedule, String> {
+pub fn schedule(spec: &WaitConditionSpec, now: DateTime<Utc>, plugins: &PluginTools) -> Result<Schedule, String> {
     let deadline_at = spec.timeout.map(|timeout| add(now, timeout)).transpose()?;
     match spec.kind.as_str() {
         TIMER_KIND => {
@@ -222,14 +227,36 @@ pub fn schedule(spec: &WaitConditionSpec, now: DateTime<Utc>) -> Result<Schedule
             Ok(Schedule {
                 next_check_at: Some(at),
                 deadline_at,
+                check_every: None,
             })
         }
         HUMAN_INPUT_KIND => Err(format!(
             "`{HUMAN_INPUT_KIND}` cannot be requested directly; call `ask_human`"
         )),
-        other => Err(format!(
-            "unknown wait condition kind `{other}`; available: `{TIMER_KIND}`"
-        )),
+        other => {
+            let Some(condition) = plugins.condition(other) else {
+                let mut kinds = vec![format!("`{TIMER_KIND}`")];
+                kinds.extend(plugins.conditions().iter().map(|condition| format!("`{}`", condition.name())));
+                return Err(format!(
+                    "unknown wait condition kind `{other}`; available: {}",
+                    kinds.join(", ")
+                ));
+            };
+            condition
+                .validate(&spec.params)
+                .map_err(|error| format!("invalid params for `{other}`: {error}"))?;
+            let every = spec
+                .check_every
+                .unwrap_or_else(|| condition.default_interval())
+                .max(condition.min_interval());
+            // The first check runs right away: it may already find what the case waits for,
+            // and it sets the starting point for conditions that look for new things.
+            Ok(Schedule {
+                next_check_at: Some(now),
+                deadline_at,
+                check_every: Some(every),
+            })
+        }
     }
 }
 
@@ -269,6 +296,37 @@ fn file_tool_specs(vision: bool) -> Vec<ToolSpec> {
         ));
     }
     specs
+}
+
+/// Tell `sleep` about the plugin wait conditions: their kind names, when to use them and
+/// their params.
+pub fn describe_plugin_conditions(specs: &mut [ToolSpec], plugins: &PluginTools) {
+    let conditions = plugins.conditions();
+    if conditions.is_empty() {
+        return;
+    }
+    let Some(sleep) = specs.iter_mut().find(|spec| spec.name == "sleep") else {
+        return;
+    };
+    let lines: Vec<String> = conditions
+        .iter()
+        .map(|condition| {
+            format!(
+                "- `{}`: {} Params: {}. Checked every {} by default (at least {}).",
+                condition.name(),
+                condition.description(),
+                condition.params_schema(),
+                humantime::format_duration(condition.default_interval()),
+                humantime::format_duration(condition.min_interval())
+            )
+        })
+        .collect();
+    sleep.description = format!(
+        "{}\n\nBesides `{TIMER_KIND}`, these condition kinds are available (also for `ask_human`'s `also_wait_for`); \
+         set `check_every` to change how often they are checked:\n{}",
+        sleep.description,
+        lines.join("\n")
+    );
 }
 
 /// Specs of the core tools, shown to the LLM.
@@ -453,8 +511,18 @@ mod tests {
 
     #[test]
     fn timer_after_and_at_compute_the_check_time() {
-        let after = schedule(&timer(json!({"after": "2h"}), Some(Duration::from_secs(60))), now()).unwrap();
-        let at = schedule(&timer(json!({"at": "2026-10-01T09:00:00Z"}), None), now()).unwrap();
+        let after = schedule(
+            &timer(json!({"after": "2h"}), Some(Duration::from_secs(60))),
+            now(),
+            &PluginTools::default(),
+        )
+        .unwrap();
+        let at = schedule(
+            &timer(json!({"at": "2026-10-01T09:00:00Z"}), None),
+            now(),
+            &PluginTools::default(),
+        )
+        .unwrap();
 
         assert_eq!(after.next_check_at, Some(now() + chrono::Duration::hours(2)));
         assert_eq!(after.deadline_at, Some(now() + chrono::Duration::minutes(1)));
@@ -467,11 +535,12 @@ mod tests {
 
     #[test]
     fn timer_needs_exactly_one_of_at_or_after() {
-        assert!(schedule(&timer(json!({}), None), now()).is_err());
+        assert!(schedule(&timer(json!({}), None), now(), &PluginTools::default()).is_err());
         assert!(
             schedule(
                 &timer(json!({"after": "1h", "at": "2026-10-01T09:00:00Z"}), None),
-                now()
+                now(),
+                &PluginTools::default()
             )
             .is_err()
         );
@@ -488,8 +557,16 @@ mod tests {
             ..timer(json!({}), None)
         };
 
-        assert!(schedule(&unknown, now()).unwrap_err().contains("unknown wait condition kind"));
-        assert!(schedule(&human, now()).unwrap_err().contains("call `ask_human`"));
+        assert!(
+            schedule(&unknown, now(), &PluginTools::default())
+                .unwrap_err()
+                .contains("unknown wait condition kind")
+        );
+        assert!(
+            schedule(&human, now(), &PluginTools::default())
+                .unwrap_err()
+                .contains("call `ask_human`")
+        );
     }
 
     #[test]

@@ -5,15 +5,15 @@
 //! placed into the command line as separate arguments, never through a shell, and may
 //! not start with `-`, so the LLM cannot slip in options such as `--out /etc/passwd`.
 
-use std::collections::BTreeMap;
-use std::io::Read;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use clankjob_core::llm::ToolSpec;
-use clankjob_core::tool::{PluginTool, ToolOutput};
+use clankjob_core::tool::{CheckOutcome, PluginCondition, PluginTool, ToolOutput};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -29,8 +29,18 @@ const INLINE_CHARS: usize = 12_000;
 const MAX_INLINE_CHARS: usize = 20_000;
 /// Characters of a stored file shown as a preview.
 const PREVIEW_CHARS: usize = 600;
-/// Longest accepted argument value.
+/// Longest accepted argument value, unless the argument sets `max_length`.
 const MAX_ARG_CHARS: usize = 2_000;
+/// Longest `max_length` an argument may set (e.g. an email body).
+const MAX_LONG_ARG_CHARS: usize = 100_000;
+/// Longest approval summary.
+const MAX_SUMMARY_CHARS: usize = 300;
+/// Default check interval of a condition.
+const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_mins(15);
+/// Default shortest check interval of a condition.
+const DEFAULT_MIN_CHECK_INTERVAL: Duration = Duration::from_mins(5);
+/// Default time one check may run.
+const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// How a tool's output reaches the LLM.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -43,6 +53,8 @@ pub enum OutputMode {
     Text,
     /// Always as a case file, read with `read_file`.
     File,
+    /// The command prints JSON, returned as the result.
+    Json,
 }
 
 /// Type of a declared argument.
@@ -75,6 +87,9 @@ pub struct ArgManifest {
     /// Allowed values, if limited.
     #[serde(default, rename = "enum")]
     pub choices: Vec<String>,
+    /// Longest value accepted (default 2 000 characters, at most 100 000).
+    #[serde(default)]
+    pub max_length: Option<usize>,
 }
 
 /// A tool: `[[tools]]` in `plugin.toml`.
@@ -104,6 +119,13 @@ pub struct ToolManifest {
     /// How long it may run, e.g. `"2m"`.
     #[serde(default)]
     pub timeout: Option<String>,
+    /// The owner must approve each call before it runs (design §9.7), e.g. sending email.
+    #[serde(default)]
+    pub requires_approval: bool,
+    /// What a call does, shown to the owner for approval; `{name}` placeholders allowed,
+    /// e.g. `"Email {to}: {subject}"`.
+    #[serde(default)]
+    pub approval: Option<String>,
 }
 
 /// A value made safe for a file name: no URL scheme, only letters, digits, `.`, `-` and
@@ -129,12 +151,10 @@ fn file_name_part(value: &str) -> String {
 /// A command tool, ready to run.
 pub struct CommandTool {
     plugin: String,
-    dir: PathBuf,
     spec: ToolSpec,
     manifest: ToolManifest,
-    program: PathBuf,
-    env: BTreeMap<String, String>,
-    timeout: Duration,
+    runner: Runner,
+    standalone: BTreeSet<String>,
 }
 
 /// Placeholders (`{name}`) in a template string.
@@ -190,180 +210,232 @@ pub fn require(program: &str) -> Result<(), String> {
     locate(program, Path::new(".")).map(drop)
 }
 
-impl CommandTool {
-    /// Check a tool's manifest and build it.
-    ///
-    /// # Arguments
-    ///
-    /// * `plugin` - Plugin id
-    /// * `dir` - Plugin directory, the working directory of the command
-    /// * `manifest` - The `[[tools]]` entry
-    /// * `env` - Extra environment variables, already resolved (`[env]` in `config.toml`)
-    ///
-    /// # Errors
-    ///
-    /// Returns what is wrong with the manifest, or that the program cannot be found.
-    pub fn new(
-        plugin: &str,
-        dir: &Path,
-        manifest: ToolManifest,
-        env: BTreeMap<String, String>,
-    ) -> Result<Self, String> {
-        let name = &manifest.name;
-        let valid_name = !name.is_empty()
-            && name.len() <= 64
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-        if !valid_name {
-            return Err(format!("tool name `{name}` must be 1-64 letters, digits, `_` or `-`"));
-        }
-        let Some(program) = manifest.command.first() else {
-            return Err(format!("tool `{name}`: `command` is empty"));
+/// JSON Schema of declared arguments, as shown to the LLM.
+fn schema_of(args: &BTreeMap<String, ArgManifest>) -> Value {
+    let mut properties = Map::new();
+    let mut required = Vec::new();
+    for (arg, declared) in args {
+        let kind = match declared.kind {
+            ArgType::String => "string",
+            ArgType::Integer => "integer",
+            ArgType::Number => "number",
+            ArgType::Boolean => "boolean",
         };
-        if !placeholders(program).is_empty() {
-            return Err(format!("tool `{name}`: the program cannot be an argument"));
-        }
-        for used in manifest.command.iter().flat_map(|part| placeholders(part)) {
-            match manifest.args.get(used) {
-                Some(arg) if arg.required => {}
-                Some(_) => {
-                    return Err(format!(
-                        "tool `{name}`: `{{{used}}}` in `command` must be a required argument; put optional ones in `options`"
-                    ));
-                }
-                None => return Err(format!("tool `{name}`: `{{{used}}}` is not a declared argument")),
-            }
-        }
-        for (option, parts) in &manifest.options {
-            if !manifest.args.contains_key(option) {
-                return Err(format!("tool `{name}`: option `{option}` is not a declared argument"));
-            }
-            if let Some(other) = parts.iter().flat_map(|part| placeholders(part)).find(|used| used != option) {
-                return Err(format!(
-                    "tool `{name}`: option `{option}` can only use `{{{option}}}`, not `{{{other}}}`"
-                ));
-            }
-        }
-        let timeout = match &manifest.timeout {
-            None => DEFAULT_TIMEOUT,
-            Some(text) => {
-                humantime::parse_duration(text).map_err(|error| format!("tool `{name}`: timeout: {error}"))?
-            }
-        };
-        let program = locate(program, dir).map_err(|error| format!("tool `{name}`: {error}"))?;
-        let mut properties = Map::new();
-        let mut required = Vec::new();
-        for (arg, declared) in &manifest.args {
-            let kind = match declared.kind {
-                ArgType::String => "string",
-                ArgType::Integer => "integer",
-                ArgType::Number => "number",
-                ArgType::Boolean => "boolean",
-            };
-            let mut schema = json!({ "type": kind, "description": declared.description });
-            if !declared.choices.is_empty()
-                && let Some(object) = schema.as_object_mut()
-            {
+        let mut schema = json!({ "type": kind, "description": declared.description });
+        if let Some(object) = schema.as_object_mut() {
+            if !declared.choices.is_empty() {
                 object.insert("enum".to_owned(), json!(declared.choices));
             }
-            properties.insert(arg.clone(), schema);
-            if declared.required {
-                required.push(arg.clone());
+            if let Some(max) = declared.max_length {
+                object.insert("maxLength".to_owned(), json!(max));
             }
         }
-        let spec = ToolSpec {
-            name: name.clone(),
-            description: manifest.description.clone(),
-            parameters: json!({ "type": "object", "properties": properties, "required": required }),
-        };
-        Ok(Self {
-            plugin: plugin.to_owned(),
-            dir: dir.to_path_buf(),
-            spec,
-            manifest,
-            program,
-            env,
-            timeout,
-        })
+        properties.insert(arg.clone(), schema);
+        if declared.required {
+            required.push(arg.clone());
+        }
     }
+    json!({ "type": "object", "properties": properties, "required": required })
+}
 
-    /// Check the LLM's arguments and turn them into text values.
-    fn values(&self, arguments: &Value) -> Result<BTreeMap<String, String>, String> {
-        let empty = Map::new();
-        let given = match arguments {
-            Value::Object(object) => object,
-            Value::Null => &empty,
-            _ => return Err("arguments must be an object".to_owned()),
+/// Check a name used by the LLM: 1-64 letters, digits, `_` or `-`.
+fn check_name(what: &str, name: &str) -> Result<(), String> {
+    let valid =
+        !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("{what} name `{name}` must be 1-64 letters, digits, `_` or `-`"))
+    }
+}
+
+fn parse_timeout(what: &str, text: Option<&str>, default: Duration) -> Result<Duration, String> {
+    text.map_or(Ok(default), |text| {
+        humantime::parse_duration(text).map_err(|error| format!("{what}: `{text}`: {error}"))
+    })
+}
+
+/// Check the LLM's arguments against their declarations and turn them into text values.
+///
+/// `standalone` names the arguments that fill a whole command-line element: those may not
+/// start with `-`, so they can never be taken for an option. An argument embedded in a
+/// larger element (`--body={body}`) may.
+fn check_values(
+    declared_args: &BTreeMap<String, ArgManifest>,
+    standalone: &BTreeSet<String>,
+    arguments: &Value,
+) -> Result<BTreeMap<String, String>, String> {
+    let empty = Map::new();
+    let given = match arguments {
+        Value::Object(object) => object,
+        Value::Null => &empty,
+        _ => return Err("arguments must be an object".to_owned()),
+    };
+    if let Some(unknown) = given.keys().find(|key| !declared_args.contains_key(*key)) {
+        let known: Vec<&str> = declared_args.keys().map(String::as_str).collect();
+        return Err(format!(
+            "unknown argument `{unknown}`; this takes: {}",
+            known.join(", ")
+        ));
+    }
+    let mut values = BTreeMap::new();
+    for (name, declared) in declared_args {
+        let value = match given.get(name) {
+            None | Some(Value::Null) if declared.required => return Err(format!("`{name}` is required")),
+            None | Some(Value::Null) => continue,
+            Some(value) => value,
         };
-        if let Some(unknown) = given.keys().find(|key| !self.manifest.args.contains_key(*key)) {
-            let known: Vec<&str> = self.manifest.args.keys().map(String::as_str).collect();
+        let text = match (declared.kind, value) {
+            (ArgType::String, Value::String(text)) => text.trim().to_owned(),
+            (ArgType::Integer, Value::Number(number)) if number.is_i64() || number.is_u64() => number.to_string(),
+            (ArgType::Number, Value::Number(number)) => number.to_string(),
+            (ArgType::Boolean, Value::Bool(flag)) => flag.to_string(),
+            (kind, _) => return Err(format!("`{name}` must be a {kind:?}").to_lowercase()),
+        };
+        if text.is_empty() {
+            // Models often fill optional fields with "" rather than leaving them out;
+            // that means "not given", not a value.
+            if declared.required {
+                return Err(format!("`{name}` is required and cannot be empty"));
+            }
+            continue;
+        }
+        if text.starts_with('-') && standalone.contains(name) {
+            return Err(format!("`{name}` cannot start with `-`"));
+        }
+        let max = declared.max_length.unwrap_or(MAX_ARG_CHARS).min(MAX_LONG_ARG_CHARS);
+        if text.contains('\0') || text.chars().count() > max {
             return Err(format!(
-                "unknown argument `{unknown}`; this tool takes: {}",
-                known.join(", ")
+                "`{name}` is longer than {max} characters or contains a NUL byte"
             ));
         }
-        let mut values = BTreeMap::new();
-        for (name, declared) in &self.manifest.args {
-            let value = match given.get(name) {
-                None | Some(Value::Null) if declared.required => return Err(format!("`{name}` is required")),
-                None | Some(Value::Null) => continue,
-                Some(value) => value,
-            };
-            let text = match (declared.kind, value) {
-                (ArgType::String, Value::String(text)) => text.trim().to_owned(),
-                (ArgType::Integer, Value::Number(number)) if number.is_i64() || number.is_u64() => number.to_string(),
-                (ArgType::Number, Value::Number(number)) => number.to_string(),
-                (ArgType::Boolean, Value::Bool(flag)) => flag.to_string(),
-                (kind, _) => return Err(format!("`{name}` must be a {kind:?}").to_lowercase()),
-            };
-            if text.is_empty() {
-                return Err(format!("`{name}` is empty"));
-            }
-            if text.starts_with('-') && declared.kind == ArgType::String {
-                return Err(format!("`{name}` cannot start with `-`"));
-            }
-            if text.contains('\0') || text.chars().count() > MAX_ARG_CHARS {
-                return Err(format!("`{name}` is too long or contains a NUL byte"));
-            }
-            if !declared.choices.is_empty() && !declared.choices.contains(&text) {
-                return Err(format!("`{name}` must be one of: {}", declared.choices.join(", ")));
-            }
-            if declared.kind == ArgType::Boolean && text == "false" {
-                continue;
-            }
-            values.insert(name.clone(), text);
+        if !declared.choices.is_empty() && !declared.choices.contains(&text) {
+            return Err(format!("`{name}` must be one of: {}", declared.choices.join(", ")));
         }
-        Ok(values)
-    }
-
-    /// The argument list after the program.
-    fn argv(&self, values: &BTreeMap<String, String>) -> Vec<String> {
-        let mut argv: Vec<String> = self.manifest.command.iter().skip(1).map(|part| fill(part, values)).collect();
-        for (option, parts) in &self.manifest.options {
-            if values.contains_key(option) {
-                argv.extend(parts.iter().map(|part| fill(part, values)));
-            }
+        if declared.kind == ArgType::Boolean && text == "false" {
+            continue;
         }
-        argv
+        values.insert(name.clone(), text);
     }
+    Ok(values)
+}
 
-    /// Run the command and wait for it, within the timeout.
-    fn execute(&self, argv: &[String]) -> Result<String, String> {
-        let name = &self.spec.name;
+/// Check a command template against the declared arguments.
+///
+/// # Returns
+///
+/// The arguments that fill a whole command-line element
+fn check_command(
+    what: &str,
+    command: &[String],
+    options: &BTreeMap<String, Vec<String>>,
+    args: &BTreeMap<String, ArgManifest>,
+) -> Result<BTreeSet<String>, String> {
+    let Some(program) = command.first() else {
+        return Err(format!("{what}: `command` is empty"));
+    };
+    if !placeholders(program).is_empty() {
+        return Err(format!("{what}: the program cannot be an argument"));
+    }
+    for used in command.iter().flat_map(|part| placeholders(part)) {
+        match args.get(used) {
+            Some(arg) if arg.required => {}
+            Some(_) => {
+                return Err(format!(
+                    "{what}: `{{{used}}}` in `command` must be a required argument; put optional ones in `options`"
+                ));
+            }
+            None => return Err(format!("{what}: `{{{used}}}` is not a declared argument")),
+        }
+    }
+    for (option, parts) in options {
+        if !args.contains_key(option) {
+            return Err(format!("{what}: option `{option}` is not a declared argument"));
+        }
+        if let Some(other) = parts.iter().flat_map(|part| placeholders(part)).find(|used| used != option) {
+            return Err(format!(
+                "{what}: option `{option}` can only use `{{{option}}}`, not `{{{other}}}`"
+            ));
+        }
+    }
+    Ok(command
+        .iter()
+        .chain(options.values().flatten())
+        .filter_map(|part| part.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')))
+        .filter(|name| args.contains_key(*name))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The argument list after the program.
+fn argv_of(
+    command: &[String],
+    options: &BTreeMap<String, Vec<String>>,
+    values: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut argv: Vec<String> = command.iter().skip(1).map(|part| fill(part, values)).collect();
+    for (option, parts) in options {
+        if values.contains_key(option) {
+            argv.extend(parts.iter().map(|part| fill(part, values)));
+        }
+    }
+    argv
+}
+
+/// `ETXTBSY`: the program file is still open for writing somewhere.
+const TEXT_FILE_BUSY: i32 = 26;
+
+/// Start a command, retrying briefly while its program is "text file busy". That happens
+/// when a script was just written and another thread forked meanwhile, so the child
+/// briefly holds the file open; it clears within milliseconds.
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    let mut attempts = 0_u32;
+    loop {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(TEXT_FILE_BUSY) && attempts < 20 => {
+                attempts = attempts.saturating_add(1);
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
+/// How to run a command.
+struct Runner {
+    name: String,
+    dir: PathBuf,
+    program: PathBuf,
+    env: BTreeMap<String, String>,
+    timeout: Duration,
+}
+
+impl Runner {
+    /// Run the command and wait for it, within the timeout, feeding `stdin` if given.
+    fn run(&self, argv: &[String], stdin: Option<String>) -> Result<String, String> {
+        let name = &self.name;
         let mut command = Command::new(&self.program);
         command
             .args(argv)
             .current_dir(&self.dir)
             .env_clear()
-            .stdin(Stdio::null())
+            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::process::own_process_group(&mut command);
         for variable in PASSED_ENV {
             if let Some(value) = std::env::var_os(variable) {
                 command.env(variable, value);
             }
         }
         command.envs(&self.env);
-        let mut child = command.spawn().map_err(|error| format!("`{name}` could not start: {error}"))?;
+        let mut child = spawn(&mut command).map_err(|error| format!("`{name}` could not start: {error}"))?;
+        if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
+            // Written from a thread so a child that does not read stdin cannot block us.
+            thread::spawn(move || {
+                let _ = pipe.write_all(input.as_bytes());
+            });
+        }
         let read_all = |mut source: Box<dyn Read + Send>| {
             thread::spawn(move || {
                 let mut bytes = Vec::new();
@@ -419,6 +491,57 @@ impl CommandTool {
             }
         ))
     }
+}
+
+impl CommandTool {
+    /// Check a tool's manifest and build it.
+    ///
+    /// # Arguments
+    ///
+    /// * `plugin` - Plugin id
+    /// * `dir` - Plugin directory, the working directory of the command
+    /// * `manifest` - The `[[tools]]` entry
+    /// * `env` - Extra environment variables, already resolved (`[env]` in `config.toml`)
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong with the manifest, or that the program cannot be found.
+    pub fn new(
+        plugin: &str,
+        dir: &Path,
+        manifest: ToolManifest,
+        env: BTreeMap<String, String>,
+    ) -> Result<Self, String> {
+        let name = manifest.name.clone();
+        check_name("tool", &name)?;
+        let what = format!("tool `{name}`");
+        let standalone = check_command(&what, &manifest.command, &manifest.options, &manifest.args)?;
+        let timeout = parse_timeout(&what, manifest.timeout.as_deref(), DEFAULT_TIMEOUT)?;
+        let program = manifest.command.first().map(String::as_str).unwrap_or_default();
+        let program = locate(program, dir).map_err(|error| format!("{what}: {error}"))?;
+        let spec = ToolSpec {
+            name: name.clone(),
+            description: manifest.description.clone(),
+            parameters: schema_of(&manifest.args),
+        };
+        Ok(Self {
+            plugin: plugin.to_owned(),
+            spec,
+            runner: Runner {
+                name,
+                dir: dir.to_path_buf(),
+                program,
+                env,
+                timeout,
+            },
+            standalone,
+            manifest,
+        })
+    }
+
+    fn values(&self, arguments: &Value) -> Result<BTreeMap<String, String>, String> {
+        check_values(&self.manifest.args, &self.standalone, arguments)
+    }
 
     /// The case file name for long output.
     fn file_name(&self, values: &BTreeMap<String, String>) -> String {
@@ -444,11 +567,40 @@ impl PluginTool for CommandTool {
         &self.spec
     }
 
+    fn approval_summary(&self, arguments: &Value) -> Option<String> {
+        if !self.manifest.requires_approval {
+            return None;
+        }
+        let values = self.values(arguments).unwrap_or_default();
+        let summary = match &self.manifest.approval {
+            Some(template) => {
+                let filled = fill(template, &values);
+                // Placeholders of optional arguments that were not given are dropped.
+                placeholders(template)
+                    .into_iter()
+                    .fold(filled, |text, name| text.replace(&format!("{{{name}}}"), ""))
+            }
+            None => format!("Run `{}`", self.spec.name),
+        };
+        Some(summary.chars().take(MAX_SUMMARY_CHARS).collect())
+    }
+
+    fn validate(&self, arguments: &Value) -> Result<(), String> {
+        self.values(arguments).map(drop)
+    }
+
     fn run(&self, arguments: &Value) -> Result<ToolOutput, String> {
         let values = self.values(arguments)?;
-        let output = self.execute(&self.argv(&values))?;
+        let output = self
+            .runner
+            .run(&argv_of(&self.manifest.command, &self.manifest.options, &values), None)?;
         let chars = output.chars().count();
         let inline = match self.manifest.output {
+            OutputMode::Json => {
+                return serde_json::from_str(&output)
+                    .map(ToolOutput::Json)
+                    .map_err(|error| format!("`{}` printed invalid JSON: {error}", self.spec.name));
+            }
             OutputMode::Text => true,
             OutputMode::File => false,
             OutputMode::Auto => chars <= INLINE_CHARS,
@@ -467,6 +619,146 @@ impl PluginTool for CommandTool {
             content: output.into_bytes(),
             summary: json!({ "preview": preview }),
         })
+    }
+}
+
+/// A wait condition: `[[conditions]]` in `plugin.toml`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionManifest {
+    /// Kind name used in `sleep`, e.g. `email_reply_received`.
+    pub name: String,
+    /// When to use it, shown to the LLM.
+    pub description: String,
+    /// Program and arguments. It reads `{"params": …, "cursor": …}` on stdin and prints
+    /// `{"status": "pending" | "fired", "events": […], "cursor": …}`.
+    pub command: Vec<String>,
+    /// Declared params, checked when `sleep` asks for the condition.
+    #[serde(default)]
+    pub params: BTreeMap<String, ArgManifest>,
+    /// Check interval when `sleep` sets none (default 15m).
+    #[serde(default)]
+    pub interval: Option<String>,
+    /// Shortest interval allowed (default 5m).
+    #[serde(default)]
+    pub min_interval: Option<String>,
+    /// How long one check may run (default 1m).
+    #[serde(default)]
+    pub timeout: Option<String>,
+}
+
+/// A command wait condition, ready to check.
+pub struct CommandCondition {
+    plugin: String,
+    name: String,
+    description: String,
+    schema: Value,
+    params: BTreeMap<String, ArgManifest>,
+    argv: Vec<String>,
+    interval: Duration,
+    min_interval: Duration,
+    runner: Runner,
+}
+
+impl CommandCondition {
+    /// Check a condition's manifest and build it.
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong with the manifest, or that the program cannot be found.
+    pub fn new(
+        plugin: &str,
+        dir: &Path,
+        manifest: ConditionManifest,
+        env: BTreeMap<String, String>,
+    ) -> Result<Self, String> {
+        check_name("condition", &manifest.name)?;
+        let what = format!("condition `{}`", manifest.name);
+        if manifest.command.iter().any(|part| !placeholders(part).is_empty()) {
+            return Err(format!(
+                "{what}: params reach the command on stdin, not as `{{…}}` in `command`"
+            ));
+        }
+        let program = manifest.command.first().ok_or_else(|| format!("{what}: `command` is empty"))?;
+        let program = locate(program, dir).map_err(|error| format!("{what}: {error}"))?;
+        let interval = parse_timeout(&what, manifest.interval.as_deref(), DEFAULT_CHECK_INTERVAL)?;
+        let min_interval = parse_timeout(&what, manifest.min_interval.as_deref(), DEFAULT_MIN_CHECK_INTERVAL)?;
+        let timeout = parse_timeout(&what, manifest.timeout.as_deref(), DEFAULT_CHECK_TIMEOUT)?;
+        Ok(Self {
+            plugin: plugin.to_owned(),
+            schema: schema_of(&manifest.params),
+            argv: manifest.command.iter().skip(1).cloned().collect(),
+            interval: interval.max(min_interval),
+            min_interval,
+            runner: Runner {
+                name: manifest.name.clone(),
+                dir: dir.to_path_buf(),
+                program,
+                env,
+                timeout,
+            },
+            name: manifest.name,
+            description: manifest.description,
+            params: manifest.params,
+        })
+    }
+}
+
+/// What a check command prints.
+#[derive(Deserialize)]
+struct CheckReport {
+    status: String,
+    #[serde(default)]
+    events: Vec<Value>,
+    #[serde(default)]
+    cursor: Option<Value>,
+}
+
+impl PluginCondition for CommandCondition {
+    fn plugin(&self) -> &str {
+        &self.plugin
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn params_schema(&self) -> &Value {
+        &self.schema
+    }
+
+    fn default_interval(&self) -> Duration {
+        self.interval
+    }
+
+    fn min_interval(&self) -> Duration {
+        self.min_interval
+    }
+
+    fn validate(&self, params: &Value) -> Result<(), String> {
+        check_values(&self.params, &BTreeSet::new(), params).map(drop)
+    }
+
+    fn check(&self, params: &Value, cursor: Option<&Value>) -> Result<CheckOutcome, String> {
+        let input = json!({ "params": params, "cursor": cursor }).to_string();
+        let output = self.runner.run(&self.argv, Some(input))?;
+        let report: CheckReport = serde_json::from_str(&output)
+            .map_err(|error| format!("`{}` printed an invalid report: {error}", self.name))?;
+        match report.status.as_str() {
+            "pending" => Ok(CheckOutcome::Pending { cursor: report.cursor }),
+            "fired" => Ok(CheckOutcome::Fired {
+                events: report.events,
+                cursor: report.cursor,
+            }),
+            other => Err(format!(
+                "`{}` reported status `{other}`; expected pending or fired",
+                self.name
+            )),
+        }
     }
 }
 
@@ -525,6 +817,23 @@ mod tests {
             "only declared env reaches the tool"
         );
         assert_eq!(tool.spec().parameters["required"], json!(["video"]));
+    }
+
+    #[test]
+    fn empty_optional_arguments_count_as_not_given() {
+        let (_dir, tool) = tool("");
+
+        let blank_option = tool.run(&json!({ "video": "abc", "lang": " " })).unwrap();
+        let blank_required = tool.run(&json!({ "video": "" })).unwrap_err();
+
+        let ToolOutput::Json(value) = blank_option else {
+            unreachable!("expected inline output")
+        };
+        assert!(
+            value["output"].as_str().unwrap().contains("args: abc --format stamped\n"),
+            "no --lang added"
+        );
+        assert_eq!(blank_required, "`video` is required and cannot be empty");
     }
 
     #[test]
@@ -589,6 +898,98 @@ mod tests {
             tool.run(&json!({})).unwrap(),
             ToolOutput::Json(json!({ "output": "hello\n", "truncated": false }))
         );
+    }
+
+    fn script(dir: &Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn approval_tools_summarise_calls_and_print_json() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        script(
+            dir.path(),
+            "send.sh",
+            "#!/bin/sh\nprintf '{\"sent_to\": \"%s\", \"body\": \"%s\"}' \"$1\" \"${2#--body=}\"\n",
+        );
+        let text = "name = \"send_email\"\ndescription = \"Send.\"\ncommand = [\"./send.sh\", \"{to}\", \"--body={body}\"]\n\
+                    output = \"json\"\nrequires_approval = true\napproval = \"Email {to}{cc}: {body}\"\n\
+                    [args.to]\ndescription = \"To\"\nrequired = true\n\
+                    [args.body]\ndescription = \"Body\"\nrequired = true\nmax_length = 5000\n\
+                    [args.cc]\ndescription = \"Cc\"\n";
+        let tool = CommandTool::new("email", dir.path(), manifest(text), BTreeMap::new()).unwrap();
+        let args = json!({ "to": "bob@x.ca", "body": "- first point" });
+
+        // Act
+        let summary = tool.approval_summary(&args);
+        let output = tool.run(&args).unwrap();
+        let long = tool.validate(&json!({ "to": "bob@x.ca", "body": "x".repeat(5001) }));
+        let dash = tool.validate(&json!({ "to": "-oProxyCommand=evil", "body": "hi" }));
+
+        // Assert
+        assert_eq!(summary.as_deref(), Some("Email bob@x.ca: - first point"));
+        assert_eq!(
+            output,
+            ToolOutput::Json(json!({ "sent_to": "bob@x.ca", "body": "- first point" }))
+        );
+        assert!(long.unwrap_err().contains("longer than 5000"));
+        assert_eq!(
+            dash.unwrap_err(),
+            "`to` cannot start with `-`",
+            "a whole-element value cannot be an option"
+        );
+    }
+
+    #[test]
+    fn conditions_get_params_and_cursor_on_stdin_and_report_back() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        script(
+            dir.path(),
+            "check.py",
+            "#!/usr/bin/env python3\nimport json, sys\nrequest = json.load(sys.stdin)\n\
+             seen = (request['cursor'] or {}).get('seen', 0)\n\
+             if seen >= 1:\n    print(json.dumps({'status': 'fired', 'events': [{'thread': request['params']['thread']}], 'cursor': {'seen': seen + 1}}))\n\
+             else:\n    print(json.dumps({'status': 'pending', 'cursor': {'seen': seen + 1}}))\n",
+        );
+        let text = "name = \"reply_received\"\ndescription = \"A reply.\"\ncommand = [\"./check.py\"]\n\
+                    interval = \"1m\"\nmin_interval = \"5m\"\n[params.thread]\ndescription = \"Thread\"\nrequired = true\n";
+        let manifest: ConditionManifest = toml::from_str(text).unwrap();
+        let condition = CommandCondition::new("email", dir.path(), manifest, BTreeMap::new()).unwrap();
+        let params = json!({ "thread": "<1@x>" });
+
+        // Act
+        let first = condition.check(&params, None).unwrap();
+        let second = condition.check(&params, Some(&json!({ "seen": 1 }))).unwrap();
+
+        // Assert
+        assert_eq!(
+            first,
+            CheckOutcome::Pending {
+                cursor: Some(json!({ "seen": 1 }))
+            }
+        );
+        assert_eq!(
+            second,
+            CheckOutcome::Fired {
+                events: vec![json!({ "thread": "<1@x>" })],
+                cursor: Some(json!({ "seen": 2 }))
+            }
+        );
+        assert_eq!(
+            condition.default_interval(),
+            Duration::from_mins(5),
+            "clamped to the minimum"
+        );
+        assert_eq!(condition.validate(&json!({})).unwrap_err(), "`thread` is required");
+        assert_eq!(condition.params_schema()["required"], json!(["thread"]));
     }
 
     #[test]

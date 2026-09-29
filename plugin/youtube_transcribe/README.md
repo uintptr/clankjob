@@ -25,6 +25,8 @@ It is a **command plugin** (`runtime = "command"`, design §9.9): `plugin.toml` 
 - No API key. YouTube blocks many cloud and VPN addresses; if transcripts fail with
   `RequestBlocked`, copy `config.example.toml` to `config.toml` and pass a proxy through
   `YT_PROXY_URL`.
+- Run `./check_config.py` to check it on this machine: `uv`, the script, and whether
+  YouTube serves video details and captions to this address.
 
 The server loads it from `plugins_dir` and reloads it when these files change. The
 Plugins page lists its tools and guides.

@@ -241,6 +241,22 @@ class ResolvedAndNotifyTests(unittest.TestCase):
         self.assertEqual(edit["allowed_mentions"], {"parse": []})
         self.assertIn("/channels/500", fake.paths("PATCH"))
 
+    def test_a_decided_approval_says_approved_or_rejected(self) -> None:
+        # Arrange
+        fake = FakeDiscord()
+        path = f"/channels/{CHANNEL}/messages/500"
+        fake.routes[("GET", path)] = {"id": "500", "content": "wants your approval"}
+        fake.routes[("PATCH", path)] = {"id": "500"}
+        delivery = {"kind": "approval", "channel_id": CHANNEL, "message_id": "500", "thread_id": None}
+
+        # Act
+        make_plugin(fake).handle("on_resolved", params(delivery=delivery, outcome={
+            "status": "answered", "decision": "reject", "via": "web"}))
+
+        # Assert
+        edits = [payload for method, called, payload in fake.calls if method == "PATCH" and called == path]
+        self.assertIn("Rejected via web", str(dig(edits[0], "content")))
+
     def test_notification_does_not_ping(self) -> None:
         fake = FakeDiscord()
 

@@ -10,8 +10,9 @@ use std::thread;
 
 use chrono::Utc;
 use clankjob_core::case::{Case, CaseState};
-use clankjob_core::event::{Event, EventBody, ToolResult};
+use clankjob_core::event::{Event, EventBody, ToolResult, WakeReason};
 use clankjob_core::file::{CaseFile, FileKind};
+use clankjob_core::human::Execution;
 use clankjob_core::ids::{ActivationId, CaseId, FileId, HumanRequestId, WaitConditionId};
 use clankjob_core::llm::{CompletionRequest, CompletionResponse, LlmError, LlmProvider, TokenUsage, ToolCall};
 use clankjob_core::tool::{Guide, ToolOutput};
@@ -21,10 +22,13 @@ use serde_json::{Value, json};
 
 use crate::context::{build_messages, pending_tool_calls};
 use crate::files::{FileStore, chunk, find, views};
-use crate::prompts::{CASE_HEADER, CaseView, FILES, GUIDES, INSTRUCTIONS, PromptContext, PromptSet, SYSTEM};
+use crate::plugin_tools::PluginTools;
+use crate::prompts::{
+    CASE_HEADER, CaseView, FILES, GUIDES, INSTRUCTIONS, PromptContext, PromptSet, SYSTEM, USER_PROMPT,
+};
 use crate::tools::{
     AskHumanArgs, CORE_TOOL_NAMES, CoreTool, DEFAULT_READ_CHARS, MAX_READ_CHARS, ReadFileArgs, add, core_tool_specs,
-    schedule,
+    describe_plugin_conditions, schedule,
 };
 use crate::transitions::{ClaimedCase, change_state, load_case};
 use crate::{Result, Shared, later};
@@ -78,9 +82,11 @@ fn register_waits(
     connection: &Connection,
     case: &Case,
     specs: &[WaitConditionSpec],
+    plugins: &PluginTools,
 ) -> Result<std::result::Result<Vec<Value>, String>> {
     let now = Utc::now();
-    let schedules: std::result::Result<Vec<_>, String> = specs.iter().map(|spec| schedule(spec, now)).collect();
+    let schedules: std::result::Result<Vec<_>, String> =
+        specs.iter().map(|spec| schedule(spec, now, plugins)).collect();
     let schedules = match schedules {
         Ok(schedules) => schedules,
         Err(message) => return Ok(Err(message)),
@@ -98,6 +104,10 @@ fn register_waits(
             created_at: now,
         };
         storage::waits::insert_wait(connection, &condition)?;
+        if let Some(every) = schedule.check_every {
+            let millis = i64::try_from(every.as_millis()).unwrap_or(i64::MAX);
+            storage::waits::set_check_interval(connection, &condition.id, millis)?;
+        }
         registered.push(json!({
             "id": condition.id,
             "kind": condition.kind,
@@ -109,13 +119,18 @@ fn register_waits(
 }
 
 /// Open a human request and wait for it and for any extra conditions.
-fn ask_human(connection: &Connection, case: &Case, args: &AskHumanArgs) -> Result<ToolExecution> {
+fn ask_human(
+    connection: &Connection,
+    case: &Case,
+    args: &AskHumanArgs,
+    plugins: &PluginTools,
+) -> Result<ToolExecution> {
     let now = Utc::now();
     let deadline_at = match args.timeout.map(|timeout| add(now, timeout)).transpose() {
         Ok(deadline_at) => deadline_at,
         Err(message) => return Ok(ToolExecution::error(message)),
     };
-    let also = match register_waits(connection, case, &args.also_wait_for)? {
+    let also = match register_waits(connection, case, &args.also_wait_for, plugins)? {
         Ok(also) => also,
         Err(message) => return Ok(ToolExecution::error(message)),
     };
@@ -139,11 +154,57 @@ fn ask_human(connection: &Connection, case: &Case, args: &AskHumanArgs) -> Resul
     ))
 }
 
+/// What happened to a call before its transaction: a plugin tool ran, needs approval, or
+/// the call is for a core tool.
+enum PluginCall {
+    Core,
+    Ran(std::result::Result<ToolOutput, String>),
+    NeedsApproval(String),
+}
+
+/// Open an approval for a plugin tool call and suspend the case until it is decided
+/// (design §9.7). Nothing runs yet.
+fn request_approval(connection: &Connection, case: &Case, call: &ToolCall, summary: &str) -> Result<ToolExecution> {
+    let now = Utc::now();
+    let request_id = HumanRequestId::generate();
+    storage::human::insert_approval(
+        connection,
+        &request_id,
+        &case.id,
+        summary,
+        &call.name,
+        &call.arguments,
+        now,
+    )?;
+    crate::channels::queue_approval(connection, case, &request_id, summary, &call.arguments, now)?;
+    let human_input = WaitCondition {
+        id: WaitConditionId::generate(),
+        case_id: case.id.clone(),
+        kind: HUMAN_INPUT_KIND.to_owned(),
+        params: json!({ "request_id": request_id }),
+        next_check_at: None,
+        deadline_at: None,
+        status: WaitStatus::Active,
+        created_at: now,
+    };
+    storage::waits::insert_wait(connection, &human_input)?;
+    Ok(ToolExecution::ending(
+        json!({
+            "status": "waiting_for_approval",
+            "request_id": request_id,
+            "summary": summary,
+            "note": "Nothing was done yet. The owner must approve this call; when the case wakes you will be told whether it ran, and its result.",
+        }),
+        CaseState::WaitingForHuman,
+    ))
+}
+
 /// What the file and guide tools need to know.
 struct FileEnv<'a> {
     files: &'a [CaseFile],
     vision: bool,
     guides: &'a [Guide],
+    plugins: &'a PluginTools,
 }
 
 /// `read_guide`: a plugin's instructions for a kind of task.
@@ -274,14 +335,14 @@ fn execute(connection: &Connection, case: &Case, call: &ToolCall, env: &FileEnv<
         CoreTool::Sleep(args) if args.conditions.is_empty() => {
             ToolExecution::error("`sleep` needs at least one condition".to_owned())
         }
-        CoreTool::Sleep(args) => match register_waits(connection, case, &args.conditions)? {
+        CoreTool::Sleep(args) => match register_waits(connection, case, &args.conditions, env.plugins)? {
             Ok(conditions) => ToolExecution::ending(
                 json!({ "status": "sleeping", "conditions": conditions }),
                 CaseState::Sleeping,
             ),
             Err(message) => ToolExecution::error(message),
         },
-        CoreTool::AskHuman(args) => ask_human(connection, case, &args)?,
+        CoreTool::AskHuman(args) => ask_human(connection, case, &args, env.plugins)?,
         CoreTool::Complete(args) => {
             storage::cases::update_outcome(connection, &case.id, &args.summary, args.result.as_ref(), now)?;
             ToolExecution::ending(json!({ "status": "completed" }), CaseState::Completed)
@@ -320,7 +381,9 @@ fn build_request(
     let files = storage::files::list_files(connection, &case.id)?;
     let file_views = views(&files, vision);
     let guides = plugins.guides();
+    let user_prompt = shared.settings.user_prompt_path.as_deref().and_then(crate::user_prompt::read);
     let mut tools = core_tool_specs(!files.is_empty(), vision, !guides.is_empty());
+    describe_plugin_conditions(&mut tools, plugins);
     tools.extend(plugins.specs());
     let context = PromptContext {
         now: Utc::now().to_rfc3339(),
@@ -337,9 +400,13 @@ fn build_request(
         instructions: &instructions,
         files: &file_views,
         guides: &guides,
+        user_prompt: user_prompt.as_deref(),
         wake: None,
     };
     let mut sections = vec![prompts.render(SYSTEM, &context)?];
+    if user_prompt.is_some() {
+        sections.push(prompts.render(USER_PROMPT, &context)?);
+    }
     // A profile removed from disk after the case was created is skipped, not fatal.
     match case.profile.as_deref() {
         Some(profile) if prompts.has_profile(profile) => sections.push(prompts.render_profile(profile, &context)?),
@@ -422,7 +489,7 @@ impl Activation<'_> {
         for (index, call) in calls.iter().enumerate() {
             // A plugin tool may take a while (a download, a command), so it runs before the
             // write transaction, which would otherwise block every other writer.
-            let plugin_output = self.run_plugin_tool(call);
+            let plugin_call = self.run_plugin_tool(call);
             let now = Utc::now();
             let transaction = begin_write(self.connection)?;
             let case = load_case(&transaction, &self.case_id)?;
@@ -437,15 +504,18 @@ impl Activation<'_> {
                 .get(&case.llm)
                 .is_some_and(|provider| provider.supports_images());
             let guides = self.shared.plugin_tools.guides();
-            let (execution, written) = if let Some(output) = plugin_output {
-                plugin_result(&transaction, &case, &self.shared.files, &files, output)?
-            } else {
-                let env = FileEnv {
-                    files: &files,
-                    vision,
-                    guides: &guides,
-                };
-                (execute(&transaction, &case, call, &env)?, None)
+            let (execution, written) = match plugin_call {
+                PluginCall::Ran(output) => plugin_result(&transaction, &case, &self.shared.files, &files, output)?,
+                PluginCall::NeedsApproval(summary) => (request_approval(&transaction, &case, call, &summary)?, None),
+                PluginCall::Core => {
+                    let env = FileEnv {
+                        files: &files,
+                        vision,
+                        guides: &guides,
+                        plugins: &self.shared.plugin_tools,
+                    };
+                    (execute(&transaction, &case, call, &env)?, None)
+                }
             };
             let result = ToolResult {
                 tool_call_id: call.id.clone(),
@@ -481,24 +551,90 @@ impl Activation<'_> {
         Ok(Flow::Continue)
     }
 
-    /// Run a call if it names a plugin tool; `None` for core (or unknown) tools.
-    fn run_plugin_tool(&self, call: &ToolCall) -> Option<std::result::Result<ToolOutput, String>> {
+    /// Run a call if it names a plugin tool that needs no approval.
+    fn run_plugin_tool(&self, call: &ToolCall) -> PluginCall {
         if CORE_TOOL_NAMES.contains(&call.name.as_str()) {
-            return None;
+            return PluginCall::Core;
         }
-        let tool = self.shared.plugin_tools.get(&call.name)?;
+        let Some(tool) = self.shared.plugin_tools.get(&call.name) else {
+            return PluginCall::Core;
+        };
+        if let Some(summary) = tool.approval_summary(&call.arguments) {
+            return match tool.validate(&call.arguments) {
+                Ok(()) => PluginCall::NeedsApproval(summary),
+                Err(error) => PluginCall::Ran(Err(error)),
+            };
+        }
+        PluginCall::Ran(self.run_timed(tool.as_ref(), &call.name, &call.arguments))
+    }
+
+    /// Run a plugin tool and log how long it took.
+    fn run_timed(
+        &self,
+        tool: &dyn clankjob_core::tool::PluginTool,
+        name: &str,
+        arguments: &Value,
+    ) -> std::result::Result<ToolOutput, String> {
         let started = std::time::Instant::now();
-        let output = tool.run(&call.arguments);
+        let output = tool.run(arguments);
         let elapsed_ms = started.elapsed().as_millis();
         match &output {
             Ok(_) => {
-                tracing::info!(case_id = %self.case_id, tool = %call.name, plugin = tool.plugin(), elapsed_ms, "plugin tool ran");
+                tracing::info!(case_id = %self.case_id, tool = name, plugin = tool.plugin(), elapsed_ms, "plugin tool ran");
             }
             Err(error) => {
-                tracing::warn!(case_id = %self.case_id, tool = %call.name, plugin = tool.plugin(), elapsed_ms, %error, "plugin tool failed");
+                tracing::warn!(case_id = %self.case_id, tool = name, plugin = tool.plugin(), elapsed_ms, %error, "plugin tool failed");
             }
         }
-        Some(output)
+        output
+    }
+
+    /// Run the case's approved tool calls that have not run yet, recording each result as a
+    /// wake event before the LLM's next turn.
+    ///
+    /// Each call is marked `running` in its own transaction before it runs, so it runs at
+    /// most once: a call still `running` here was interrupted, and is reported as having an
+    /// unknown outcome instead of being run again (an email could otherwise go out twice).
+    fn run_approved(&mut self, case: &Case) -> Result<()> {
+        for request in storage::human::unfinished_executions(self.connection, &case.id)? {
+            let tool = request.tool.clone().unwrap_or_default();
+            let output = if request.execution == Some(Execution::Running) {
+                Err("the server stopped while this call was running, so its outcome is unknown; check (e.g. the Sent folder) before trying again".to_owned())
+            } else {
+                if !storage::human::set_execution(self.connection, &request.id, Execution::Pending, Execution::Running)?
+                {
+                    continue;
+                }
+                match self.shared.plugin_tools.get(&tool) {
+                    Some(plugin_tool) => {
+                        let arguments = request.args.clone().unwrap_or(Value::Null);
+                        self.run_timed(plugin_tool.as_ref(), &tool, &arguments)
+                    }
+                    None => Err(format!(
+                        "the tool `{tool}` is no longer available (its plugin was removed or failed to load)"
+                    )),
+                }
+            };
+            let now = Utc::now();
+            let transaction = begin_write(self.connection)?;
+            let files = storage::files::list_files(&transaction, &case.id)?;
+            let (execution, written) = plugin_result(&transaction, case, &self.shared.files, &files, output)?;
+            let reason = WakeReason::ApprovedCallFinished {
+                request_id: request.id.clone(),
+                tool,
+                result: execution.content,
+                is_error: execution.is_error,
+            };
+            storage::events::append_event(&transaction, &case.id, Some(&self.id), &EventBody::Wake(reason), now)?;
+            storage::human::set_execution(&transaction, &request.id, Execution::Running, Execution::Done)?;
+            if let Err(error) = commit(transaction) {
+                if let Some(file_id) = written {
+                    self.shared.files.remove(&file_id);
+                }
+                return Err(error.into());
+            }
+        }
+        Ok(())
     }
 
     /// Call the LLM, retrying retryable errors with exponential backoff.
@@ -559,7 +695,7 @@ impl Activation<'_> {
             timeout: None,
             also_wait_for: Vec::new(),
         };
-        let execution = ask_human(&transaction, case, &args)?;
+        let execution = ask_human(&transaction, case, &args, &self.shared.plugin_tools)?;
         change_state(
             &transaction,
             case,
@@ -580,6 +716,7 @@ impl Activation<'_> {
             // restart (startup clears leases).
             return Ok(Flow::Stop);
         }
+        self.run_approved(&case)?;
         let events = storage::events::list_events(self.connection, &case.id, 0, None)?;
         let pending = pending_tool_calls(&events);
         if !pending.is_empty() {
@@ -644,7 +781,12 @@ impl Activation<'_> {
 pub(crate) fn run(shared: &Shared, connection: &mut Connection, claimed: ClaimedCase) -> Result<()> {
     let prompts = shared.prompts();
     let id = ActivationId::generate();
-    storage::activations::start_activation(connection, &id, &claimed.case.id, &prompts.hashes(), Utc::now())?;
+    let mut hashes = prompts.hashes();
+    // The owner's prompt shapes behaviour like a template does, so its version is recorded too.
+    if let Some(text) = shared.settings.user_prompt_path.as_deref().and_then(crate::user_prompt::read) {
+        hashes.insert(USER_PROMPT.to_owned(), crate::prompts::sha256_hex(text.as_bytes()));
+    }
+    storage::activations::start_activation(connection, &id, &claimed.case.id, &hashes, Utc::now())?;
     tracing::info!(case_id = %claimed.case.id, activation_id = %id, "activation started");
     let mut activation = Activation {
         shared,
@@ -806,6 +948,7 @@ mod tests {
         let refused = engine.plugin_tools().replace(
             vec![Arc::new(FakeTranscript { spec }), Arc::new(FakeTranscript { spec: clash })],
             vec![guide],
+            Vec::new(),
         );
         let case = create(&engine, &mut connection, Budgets::default());
 
@@ -835,6 +978,217 @@ mod tests {
         assert!(first.system.contains("`earnings-call` (youtube): Analysing an earnings call."));
         let offered: Vec<&str> = first.tools.iter().map(|tool| tool.name.as_str()).collect();
         assert!(offered.contains(&"read_guide") && offered.contains(&"youtube_transcript"));
+    }
+
+    /// A tool that needs approval and records what it was run with.
+    struct FakeSend {
+        spec: clankjob_core::llm::ToolSpec,
+        sent: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl clankjob_core::tool::PluginTool for FakeSend {
+        fn plugin(&self) -> &'static str {
+            "email"
+        }
+
+        fn spec(&self) -> &clankjob_core::llm::ToolSpec {
+            &self.spec
+        }
+
+        fn approval_summary(&self, arguments: &Value) -> Option<String> {
+            Some(format!("Send an email to {}", arguments["to"].as_str().unwrap_or("?")))
+        }
+
+        fn validate(&self, arguments: &Value) -> std::result::Result<(), String> {
+            arguments.get("to").map(drop).ok_or_else(|| "`to` is required".to_owned())
+        }
+
+        fn run(&self, arguments: &Value) -> std::result::Result<ToolOutput, String> {
+            self.sent.lock().unwrap().push(arguments.clone());
+            Ok(ToolOutput::Json(json!({ "message_id": "<1@x>" })))
+        }
+    }
+
+    fn with_send_tool(engine: &Engine) -> Arc<FakeSend> {
+        let tool = Arc::new(FakeSend {
+            spec: clankjob_core::llm::ToolSpec {
+                name: "send_email".to_owned(),
+                description: "Send an email.".to_owned(),
+                parameters: json!({"type": "object"}),
+            },
+            sent: std::sync::Mutex::default(),
+        });
+        engine.plugin_tools().replace(
+            vec![Arc::clone(&tool) as Arc<dyn clankjob_core::tool::PluginTool>],
+            Vec::new(),
+            Vec::new(),
+        );
+        tool
+    }
+
+    fn open_approval(connection: &Connection, case: &Case) -> clankjob_core::human::HumanRequest {
+        storage::human::list_requests(connection, Some(HumanRequestStatus::Open), Some(&case.id))
+            .unwrap()
+            .remove(0)
+    }
+
+    fn verdict(decision: clankjob_core::human::Decision, args: Option<&Value>) -> storage::human::Verdict<'_> {
+        storage::human::Verdict {
+            decision,
+            args,
+            comment: Some("ok"),
+            via: "web",
+            responder: None,
+        }
+    }
+
+    #[test]
+    fn a_tool_needing_approval_runs_once_approved_with_the_owners_edits() {
+        // Arrange
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let provider = ScriptedProvider::new([
+            Ok(reply(&[
+                ("send_email", json!({})),
+                ("send_email", json!({"to": "bob@x.ca", "body": "Hi"})),
+            ])),
+            Ok(reply(&[("complete", json!({"summary": "Sent."}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let tool = with_send_tool(&engine);
+        let case = create(&engine, &mut connection, Budgets::default());
+
+        // Act: the first call is invalid, the second waits for approval
+        let waiting = activate(&engine, &mut connection);
+        let approval = open_approval(&connection, &case);
+        let nothing_sent_yet = tool.sent.lock().unwrap().len();
+        let edited = json!({"to": "bob@x.ca", "body": "Hello Bob"});
+        engine
+            .decide_approval(
+                &mut connection,
+                &approval.id,
+                verdict(clankjob_core::human::Decision::Approve, Some(&edited)),
+            )
+            .unwrap();
+        let done = activate(&engine, &mut connection);
+
+        // Assert
+        assert_eq!(waiting.state, CaseState::WaitingForHuman);
+        assert_eq!(
+            (approval.question.as_str(), approval.tool.as_deref()),
+            ("Send an email to bob@x.ca", Some("send_email"))
+        );
+        assert_eq!(nothing_sent_yet, 0);
+        assert_eq!(*tool.sent.lock().unwrap(), std::slice::from_ref(&edited));
+        assert_eq!(done.state, CaseState::Completed);
+        let bodies = events(&connection, &case);
+        assert!(
+            matches!(&bodies[3], EventBody::ToolResult(result) if result.is_error),
+            "invalid args fail before approval"
+        );
+        assert!(bodies.iter().any(|body| matches!(body,
+            EventBody::Wake(WakeReason::ApprovedCallFinished { result, is_error: false, .. }) if result["message_id"] == "<1@x>")));
+        let second_turn = &provider.requests.lock().unwrap()[1];
+        let said = format!("{:?}", second_turn.messages);
+        assert!(said.contains("approved your `send_email` call with changes") && said.contains("Hello Bob"));
+        let request = storage::human::get_request(&connection, &approval.id).unwrap().unwrap();
+        assert_eq!(request.execution, Some(Execution::Done));
+    }
+
+    #[test]
+    fn a_rejected_call_never_runs_and_an_interrupted_one_is_not_repeated() {
+        // Arrange
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let provider = ScriptedProvider::new([
+            Ok(reply(&[("send_email", json!({"to": "bob@x.ca"}))])),
+            Ok(reply(&[("send_email", json!({"to": "bob@x.ca"}))])),
+            Ok(reply(&[("complete", json!({"summary": "Stopped."}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let tool = with_send_tool(&engine);
+        let case = create(&engine, &mut connection, Budgets::default());
+
+        // Act: reject the first request
+        activate(&engine, &mut connection);
+        let first = open_approval(&connection, &case);
+        engine
+            .decide_approval(
+                &mut connection,
+                &first.id,
+                verdict(clankjob_core::human::Decision::Reject, None),
+            )
+            .unwrap();
+        activate(&engine, &mut connection);
+        // Approve the second, but pretend the server died while it was running
+        let second = open_approval(&connection, &case);
+        engine
+            .decide_approval(
+                &mut connection,
+                &second.id,
+                verdict(clankjob_core::human::Decision::Approve, None),
+            )
+            .unwrap();
+        storage::human::set_execution(&connection, &second.id, Execution::Pending, Execution::Running).unwrap();
+        activate(&engine, &mut connection);
+
+        // Assert
+        assert!(tool.sent.lock().unwrap().is_empty(), "neither call may run");
+        assert!(events(&connection, &case).iter().any(|body| matches!(body,
+            EventBody::Wake(WakeReason::ApprovedCallFinished { result, is_error: true, .. })
+                if result["error"].as_str().unwrap().contains("outcome is unknown"))));
+    }
+
+    #[test]
+    fn the_owners_prompt_is_in_every_system_prompt_and_its_version_recorded() {
+        // Arrange
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let provider = ScriptedProvider::new([Ok(reply(&[("complete", json!({"summary": "Done."}))]))]);
+        let path = test_db.files_dir.with_file_name("user_prompt.md");
+        let providers =
+            std::collections::HashMap::from([("default".to_owned(), Arc::clone(&provider) as Arc<dyn LlmProvider>)]);
+        let settings = crate::EngineSettings {
+            workers: 1,
+            user_prompt_path: Some(path.clone()),
+            ..crate::EngineSettings::default()
+        };
+        let engine = Engine::new(
+            test_db.db.clone(),
+            providers,
+            None,
+            test_db.files_dir.clone(),
+            crate::channels::Channels::default(),
+            settings,
+        );
+        engine.set_user_prompt("Sign emails as Brad.").unwrap();
+        let case = create(&engine, &mut connection, Budgets::default());
+
+        // Act
+        activate(&engine, &mut connection);
+
+        // Assert
+        let system = provider.requests.lock().unwrap()[0].system.clone();
+        let rules_end = system.find("## The owner's standing instructions").unwrap();
+        assert!(system[rules_end..].contains("Sign emails as Brad."));
+        assert!(
+            system.find("Get a quote from Bob").unwrap() > rules_end,
+            "it comes before the case itself"
+        );
+        let recorded: String = connection
+            .query_row(
+                "SELECT prompt_hashes FROM activations WHERE case_id = ?1",
+                [case.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(recorded.contains("\"user_prompt\""));
+        let (saved, _) = engine.user_prompt().unwrap().unwrap();
+        assert_eq!(saved, "Sign emails as Brad.");
+        assert!(matches!(
+            engine.set_user_prompt(&"x".repeat(crate::user_prompt::MAX_USER_PROMPT_CHARS + 1)),
+            Err(crate::EngineError::InvalidUserPrompt(_))
+        ));
     }
 
     #[test]

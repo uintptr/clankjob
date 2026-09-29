@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use clankjob_core::llm::ToolSpec;
-use clankjob_core::tool::{Guide, PluginTool};
+use clankjob_core::tool::{Guide, PluginCondition, PluginTool};
 
 use crate::tools::CORE_TOOL_NAMES;
 
@@ -15,6 +15,7 @@ use crate::tools::CORE_TOOL_NAMES;
 struct ToolSet {
     tools: BTreeMap<String, Arc<dyn PluginTool>>,
     guides: Vec<Guide>,
+    conditions: BTreeMap<String, Arc<dyn PluginCondition>>,
 }
 
 /// The plugin tools and guides in use.
@@ -32,7 +33,12 @@ impl PluginTools {
     /// # Returns
     ///
     /// Why each left-out tool or guide was refused
-    pub fn replace(&self, tools: Vec<Arc<dyn PluginTool>>, guides: Vec<Guide>) -> Vec<String> {
+    pub fn replace(
+        &self,
+        tools: Vec<Arc<dyn PluginTool>>,
+        guides: Vec<Guide>,
+        conditions: Vec<Arc<dyn PluginCondition>>,
+    ) -> Vec<String> {
         let mut refused = Vec::new();
         let mut set = ToolSet::default();
         for tool in tools {
@@ -55,6 +61,17 @@ impl PluginTools {
                 continue;
             }
             set.guides.push(guide);
+        }
+        for condition in conditions {
+            let name = condition.name().to_owned();
+            if name.starts_with("core.") || set.conditions.contains_key(&name) {
+                refused.push(format!(
+                    "condition `{name}` of plugin `{}`: the name is already taken",
+                    condition.plugin()
+                ));
+                continue;
+            }
+            set.conditions.insert(name, condition);
         }
         for reason in &refused {
             tracing::warn!("{reason}");
@@ -83,6 +100,29 @@ impl PluginTools {
             .tools
             .values()
             .map(|tool| tool.spec().clone())
+            .collect()
+    }
+
+    /// The wait condition with this kind name, if a plugin offers it.
+    #[must_use]
+    pub fn condition(&self, name: &str) -> Option<Arc<dyn PluginCondition>> {
+        self.set
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .conditions
+            .get(name)
+            .map(Arc::clone)
+    }
+
+    /// Every plugin wait condition, by name.
+    #[must_use]
+    pub fn conditions(&self) -> Vec<Arc<dyn PluginCondition>> {
+        self.set
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .conditions
+            .values()
+            .map(Arc::clone)
             .collect()
     }
 

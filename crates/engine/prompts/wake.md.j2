@@ -20,6 +20,17 @@ The owner woke you up. Review the situation and decide what to do next.
 {% elif wake.reason == "instructions_changed" %}
 The owner {{ wake.change }} the instruction `{{ wake.name }}`. Your instructions show the
 current version: check whether it changes what you should do.
+{% elif wake.reason == "approval_decided" and wake.decision == "approve" %}
+The owner approved your `{{ wake.tool }}` call{{ " with changes" if wake.edited_args else "" }}.{{ (" Their comment: " ~ wake.comment) if wake.comment else "" }} It runs now; its result follows.
+{% if wake.edited_args %}
+It runs with these arguments instead of yours:
+{{ wake.edited_args | tojson }}
+{% endif %}
+{% elif wake.reason == "approval_decided" %}
+The owner rejected your `{{ wake.tool }}` call; it was not run.{{ (" Their comment: " ~ wake.comment) if wake.comment else "" }} Adjust and ask again, or change course.
+{% elif wake.reason == "approved_call_finished" %}
+The approved `{{ wake.tool }}` call {{ "failed" if wake.is_error else "ran" }}. Result:
+{{ wake.result | tojson }}
 {% elif wake.reason == "file_added" %}
 The owner added a file to the case: `{{ wake.name }}` ({{ wake.kind }}). It is listed under "Files" in
 your instructions.

@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::case::CaseState;
 use crate::file::FileKind;
+use crate::human::Decision;
 use crate::ids::{ActivationId, CaseId, FileId, HumanRequestId, InstructionId, WaitConditionId};
 use crate::llm::AssistantMessage;
 
@@ -70,6 +71,32 @@ pub enum WakeReason {
         name: String,
         /// Its kind.
         kind: FileKind,
+    },
+    /// The owner approved or rejected a tool call (design §9.7).
+    ApprovalDecided {
+        /// The approval.
+        request_id: HumanRequestId,
+        /// The tool.
+        tool: String,
+        /// Approve or reject.
+        decision: Decision,
+        /// The owner's comment, if any.
+        comment: Option<String>,
+        /// The arguments it runs with; set when the owner edited them.
+        edited_args: Option<Value>,
+        /// Channel the decision came from.
+        via: Option<String>,
+    },
+    /// An approved tool call ran; recorded by the worker right after running it.
+    ApprovedCallFinished {
+        /// The approval.
+        request_id: HumanRequestId,
+        /// The tool.
+        tool: String,
+        /// What it returned, or the error.
+        result: Value,
+        /// Whether `result` describes an error.
+        is_error: bool,
     },
 }
 

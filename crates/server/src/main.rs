@@ -114,6 +114,8 @@ fn run() -> anyhow::Result<()> {
 
     let settings = EngineSettings {
         workers: config.workers,
+        // The owner's own prompt, editable in the web UI (design §7.6).
+        user_prompt_path: Some(config.data_dir.join("user_prompt.md")),
         ..EngineSettings::default()
     };
     // Rejected prompt files are logged by the engine as they are loaded.
@@ -167,6 +169,9 @@ fn run() -> anyhow::Result<()> {
     // A send error only means the server thread already exited.
     let _ = stop_server.send(());
     engine.shutdown();
+    // Nothing may start a plugin process from here on, e.g. the channel thread noticing a
+    // plugin exited; they are stopped once the engine's threads are done.
+    plugins.retire();
     let (done, finished) = mpsc::channel();
     thread::spawn(move || {
         let _ = server_thread.join();

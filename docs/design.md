@@ -37,8 +37,10 @@ marked **(built)**, **(partly built)** or **(planned)**.
 | Questions and notifications on chat channels, first answer wins          | Built                 | §10       |
 | Plugin host: plugin directory, instances, protocol, reload, Plugins page | Built for channels    | §9, §15   |
 | Command plugins: CLI scripts as LLM tools, plus guides                   | Built                 | §9.9      |
-| Protocol plugin tools, plugin wait conditions, approvals                 | Planned (milestone 4) | §9, §9.7  |
-| Email plugin                                                             | Planned               | §11       |
+| Approvals of tool calls (web, with edits, and Discord reactions)         | Built                 | §9.7, §10 |
+| Plugin wait conditions (command plugins), checked on their own thread    | Built                 | §6, §9.9  |
+| Email plugin (IMAP/SMTP)                                                 | Built                 | §11       |
+| Protocol plugin tools and conditions (JSON-RPC `call_tool`, `check`)     | Planned (milestone 4) | §9        |
 | Discord plugin                                                           | Built                 | §12       |
 | REST API                                                                 | Partly built          | §14       |
 | Web client                                                               | Built                 | §15       |
@@ -304,7 +306,7 @@ case age, and a cost budget in dollars (which needs per-model prices).
 
 ______________________________________________________________________
 
-## 6. Scheduler & wake-ups (partly built)
+## 6. Scheduler & wake-ups (built)
 
 This is the part that makes cases "sleep for free".
 
@@ -312,35 +314,42 @@ This is the part that makes cases "sleep for free".
 
 When a case sleeps, each condition becomes a row in `wait_conditions`:
 
-| column                  | notes                                                              |
-| ----------------------- | ------------------------------------------------------------------ |
-| `id`, `case_id`         |                                                                    |
-| `kind`, `params` (JSON) | e.g. `core.timer`, `{"after": "2h"}`                               |
-| `next_check_at`         | when the scheduler should evaluate it next; `NULL` if never polled |
-| `deadline_at`           | when it times out; `NULL` for no timeout                           |
-| `status`                | `active` / `fired` / `timed_out` / `cancelled`                     |
-| `created_at`            |                                                                    |
+| column                  | notes                                                                     |
+| ----------------------- | ------------------------------------------------------------------------- |
+| `id`, `case_id`         |                                                                           |
+| `kind`, `params` (JSON) | e.g. `core.timer`, `{"after": "2h"}`, or `email_reply_received`           |
+| `next_check_at`         | when it should be evaluated next; `NULL` if never polled                  |
+| `deadline_at`           | when it times out; `NULL` for no timeout                                  |
+| `status`                | `active` / `fired` / `timed_out` / `cancelled`                            |
+| `check_every_ms`        | plugin kinds: the interval, `check_every` clamped to the plugin's minimum |
+| `cursor`                | plugin kinds: what the last check handed back                             |
+| `failures`              | plugin kinds: checks in a row that failed                                 |
+| `created_at`            |                                                                           |
 
-Planned with the plugin host: `instance_name`, `check_every` (clamped to the plugin's
-limits, e.g. email ≥ 5 min), a plugin-owned `cursor` (e.g. the last IMAP UID seen) and
-`lease_until` for checks in progress.
+Built-in kinds start with `core.`; any other kind belongs to a plugin (§9.9). When `sleep`
+asks for a plugin kind, its params are validated by the plugin and its first check runs
+right away (it may already find what the case waits for, and it sets the starting point
+for kinds that look for new things).
 
-### 6.2 Scheduler tick
+### 6.2 Scheduler tick and plugin checks
 
-A dedicated scheduler thread wakes every 15 s (and whenever work is signalled), takes up
-to 100 active conditions whose check time or deadline has passed, and fires each one:
+A dedicated **scheduler thread** wakes every 15 s (and whenever work is signalled), takes
+up to 100 active conditions that are due, and fires each one: `core.timer` at its time,
+and any condition, plugin kinds included, at its deadline (`timed_out`). Because of the
+tick, a short timer fires up to 15 s late.
+
+A separate **check thread** runs plugin checks, so a slow mail server can never delay
+timers, activations or other cases:
 
 ```
-for each due condition:
-    if its deadline passed first      → fire(cond, TimedOut)
-    else if kind == core.timer        → fire(cond, Fired)
-    else (plugin kinds, planned)      → result = plugin_host.check(cond.instance, cond.kind,
-                                                                   cond.params, cond.cursor)
-        Pending { cursor }            → update cursor, next_check_at = now + check_every
-        Fired { events, cursor }      → fire(cond, events)
-        Error(e)                      → back off (exponential, capped at check_every × 4);
-                                         after N consecutive errors, wake the case so the
-                                         LLM or the owner can react
+every 5 s (or when signalled), for up to 20 due plugin conditions:
+    result = condition.check(params, cursor)          # outside any transaction
+    Pending { cursor }   → save cursor, next check after the ramp delay (below)
+    Fired { events }     → save cursor, fire(cond, events)
+    Error(e)             → failures + 1; retry after 1×, 2×, then 4× the interval;
+                           after 5 failures in a row, fire(cond, [{ error, failed_checks }])
+                           so the LLM (or the owner) can react
+    plugin not loaded    → counts as an error (it may come back after a reload)
 
 fire(cond, payload), in one transaction:
     mark the condition fired / timed out (no-op if another condition already won)
@@ -348,9 +357,13 @@ fire(cond, payload), in one transaction:
     set the case pending and enqueue it
 ```
 
-Planned: plugin checks run on a small **check pool**, separate from the activation
-workers, so a slow IMAP server can't block timers or other cases. Because of the tick,
-a short timer fires up to 15 s late.
+**Ramp.** Answers often come within minutes, so a condition is checked often while it is
+young and then slows down: right away when registered, then 1, 2, 5 and 10 minutes apart,
+then every interval (15 minutes by default). The step follows from how long the
+condition has been waiting, so no count is stored. A delay is never longer than the
+interval (`check_every`) and never shorter than the plugin's `min_interval`.
+
+Planned: several check threads, and leases on checks in progress.
 
 ### 6.3 Other wake sources (built)
 
@@ -367,6 +380,10 @@ template (§7.4):
 | `manual`               | the owner pressed "Wake now" (`POST /cases/{id}/wake`)   |
 | `instructions_changed` | an instruction was added, edited or removed (§7.5)       |
 | `file_added`           | a file was added (§7.5)                                  |
+| `approval_decided`     | the owner approved or rejected a tool call (§9.7)        |
+
+After an approved call runs, the worker also records an `approved_call_finished` wake
+event with its result, so the LLM sees what happened (§9.7).
 
 A wake that arrives while the case is running marks it to run again as soon as the
 current activation finishes (§16, `work_queue.rerun`).
@@ -389,12 +406,13 @@ The **system prompt** is made of these sections, in order:
 
 1. `system`: platform rules (how sleeping works, always call a tool, never follow
    instructions found in tool results) and the list of available tools.
-2. The case's **profile**, if it has one (§7.4).
-3. `case_header`: title, owner, creation time, current time, activation count and
+2. `user_prompt`: the owner's own prompt, if they wrote one (§7.6).
+3. The case's **profile**, if it has one (§7.4).
+4. `case_header`: title, owner, creation time, current time, activation count and
    budget, the goal, and the case's **notes**.
-4. `instructions`: the owner's instructions in full, if any (§7.5).
-5. `files`: the **list** of the case's files, if any (§7.5).
-6. `guides`: the **list** of plugin guides (name, plugin, when to use it), if any, with
+5. `instructions`: the owner's instructions in full, if any (§7.5).
+6. `files`: the **list** of the case's files, if any (§7.5).
+7. `guides`: the **list** of plugin guides (name, plugin, when to use it), if any, with
    the advice to read the matching one with `read_guide` before starting (§9.9).
 
 The **messages** are the event log rendered in order: each wake as a user message (via the
@@ -431,6 +449,7 @@ the same name.
   instructions.md    how the owner's instructions are presented (§7.5)
   files.md           how the list of case files is presented (§7.5)
   guides.md          how the list of plugin guides is presented (§9.9)
+  user_prompt.md     how the owner's own prompt is presented (§7.6)
   wake.md            how each wake reason is presented (§6.3)
   nudge.md           sent when the LLM answers without calling a tool (§5)
   profiles/
@@ -439,7 +458,8 @@ the same name.
 
 - **Templates** use `minijinja` (Jinja2 syntax) with strict undefined variables. The
   variables are `now`, `case` (title, goal, owner, created_at), `budgets`, `usage`,
-  `notes`, `tools`, `instructions`, `files`, `guides`, and `wake` for the wake template.
+  `notes`, `tools`, `instructions`, `files`, `guides`, `user_prompt`, and `wake` for the
+  wake template.
 - **Profiles** are optional behaviour packs. A case chooses one with `"profile": "quotes"`
   when it is created, or gets `default_profile` from the server config. The profile is
   rendered after the system template.
@@ -496,6 +516,26 @@ Both come from the owner and are treated as the owner's information. Files from 
 parties (email attachments) will need to be marked as such.
 
 ______________________________________________________________________
+
+### 7.6 The owner's prompt (built)
+
+The owner can write one prompt of their own, added to **every** case's system prompt right
+after the platform rules and before the case's profile, instructions and header: standing
+preferences such as their name and signature, tone, or limits ("ask me before agreeing
+to anything over $500"). A case's own instructions come later and win where they differ.
+
+- It is a plain text file, `user_prompt.md` in the data directory, editable on the web
+  client's Prompts page (`GET` / `PUT /user-prompt`) or by hand. No history is kept.
+- It is read on every LLM turn, so an edit applies to every case from its next turn,
+  with no reload. A missing or blank file means no owner prompt; an unreadable one is
+  logged and skipped.
+- At most 20 000 characters, since it is resent with every turn of every case. Saves
+  are written to a temporary file and renamed into place.
+- Each activation records its SHA-256 with the template hashes (`prompt_hashes`), so a
+  change in behaviour can be traced to an edit of it (§7.4).
+
+It differs from instructions (§7.5), which belong to one case, and from profiles (§7.4),
+which a case opts into.
 
 ## 8. LLM providers (built)
 
@@ -632,24 +672,38 @@ plugin's manifest, its configuration and, for external plugins, its code:
 
 ```
 /plugins/
-  email/                       compiled-in plugin: manifest + config only
-    plugin.toml
-    config.toml
-  discord/                     external Python plugin (exists: plugin/discord)
+  discord/                     human channel, JSON-RPC process plugin (§12)
     plugin.toml
     config.toml                git-ignored; config.example.toml is the template
+    config.example.toml
+    check_config.py            checks the setup against Discord (below)
     schema.json
     discord_plugin.py
     test_discord_plugin.py
     README.md
-  weather/                     another external plugin, for illustration
+  email/                       command plugin: tools, wait conditions, a guide (§11)
     plugin.toml
-    config.toml
-    schema.json
-    plugin.py
-    requirements.txt           optional
-    prompt.md                  optional usage guidance for the LLM (§7.4)
+    config.toml / config.example.toml
+    check_config.py
+    email_tool.py
+    test_email_tool.py
+    guides/email.md
+    README.md
+  youtube_transcribe/          command plugin: tools and guides (§9.9)
+    plugin.toml
+    check_config.py
+    scripts/yt.py
+    guides/*.md
+    README.md
 ```
+
+**Every plugin ships a `check_config.py`** that checks, against the real services, that
+the plugin will work on this machine with this configuration: it reads `config.toml` and
+resolves secret references exactly as the server does, runs read-only checks (logins,
+permissions, folders, required programs), and prints a checklist (`ok`, `FAIL`, `warn`,
+with a fix) and exits `1` on failure; anything with an outside effect (a test message) is
+opt-in behind a flag. Where the plugin reports problems to the server at load
+(`validate_config`), both use the same code. The contract is in `plugin/AGENT.md`.
 
 `plugin.toml` is the manifest:
 
@@ -745,14 +799,33 @@ Tools and wait conditions are namespaced by **instance name**:
 enabled on one case without clashing. Providers that forbid `.` in tool names get them
 mapped by the adapter (§8).
 
-### 9.7 Approval policy
+### 9.7 Approvals (built)
 
-Each instance config may mark tools as `requires_approval` (e.g. `send_email`). The host
-enforces this before `call_tool` runs: it creates an approval **human request** (§10),
-moves the case to `waiting_for_human`, and runs the tool only once the approval is
-granted, from whichever channel answers first. The LLM sees the tool result (or the
-rejection reason) when the case resumes. Plugins can also return `NeedsApproval`
-themselves for dynamic decisions.
+A tool with outside effects (sending an email) can require the owner's approval: in a
+command plugin, `requires_approval = true` on the tool, with an `approval` template that
+says what a call does (`"Email {to}: {subject}"`, §9.9).
+
+1. **The call.** When the LLM calls such a tool, its arguments are validated first (an
+   invalid call is a plain tool error). Then, in one transaction, the engine stores an
+   **approval** human request (summary, tool, arguments), a `core.human_input` wait,
+   and one channel delivery per human channel (§10.3), and records the tool result
+   `{ status: "waiting_for_approval", request_id }`. The case is `waiting_for_human`;
+   nothing ran. Other calls of the same turn are recorded as not run.
+2. **The decision.** The owner approves or rejects from the web (where they can also edit
+   the arguments and add a comment) or from Discord (✅/❌). The first decision wins, as
+   for questions (§10.1). An approval becomes `execution = pending` and the case wakes
+   with `approval_decided` (decision, comment, edited arguments). A message to the case
+   instead of a decision wakes it too, and drops the approval.
+3. **Running it, at most once.** At the start of each step, the worker runs the case's
+   approved calls: it first moves the call to `running` in its own transaction, then runs
+   the tool with the final arguments outside any transaction, then records an
+   `approved_call_finished` wake event with the result (stored as a case file if it is
+   long) and moves the call to `done`. A call found still `running` was interrupted by a
+   crash: it is reported as having an unknown outcome and never run again, since running
+   it twice could send an email twice.
+
+A rejection is never run; the LLM is told, with the owner's comment, and decides what to
+do next.
 
 ### 9.8 External plugin protocol
 
@@ -823,7 +896,7 @@ requires = ["uv"]                     # programs that must be on PATH, checked a
 name = "youtube_transcript"           # what the LLM calls; ^[a-zA-Z0-9_-]{1,64}$
 description = "Download the transcript of a YouTube video… read it with `read_file`."
 command = ["scripts/yt.py", "transcript", "{video}", "--format", "stamped"]
-output = "file"                       # auto (default) | text | file
+output = "file"                       # auto (default) | text | file | json
 file_name = "youtube-{video}.md"
 timeout = "3m"                        # default 2m
 
@@ -850,17 +923,28 @@ file = "guides/earnings-call-analysis.md"
   future work.
 - **Arguments.** The host builds the JSON Schema from `[tools.args]` and checks every call
   against it before anything runs: required arguments, types, `enum`, no unknown
-  arguments, at most 2 000 characters, no NUL. A `{name}` in `command` must be a required
-  argument; optional ones go in `options`. Values become separate `argv` entries, never
-  shell text, and a string value may not start with `-`, so the LLM cannot inject options
-  (e.g. `--out /etc/passwd`).
+  arguments, no NUL, and at most 2 000 characters unless the argument sets `max_length`
+  (up to 100 000, e.g. an email body). An optional argument given as an empty or blank
+  string counts as not given (models often send `"cc": ""`). A `{name}` in `command` must be a required
+  argument; optional ones go in `options`, and a boolean option adds its arguments when
+  true. Values become separate `argv` entries, never shell text. A value that fills a
+  whole element (`"{to}"`) may not start with `-`, so the LLM cannot inject options (e.g.
+  `--out /etc/passwd`); a value inside a larger element (`"--body={body}"`) may, since it
+  can only ever be that option's value.
 - **Running.** The program is found relative to the plugin (a path with `/`, which may not
   leave the directory) or on `PATH`. It runs in the plugin directory with the same
   minimal environment as protocol plugins, plus the plugin's `config.toml` `[env]` table,
   whose values may be secret references (e.g. `YT_PROXY_URL = { env = "YT_PROXY_URL" }`).
   stdin is closed; stdout and stderr are read up to 8 MB. On timeout the process is
   killed. A non-zero exit is a tool error for the LLM, carrying the end of stderr.
-- **Output.** `text` returns stdout inline (up to 20 000 characters); `file` stores it as a
+- **Approval.** `requires_approval = true` makes every call wait for the owner (§9.7);
+  `approval = "Email {to}: {subject}"` is the summary shown to them, with placeholders of
+  missing optional arguments dropped.
+- **Wait conditions.** `[[conditions]]` declares kinds for `sleep`: `name`,
+  `description`, `command`, declared `params` (checked like tool arguments), `interval`
+  (default 15m), `min_interval` (default 5m) and `timeout` (default 1m). The command gets
+  `{"params": …, "cursor": …}` on stdin and prints `{"status": "pending" | "fired", "events": […], "cursor": …}`; the check thread runs it (§6.2).
+- **Output.** `json` parses stdout as the result; `text` returns stdout inline (up to 20 000 characters); `file` stores it as a
   case file (§7.5) and returns its name, size and a preview, so the LLM reads it with
   `read_file` in parts; `auto` returns up to 12 000 characters inline and stores anything
   longer. `file_name` placeholders are made safe (no URL scheme, only letters, digits,
@@ -880,14 +964,14 @@ ______________________________________________________________________
 
 ## 10. Human-in-the-loop
 
-### 10.1 Human requests (questions built)
+### 10.1 Human requests (built)
 
 Whenever a case needs a person, the core creates a **human request**:
 
-| Kind       | Created by                                                   | Valid answers                                                             | Status  |
-| ---------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- | ------- |
-| `question` | `ask_human`, or two LLM replies in a row without a tool call | free text                                                                 | Built   |
-| `approval` | a tool that requires approval (§9.7)                         | approve / reject (with an optional comment); editing the args is web-only | Planned |
+| Kind       | Created by                                                   | Valid answers                                                             | Status |
+| ---------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- | ------ |
+| `question` | `ask_human`, or two LLM replies in a row without a tool call | free text                                                                 | Built  |
+| `approval` | a tool that requires approval (§9.7)                         | approve / reject (with an optional comment); editing the args is web-only | Built  |
 
 Human requests belong to the **core**, not to any plugin. A question can be answered
 from the web client (the inbox, the case page, or a message to the case, which answers its
@@ -1017,214 +1101,21 @@ Replying to a notification to send a case a plain message is future work.
 
 ______________________________________________________________________
 
-## 11. Email plugin (planned, worked example)
+## 11. Email plugin (built)
 
-### 11.1 Configuration schema (abridged)
-
-The schema below is what `config.toml` instances are validated against (see §9.4 for an
-example instance).
-
-```json
-{
-    "type": "object",
-    "required": ["imap", "smtp", "from_address"],
-    "properties": {
-        "from_address": { "type": "string", "format": "email" },
-        "from_name": { "type": "string" },
-        "imap": {
-            "type": "object",
-            "required": ["host", "username", "password"],
-            "properties": {
-                "host": { "type": "string" },
-                "port": { "type": "integer", "default": 993 },
-                "tls": {
-                    "enum": ["implicit", "starttls"],
-                    "default": "implicit"
-                },
-                "username": { "type": "string" },
-                "password": { "type": "string", "x-secret": true },
-                "folders": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "default": ["INBOX"],
-                    "description": "Folders to search for replies (e.g. INBOX, Bulk)"
-                }
-            }
-        },
-        "smtp": {
-            "type": "object",
-            "required": ["host", "username", "password"],
-            "properties": {
-                "host": { "type": "string" },
-                "port": { "type": "integer", "default": 465 },
-                "tls": {
-                    "enum": ["implicit", "starttls"],
-                    "default": "implicit"
-                },
-                "username": { "type": "string" },
-                "password": { "type": "string", "x-secret": true }
-            }
-        },
-        "sent_folder": {
-            "type": "string",
-            "description": "Append sent mail here (optional)"
-        },
-        "allowed_recipients": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Optional allow-list of addresses/domains"
-        },
-        "requires_approval": {
-            "type": "array",
-            "items": { "type": "string" },
-            "default": ["send_email", "reply"]
-        },
-        "min_check_interval": { "type": "string", "default": "5m" }
-    }
-}
-```
-
-`validate_config()` logs in to IMAP and authenticates against SMTP (without sending) to
-confirm the credentials work.
-
-### 11.2 Tools
-
-| Tool            | Args                                                   | Result                                                       |
-| --------------- | ------------------------------------------------------ | ------------------------------------------------------------ |
-| `send_email`    | `to[]`, `cc[]?`, `subject`, `body` (text), `file_ids?` | `{ message_id, thread_ref }`                                 |
-| `reply`         | `thread_ref` or `message_id`, `body`, `reply_all?`     | `{ message_id, thread_ref }`                                 |
-| `list_messages` | `thread_ref?`, `since?`, `from?`, `limit`              | message summaries (id, from, subject, date, snippet)         |
-| `read_message`  | `message_id`                                           | headers, text body (HTML converted to text), attachment list |
-
-- `file_ids` attach case files (§7.5) to outgoing mail.
-- Outgoing mail gets a generated `Message-ID` (`<uuid@clankjob.local>`). The plugin
-  stores it in the case-scoped store so replies can be linked back to the case.
-- `thread_ref` is the Message-ID of the first message in the thread. `reply` sets
-  `In-Reply-To` and `References` correctly.
-- Attachments of incoming mail are added to the case as files, marked as coming from a
-  third party.
-- Sending goes through the **outbox** (§17.1), so a crash mid-send never results in
-  a duplicate email.
-
-### 11.3 Wait condition: `reply_received`
-
-```json
-{
-    "kind": "support_mail.reply_received",
-    "params": {
-        "thread_ref": "<uuid@clankjob.local>",
-        "from": ["sales@acme.com"]
-    },
-    "check_every": "1h",
-    "timeout": "3d"
-}
-```
-
-`check()`:
-
-1. Connect to IMAP and, for each configured folder, `UID SEARCH` for messages with
-   `UID > cursor.last_uid[folder]` and matching the thread. It matches on
-   `HEADER In-Reply-To` / `HEADER References` containing any Message-ID this case sent
-   in the thread. If the message has no such headers, it falls back to `FROM` in
-   `params.from` plus a subject match.
-2. If `UIDVALIDITY` changed, reset the cursor for that folder and deduplicate by
-   Message-ID against the case store.
-3. No matches → `Pending { cursor }`. Matches → `Fired { events: [{message_id, from, subject, date, snippet}] }`. The LLM reads full bodies with `read_message` if needed.
-
-Other condition kinds the plugin can offer: `message_received { from?, subject_contains? }`
-for inbound mail not tied to a sent thread.
-
-### 11.4 Inbound email that starts a case (later)
-
-Not in v1. Later, an instance option `create_cases_from: {folder, filter, template}`
-could let a new inbound email spawn a case. It would reuse the same `check()` machinery
-on a per-instance schedule.
+The email plugin is documented with the plugin, in
+[`plugin/email/README.md`](../plugin/email/README.md): configuration, tools, wait
+conditions, how replies are matched, and what is planned. It is a command plugin (§9.9)
+that sends through approvals (§9.7) and waits with plugin wait conditions (§6.2).
 
 ______________________________________________________________________
 
 ## 12. Discord plugin (built)
 
-A **human channel** plugin: it has no LLM tools or wait conditions, only `HumanChannel`.
-It lives in `plugin/discord/` as an external Python plugin (standard library only,
-Python 3.11+) that implements the protocol of §9.8, with tests against a fake Discord.
-The server loads it from `plugins_dir` and drives it through §10.3. Its `validate_config`
-checks the whole setup with read-only calls: the token, that the channel is a text
-channel, the Message Content intent, the bot's effective permissions in the channel
-(roles and channel overwrites), and that each allowed responder is in the server and can
-reply in threads. The server runs it for every instance when plugins load and logs each
-problem with its fix; the Plugins page shows the result and can run it again ("Test
-now"); `check_config.py` runs it without the server and prints a checklist. Editing
-`config.toml` reloads the plugin by itself (§9.4); a new token in the environment needs a
-server restart.
-
-### 12.1 Configuration
-
-Instances go in `plugin/discord/config.toml` (git-ignored; `config.example.toml` is the
-template) and are validated against `schema.json`:
-
-```toml
-[instances.discord_joe]
-bot_token = { secret = "discord_bot_token" }
-channel_id = "123456789012345678"
-allowed_responders = ["234567890123456789"]   # only these users can answer
-mention = true                                # ping them on questions and approvals
-# poll_interval = "20s"
-# notify_on = ["completed", "failed", "budget_exceeded"]
-```
-
-Links back to a case come from the server's `public_url`, passed as `case_url` in each
-request, so the plugin needs no URL of its own. `validate_config` and `healthcheck`
-check the token (`GET /users/@me`) and that the channel is visible.
-
-### 12.2 Messages
-
-A question opens a **thread** on itself; a reply in the thread is the answer. Scoping
-replies to a thread is what keeps concurrent questions apart, with nothing to match up.
-
-```
-@joe
-**Electrician quote** needs your input
-Bob needs a photo of the electrical panel before confirming the price. Can you send one?
--# Reply in the thread to answer
-<https://clank.acme.com/#/cases/01J9…>
-```
-
-An approval is answered with a **reaction**: the bot seeds ✅ and ❌, and a tap by an
-allowed responder decides. Editing the proposed action stays a web-only feature.
-
-````
-@joe
-**Electrician quote** wants your approval
-Send an email to bob@sparkyelectric.ca
-```
-{ "to": ["bob@sparkyelectric.ca"], "subject": "Quote request: 50A EV charger circuit" }
-```
--# React ✅ to approve or ❌ to reject. To edit it first, use the web UI.
-````
-
-After resolution the bot edits the message with a status line ("Answered via web by
-joe", "No longer needed", "Case cancelled") and closes the question's thread.
-
-Every message sets `allowed_mentions` to the allowed responders only: questions are
-written by the LLM, and an `@everyone` in one must stay plain text.
-
-### 12.3 Talking to Discord
-
-- **REST only**, polled: no gateway WebSocket and no public endpoint (`urllib`).
-- The poll cursor maps each open thread to the last message seen in it; approvals are
-  checked by reading the message's reactions.
-- Attachments are returned as links, and the host downloads them at once because
-  Discord CDN links expire.
-- Rate limits: short `429` waits are slept through; longer ones come back as retryable
-  errors so the host backs off. One or two API calls per open request per poll.
-- The bot needs the **Message Content** intent to read thread replies; an empty reply
-  from a responder is reported as a warning pointing at it.
-
-### 12.4 Later: buttons
-
-Approve/Reject buttons need Discord **Interactions**, which call a public HTTPS endpoint.
-They would come in as a push source, written to a durable inbox table and resolved through
-the same answer path (§19). Reactions remain the fallback.
+The Discord plugin is documented with the plugin, in
+[`plugin/discord/README.md`](../plugin/discord/README.md): configuration, messages,
+how it talks to Discord, its setup checks, and what is planned. It is a human channel
+(§10.3) running as a JSON-RPC process plugin (§9.8).
 
 ______________________________________________________________________
 
@@ -1331,16 +1222,15 @@ prices, or a model it does not list), `usd` is `null` with a `reason`.
 Planned: `PATCH /cases/{id}` (title, owner, budgets, channels), and `plugin_instances` on
 cases.
 
-### 14.2 Human requests (partly built)
+### 14.2 Human requests (built)
 
-| Method | Path                               | Description                                                                              | Status  |
-| ------ | ---------------------------------- | ---------------------------------------------------------------------------------------- | ------- |
-| `GET`  | `/human-requests?status=&case_id=` | Questions; `status` defaults to `open`, `all` lists every status.                        | Built   |
-| `POST` | `/human-requests/{id}/answer`      | `{ "text" }` from the web. `409` if the question is no longer open.                      | Built   |
-|        | approvals                          | `{ "decision": "approve" \| "reject", "comment"?, "edited_args"? }` on the same endpoint | Planned |
+| Method | Path                               | Description                                                                                                                                                             |
+| ------ | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/human-requests?status=&case_id=` | Questions and approvals (`kind`, and for approvals `tool`, `args`, `decision`, `execution`); `status` defaults to `open`, `all` lists every status.                     |
+| `POST` | `/human-requests/{id}/answer`      | A question: `{ "text" }`. An approval: `{ "decision": "approve" \| "reject", "comment"?, "args"? }`. `400` for the wrong kind of answer, `409` if it is no longer open. |
 
-`edited_args` will let a human fix a draft (e.g. an email body) before approving; it is
-only available from the web channel.
+`args` replaces the tool's arguments when approving, e.g. a corrected email body; it is
+only available from the web.
 
 ### 14.3 LLMs (built)
 
@@ -1356,6 +1246,8 @@ only available from the web channel.
 | `GET`  | `/prompts/{name}`          | One effective template, with its content.                                       |
 | `GET`  | `/prompts/profiles/{name}` | One profile, with its content.                                                  |
 | `POST` | `/admin/reload`            | Reload the prompt templates and plugins (same as `SIGHUP`).                     |
+| `GET`  | `/user-prompt`             | The owner's prompt (§7.6): `{ content, updated_at, max_chars }`.                |
+| `PUT`  | `/user-prompt`             | `{ "content" }` replaces it (empty removes it); `400` over the limit.           |
 
 Planned: reloading `clankjob.toml` itself.
 
@@ -1439,13 +1331,18 @@ the same origin as the API. Everything the server sends is inserted as text, nev
 - **New case**: title, goal, owner, profile, LLM, model (with the catalog's suggestions,
   prices and context size), instructions, the chat channels to also ask on (when any are
   loaded, pre-ticked from the default), and budgets.
-- **Inbox**: every open question across cases, answerable in place.
+- **Inbox**: every open question and approval across cases, answerable in place. An
+  approval card shows what the call will do and its arguments (to, subject, body…), with
+  **Edit** (each argument becomes an input), an optional comment, **Reject** and
+  **Approve** (or **Approve edited**). The same card appears on the case page, and the
+  timeline shows the decision and the result of the call.
 - **Plugins**: each plugin and instance with an On / Off / Error / Needs attention chip,
   what the last check found (problems and warnings with their fix, and every check in a
   collapsible list), the channel's last error or warning, "Test now" per instance, and
   "Reload plugins". Command plugins list their tools and guides, offered to every case.
   The navigation link shows a red mark when something needs attention.
-- **Prompts**: effective templates and profiles, their source and hash, rejected files,
+- **Prompts**: **Your prompt**, the owner's prompt (§7.6), editable with a character count
+  and Save; then the effective templates and profiles, their source and hash, rejected files,
   and "Reload from disk".
 
 **Live updates**: the page polls every few seconds (the case every 2.5 s, the rail every
@@ -1453,7 +1350,7 @@ the same origin as the API. Everything the server sends is inserted as text, nev
 thread-per-request, so long-lived WebSockets are a poor fit; Server-Sent Events are a
 possible later upgrade.
 
-Planned: approvals in the inbox and file downloads.
+Planned: file downloads.
 
 ______________________________________________________________________
 
@@ -1484,14 +1381,17 @@ work_queue                   -- at most one row per case: "this case should run"
   case_id, available_at, lease_until, rerun, attempts
 
 wait_conditions              -- see §6.1
-  id, case_id, kind, params (json), next_check_at, deadline_at, status, created_at
+  id, case_id, kind, params (json), next_check_at, deadline_at, status, created_at,
+  check_every_ms, cursor (json), failures
 
 case_notes
   case_id, key, value, updated_at
 
-human_requests               -- questions today (§10.1)
-  id, case_id, question, status (open/answered/superseded/cancelled),
-  answer, answered_via, responder, created_at, resolved_at
+human_requests               -- questions and approvals (§10.1, §9.7)
+  id, case_id, kind (question/approval), question (or approval summary),
+  status (open/answered/superseded/cancelled), answer (or approval comment),
+  answered_via, responder, created_at, resolved_at,
+  tool, args (json), decision (approve/reject), execution (pending/running/done)
 
 instructions                 -- owner guidance, always in the prompt, editable (§7.5)
   id, case_id, name, content, created_at, updated_at
@@ -1513,8 +1413,7 @@ channel_cursors              -- where each channel's poll continues
 **Planned:**
 
 ```
-wait_conditions              + instance_name, check_every, cursor (json), lease_until
-human_requests               + kind (question/approval), instance_name, tool, args (json)
+wait_conditions              + lease_until (for several check threads)
 files                        + source (owner / third party)
 
 case_plugins                 -- plugin instances are defined in files (§9.4) and
@@ -1545,11 +1444,12 @@ ______________________________________________________________________
   `open`, so two simultaneous answers cannot both win (§10.1).
 - **Files (built)**: bytes are written and renamed before the database row, and removed
   again if the transaction fails, so a row never points at a missing file.
-- **Outbox for side effects (planned)**: plugin tools with external side effects (sending
-  email) write an `outbox` row with an idempotency key in the same transaction as the tool
-  call event, then execute it and mark it `sent`. A crash between those steps is
-  reconciled on restart; the email plugin checks the sent folder for the Message-ID
-  before re-sending.
+- **Approved calls run at most once (built)**: a call that needs approval (sending
+  email) is moved to `running` in its own transaction before it runs, and to `done` with
+  its result after; one found `running` after a crash is reported as having an unknown
+  outcome, never run again (§9.7). Planned: reconciling such calls automatically (e.g.
+  the email plugin looking for the Message-ID in the Sent folder), and an outbox for tools
+  with side effects that do not need approval.
 - **Channel messages go through an outbox (built)**: `channel_deliveries` rows are
   written in the same transaction as the question or state change, so a crash never loses
   a message. A message sent but not yet marked sent when the server dies is sent again
@@ -1575,8 +1475,9 @@ ______________________________________________________________________
 ### 17.3 Security
 
 - **Untrusted content (built)**: tool results are data, not instructions, and the system
-  prompt says so. Planned: irreversible plugin actions (sending email) default to
-  `requires_approval`, and `allowed_recipients` limits where email can go.
+  prompt says so, and so does `read_email`'s result. Sending email always needs the
+  owner's approval (§9.7), and `EMAIL_ALLOWED_RECIPIENTS` can limit where it can go even
+  when approved (see `plugin/email/README.md`).
 - **API (built)**: bearer tokens compared in constant time. Request bodies are limited to
   2 MB (20 MB for file uploads). TLS is terminated by a reverse proxy in front of rouille.
 - **Web client (built)**: server data is inserted as text, never HTML. The page's
@@ -1754,8 +1655,9 @@ ______________________________________________________________________
 - **Per-case plugin tools**: opt a case out of some tools, or limit a case to some.
 - **Tool guides by skill format**: load `SKILL.md`-style directories (frontmatter with a
   name and description) as guides without a manifest entry.
-- **Next milestones**: approvals (§9.7, answered in the web or with Discord reactions),
-  then plugin tools and wait conditions (milestone 4, §9), then the email plugin (§11).
+- **Next milestones**: email attachments both ways (case files attached to outgoing mail,
+  incoming attachments imported; see `plugin/email/README.md`), protocol plugins with tools and conditions
+  (JSON-RPC `call_tool` and `check`, milestone 4, §9), and the Docker image (§18).
 - **Channel attachments**: download files sent in a Discord reply into the case (§7.5)
   before the links expire.
 - **Compaction** of long transcripts (§7.3).
@@ -1776,7 +1678,7 @@ ______________________________________________________________________
   conditions or resolve human requests immediately. Polling stays the fallback.
 - **More human channels**: Slack, SMS, or email itself (reply to a notification email),
   all built on the same `HumanChannel` trait.
-- **Cases created by events** (inbound email → new case) (§11.4).
+- **Cases created by events** (inbound email → new case).
 - **Case templates**: reusable goals, instructions, plugin sets, budgets and a profile.
 - **Prompt evaluation**: replay recorded cases against an edited prompt to compare
   behaviour before deploying it.

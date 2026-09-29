@@ -22,6 +22,7 @@ use clankjob_storage::{Connection, Db, StorageError};
 
 mod activation;
 pub mod channels;
+mod checks;
 pub mod context;
 pub mod files;
 pub mod plugin_tools;
@@ -29,6 +30,7 @@ pub mod prompts;
 mod scheduler;
 pub mod tools;
 pub mod transitions;
+pub mod user_prompt;
 
 use channels::Channels;
 use files::FileStore;
@@ -47,6 +49,12 @@ pub enum EngineError {
     /// No human request has this id.
     #[error("human request {0} not found")]
     RequestNotFound(HumanRequestId),
+    /// The request is a question, not an approval.
+    #[error("human request {0} is a question, not an approval")]
+    NotAnApproval(HumanRequestId),
+    /// The request is an approval: it takes a decision, not a text answer.
+    #[error("human request {0} is an approval: send a decision (approve or reject)")]
+    NotAQuestion(HumanRequestId),
     /// The request was already answered, superseded or cancelled.
     #[error("human request {0} is no longer open")]
     AlreadyResolved(HumanRequestId),
@@ -79,6 +87,9 @@ pub enum EngineError {
     /// A file's bytes could not be written or read.
     #[error("file storage failed: {0}")]
     FileStorage(#[from] std::io::Error),
+    /// The user prompt is too long, or no location is configured for it.
+    #[error("{0}")]
+    InvalidUserPrompt(String),
     /// A prompt template failed to render.
     #[error(transparent)]
     Prompt(#[from] prompts::RenderError),
@@ -154,6 +165,9 @@ pub struct EngineSettings {
     pub max_attempts: u32,
     /// Maximum wait conditions fired per scheduler tick.
     pub scheduler_batch: u32,
+    /// The owner's own prompt, added to every case (`user_prompt.md` in the data
+    /// directory); `None` for none.
+    pub user_prompt_path: Option<PathBuf>,
 }
 
 impl Default for EngineSettings {
@@ -168,6 +182,7 @@ impl Default for EngineSettings {
             requeue_delay: Duration::from_secs(60),
             max_attempts: 5,
             scheduler_batch: 100,
+            user_prompt_path: None,
         }
     }
 }
@@ -274,7 +289,8 @@ impl Engine {
         }
     }
 
-    /// Start the worker threads, the scheduler thread and the channel thread.
+    /// Start the worker threads, the scheduler thread, the channel thread and the thread
+    /// checking plugin wait conditions.
     ///
     /// # Returns
     ///
@@ -299,12 +315,18 @@ impl Engine {
                 .name("scheduler".to_owned())
                 .spawn(move || scheduler_loop(&shared))?,
         );
-        // Always started: plugins can be loaded later, and it idles cheaply without them.
+        // Always started: plugins can be loaded later, and they idle cheaply without them.
         let shared = Arc::clone(&self.shared);
         handles.push(
             thread::Builder::new()
                 .name("channels".to_owned())
                 .spawn(move || channels::channel_loop(&shared))?,
+        );
+        let shared = Arc::clone(&self.shared);
+        handles.push(
+            thread::Builder::new()
+                .name("checks".to_owned())
+                .spawn(move || checks::check_loop(&shared))?,
         );
         Ok(handles)
     }
@@ -331,6 +353,43 @@ impl Engine {
     #[must_use]
     pub fn plugin_tools(&self) -> &PluginTools {
         &self.shared.plugin_tools
+    }
+
+    /// The owner's own prompt and when it was last saved; `None` when there is none yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidUserPrompt`] if no location is configured.
+    pub fn user_prompt(&self) -> Result<Option<(String, DateTime<Utc>)>> {
+        let path = self.user_prompt_path()?;
+        let modified = std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(DateTime::<Utc>::from);
+        Ok(user_prompt::read(path).zip(modified))
+    }
+
+    /// Replace the owner's own prompt; every case uses it from its next turn. An empty
+    /// text removes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidUserPrompt`] if it is too long or no location is
+    /// configured, or [`EngineError::FileStorage`] if it cannot be written.
+    pub fn set_user_prompt(&self, content: &str) -> Result<()> {
+        let path = self.user_prompt_path()?;
+        user_prompt::validate(content).map_err(EngineError::InvalidUserPrompt)?;
+        user_prompt::write(path, content)?;
+        tracing::info!(path = %path.display(), chars = content.trim().chars().count(), "user prompt saved");
+        Ok(())
+    }
+
+    fn user_prompt_path(&self) -> Result<&std::path::Path> {
+        self.shared
+            .settings
+            .user_prompt_path
+            .as_deref()
+            .ok_or_else(|| EngineError::InvalidUserPrompt("no location is configured for the user prompt".to_owned()))
     }
 
     /// The prompt templates currently in use.
@@ -505,6 +564,22 @@ impl Engine {
         answer: Answer<'_>,
     ) -> Result<HumanRequest> {
         let request = transitions::answer_request(connection, request_id, answer, Utc::now())?;
+        self.shared.signal.notify();
+        Ok(request)
+    }
+
+    /// Decide an approval; see [`transitions::decide_approval`].
+    ///
+    /// # Errors
+    ///
+    /// See [`transitions::decide_approval`].
+    pub fn decide_approval(
+        &self,
+        connection: &mut Connection,
+        request_id: &HumanRequestId,
+        verdict: clankjob_storage::human::Verdict<'_>,
+    ) -> Result<HumanRequest> {
+        let request = transitions::decide_approval(connection, request_id, verdict, Utc::now())?;
         self.shared.signal.notify();
         Ok(request)
     }

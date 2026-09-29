@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use clankjob_core::ids::{CaseId, WaitConditionId};
 use clankjob_core::wait::{WaitCondition, WaitStatus};
 use rusqlite::{Connection, Row, params};
+use serde_json::Value;
 
 use crate::{Result, from_millis, from_optional_millis, parse_enum, to_millis};
 
@@ -55,7 +56,9 @@ pub fn insert_wait(connection: &Connection, wait: &WaitCondition) -> Result<()> 
     Ok(())
 }
 
-/// Active conditions whose check time or deadline has passed, oldest first.
+/// Active conditions the scheduler must act on, oldest first: built-in ones (`core.*`)
+/// whose check time has passed, and any condition whose deadline has passed. Plugin
+/// conditions are checked separately ([`due_checks`]).
 ///
 /// # Errors
 ///
@@ -63,10 +66,94 @@ pub fn insert_wait(connection: &Connection, wait: &WaitCondition) -> Result<()> 
 pub fn due_waits(connection: &Connection, now: DateTime<Utc>, limit: u32) -> Result<Vec<WaitCondition>> {
     query_waits(
         connection,
-        "status = 'active' AND (next_check_at <= ?1 OR deadline_at <= ?1) \
+        "status = 'active' AND ((kind LIKE 'core.%' AND next_check_at <= ?1) OR deadline_at <= ?1) \
          ORDER BY MIN(COALESCE(next_check_at, deadline_at), COALESCE(deadline_at, next_check_at)) LIMIT ?2",
         params![to_millis(now), limit],
     )
+}
+
+/// A plugin condition due for a check, with where its check continues.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DueCheck {
+    /// The condition.
+    pub condition: WaitCondition,
+    /// What the last check handed back.
+    pub cursor: Option<Value>,
+    /// How often it is checked, in milliseconds.
+    pub every_ms: Option<i64>,
+    /// Checks in a row that failed.
+    pub failures: u32,
+}
+
+/// Active plugin conditions (not `core.*`) whose check time has passed, oldest first.
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if the query fails or a row is corrupt.
+pub fn due_checks(connection: &Connection, now: DateTime<Utc>, limit: u32) -> Result<Vec<DueCheck>> {
+    let mut statement = connection.prepare_cached(&format!(
+        "SELECT {COLUMNS}, cursor, check_every_ms, failures FROM wait_conditions \
+         WHERE status = 'active' AND kind NOT LIKE 'core.%' AND next_check_at <= ?1 \
+         ORDER BY next_check_at LIMIT ?2"
+    ))?;
+    let rows = statement.query_map(params![to_millis(now), limit], |row| {
+        let cursor: Option<String> = row.get(8)?;
+        Ok((
+            wait_from_row(row),
+            cursor,
+            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, u32>(10)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (condition, cursor, every_ms, failures) = row?;
+        Ok(DueCheck {
+            condition: condition?,
+            cursor: cursor.as_deref().map(serde_json::from_str).transpose()?,
+            every_ms,
+            failures,
+        })
+    })
+    .collect()
+}
+
+/// Set how often a plugin condition is checked.
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if the update fails.
+pub fn set_check_interval(connection: &Connection, id: &WaitConditionId, every_ms: i64) -> Result<()> {
+    connection.execute(
+        "UPDATE wait_conditions SET check_every_ms = ?2 WHERE id = ?1",
+        params![id.as_str(), every_ms],
+    )?;
+    Ok(())
+}
+
+/// Record a check that did not fire: where to continue, when to check next, and how many
+/// checks in a row failed.
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if the update fails.
+pub fn record_check(
+    connection: &Connection,
+    id: &WaitConditionId,
+    cursor: Option<&Value>,
+    next_check_at: DateTime<Utc>,
+    failures: u32,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE wait_conditions SET cursor = COALESCE(?2, cursor), next_check_at = ?3, failures = ?4 \
+         WHERE id = ?1 AND status = 'active'",
+        params![
+            id.as_str(),
+            cursor.map(serde_json::to_string).transpose()?,
+            to_millis(next_check_at),
+            failures
+        ],
+    )?;
+    Ok(())
 }
 
 /// Active conditions of one case.
@@ -142,6 +229,43 @@ mod tests {
             status: WaitStatus::Active,
             created_at: time(0),
         }
+    }
+
+    #[test]
+    fn plugin_conditions_are_checked_separately_and_keep_their_cursor() {
+        // Arrange
+        let test_db = TestDb::new();
+        let connection = test_db.connect();
+        let case_id = insert_case(&connection);
+        let reply = wait(&case_id, "email_reply_received", Some(10), None);
+        insert_wait(&connection, &reply).unwrap();
+        set_check_interval(&connection, &reply.id, 900_000).unwrap();
+
+        // Act
+        let scheduler_sees = due_waits(&connection, time(20), 10).unwrap();
+        let due = due_checks(&connection, time(20), 10).unwrap();
+        record_check(
+            &connection,
+            &reply.id,
+            Some(&serde_json::json!({ "uid": 7 })),
+            time(40),
+            1,
+        )
+        .unwrap();
+        let not_yet = due_checks(&connection, time(30), 10).unwrap();
+        let later = due_checks(&connection, time(40), 10).unwrap();
+
+        // Assert
+        assert!(scheduler_sees.is_empty(), "the scheduler only fires built-in kinds");
+        assert_eq!(
+            (due.len(), due[0].every_ms, due[0].cursor.clone()),
+            (1, Some(900_000), None)
+        );
+        assert!(not_yet.is_empty());
+        assert_eq!(
+            (later[0].cursor.clone(), later[0].failures),
+            (Some(serde_json::json!({ "uid": 7 })), 1)
+        );
     }
 
     #[test]

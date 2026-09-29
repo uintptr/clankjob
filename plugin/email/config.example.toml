@@ -1,0 +1,23 @@
+# Copy to config.toml (git-ignored) and fill in your mailbox. Values are passed to
+# email_tool.py as environment variables; secrets are references, resolved by the server.
+
+[env]
+EMAIL_ADDRESS = "you@example.com"
+# EMAIL_NAME = "Your Name"                     # display name on outgoing mail
+# EMAIL_USERNAME = "you@example.com"           # login, if not the address
+EMAIL_PASSWORD = { env = "EMAIL_PASSWORD" }    # an app password; never the file itself
+
+# Yahoo: imap.mail.yahoo.com / smtp.mail.yahoo.com (app password required)
+# Gmail: imap.gmail.com / smtp.gmail.com (app password required)
+EMAIL_IMAP_HOST = "imap.example.com"
+# EMAIL_IMAP_PORT = "993"
+EMAIL_SMTP_HOST = "smtp.example.com"
+# EMAIL_SMTP_PORT = "465"                      # 465 = TLS; 587 = STARTTLS
+
+# Folders searched for replies and new mail. Include your spam folder (Yahoo: Bulk).
+EMAIL_FOLDERS = "INBOX"
+# Copy sent mail here, if your provider does not do it by itself.
+# EMAIL_SENT_FOLDER = "Sent"
+
+# Optional extra safety on top of approvals: only these addresses or @domains.
+# EMAIL_ALLOWED_RECIPIENTS = "bob@sparky.ca, @acme.com"

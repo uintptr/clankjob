@@ -32,6 +32,9 @@ pub const INSTRUCTIONS: &str = "instructions";
 /// Template listing the files added to a case, in the system prompt.
 pub const FILES: &str = "files";
 
+/// Template presenting the owner's own prompt (`user_prompt.md`), in the system prompt.
+pub const USER_PROMPT: &str = "user_prompt";
+
 /// Template listing the guides plugins offer, in the system prompt.
 pub const GUIDES: &str = "guides";
 
@@ -39,12 +42,13 @@ pub const GUIDES: &str = "guides";
 const PROFILE_PREFIX: &str = "profiles/";
 
 /// Built-in templates. `include_str!` embeds each file in the binary at compile time.
-const BUILTINS: [(&str, &str); 7] = [
+const BUILTINS: [(&str, &str); 8] = [
     (SYSTEM, include_str!("../prompts/system.md.j2")),
     (CASE_HEADER, include_str!("../prompts/case_header.md.j2")),
     (INSTRUCTIONS, include_str!("../prompts/instructions.md.j2")),
     (FILES, include_str!("../prompts/files.md.j2")),
     (GUIDES, include_str!("../prompts/guides.md.j2")),
+    (USER_PROMPT, include_str!("../prompts/user_prompt.md.j2")),
     (WAKE, include_str!("../prompts/wake.md.j2")),
     (NUDGE, include_str!("../prompts/nudge.md.j2")),
 ];
@@ -123,6 +127,8 @@ pub struct PromptContext<'a> {
     pub files: &'a [crate::files::FileView],
     /// Guides plugins offer, read with `read_guide`.
     pub guides: &'a [clankjob_core::tool::Guide],
+    /// The owner's own prompt, when they wrote one.
+    pub user_prompt: Option<&'a str>,
     /// Why the case woke up; only set when rendering the `wake` template.
     pub wake: Option<&'a WakeReason>,
 }
@@ -209,6 +215,65 @@ fn sample_material() -> (
     (files, guides, instructions)
 }
 
+/// One of every wake reason, for [`validate`].
+fn sample_wake_reasons() -> Vec<WakeReason> {
+    let condition_id = WaitConditionId::generate();
+    vec![
+        WakeReason::Created,
+        WakeReason::ApprovalDecided {
+            request_id: HumanRequestId::generate(),
+            tool: "send_email".to_owned(),
+            decision: clankjob_core::human::Decision::Approve,
+            comment: Some("ok".to_owned()),
+            edited_args: Some(serde_json::json!({"to": "a@b.c"})),
+            via: Some("web".to_owned()),
+        },
+        WakeReason::ApprovalDecided {
+            request_id: HumanRequestId::generate(),
+            tool: "send_email".to_owned(),
+            decision: clankjob_core::human::Decision::Reject,
+            comment: None,
+            edited_args: None,
+            via: None,
+        },
+        WakeReason::ApprovedCallFinished {
+            request_id: HumanRequestId::generate(),
+            tool: "send_email".to_owned(),
+            result: serde_json::json!({"message_id": "<1@x>"}),
+            is_error: false,
+        },
+        WakeReason::HumanMessage {
+            text: "Hello".to_owned(),
+        },
+        WakeReason::HumanAnswer {
+            request_id: HumanRequestId::generate(),
+            question: "Proceed?".to_owned(),
+            answer: "Yes".to_owned(),
+            via: Some("web".to_owned()),
+        },
+        WakeReason::ConditionFired {
+            condition_id: condition_id.clone(),
+            kind: "core.timer".to_owned(),
+            details: vec![serde_json::json!({"detail": 1})],
+        },
+        WakeReason::TimedOut {
+            condition_id,
+            kind: "core.timer".to_owned(),
+        },
+        WakeReason::Manual,
+        WakeReason::InstructionsChanged {
+            instruction_id: InstructionId::generate(),
+            name: "tone.md".to_owned(),
+            change: InstructionChange::Updated,
+        },
+        WakeReason::FileAdded {
+            file_id: FileId::generate(),
+            name: "panel.jpg".to_owned(),
+            kind: FileKind::Image,
+        },
+    ]
+}
+
 /// Render a template against sample data covering every variable it may use.
 fn validate(name: &str, source: &str) -> Result<(), RenderError> {
     let budgets = Budgets::default();
@@ -243,44 +308,13 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         instructions: &instructions,
         files: &files,
         guides: &guides,
+        user_prompt: Some("Sign emails as Brad."),
         wake: None,
     };
     match role_of(name) {
         TemplateRole::Case => render_source(name, source, &base).map(drop),
         TemplateRole::Wake => {
-            let condition_id = WaitConditionId::generate();
-            let reasons = [
-                WakeReason::Created,
-                WakeReason::HumanMessage {
-                    text: "Hello".to_owned(),
-                },
-                WakeReason::HumanAnswer {
-                    request_id: HumanRequestId::generate(),
-                    question: "Proceed?".to_owned(),
-                    answer: "Yes".to_owned(),
-                    via: Some("web".to_owned()),
-                },
-                WakeReason::ConditionFired {
-                    condition_id: condition_id.clone(),
-                    kind: "core.timer".to_owned(),
-                    details: vec![serde_json::json!({"detail": 1})],
-                },
-                WakeReason::TimedOut {
-                    condition_id,
-                    kind: "core.timer".to_owned(),
-                },
-                WakeReason::Manual,
-                WakeReason::InstructionsChanged {
-                    instruction_id: InstructionId::generate(),
-                    name: "tone.md".to_owned(),
-                    change: InstructionChange::Updated,
-                },
-                WakeReason::FileAdded {
-                    file_id: FileId::generate(),
-                    name: "panel.jpg".to_owned(),
-                    kind: FileKind::Image,
-                },
-            ];
+            let reasons = sample_wake_reasons();
             reasons.iter().try_for_each(|reason| {
                 render_source(
                     name,
@@ -487,6 +521,7 @@ mod tests {
             instructions: &[],
             files: &[],
             guides: &[],
+            user_prompt: None,
             wake: None,
         }
     }

@@ -6,12 +6,13 @@
 use chrono::Utc;
 use clankjob_core::case::{Budgets, CaseState, NewCase, NewInstruction};
 use clankjob_core::file::FileKind;
+use clankjob_core::human::Decision;
 use clankjob_core::human::HumanRequestStatus;
 use clankjob_core::ids::{CaseId, FileId, HumanRequestId, InstructionId};
 use clankjob_engine::{Engine, EngineError};
 use clankjob_plugin_host::{InstanceState, InstanceStatus};
 use clankjob_storage::cases::CaseFilter;
-use clankjob_storage::human::Answer;
+use clankjob_storage::human::{Answer, Verdict};
 use clankjob_storage::{self as storage, Connection, StorageError};
 use std::io::Read;
 use std::sync::Arc;
@@ -89,6 +90,9 @@ impl From<EngineError> for AppError {
             EngineError::UnknownLlm(_)
             | EngineError::UnknownProfile(_)
             | EngineError::UnknownChannel(_)
+            | EngineError::NotAQuestion(_)
+            | EngineError::InvalidUserPrompt(_)
+            | EngineError::NotAnApproval(_)
             | EngineError::InvalidFile(_)
             | EngineError::InvalidInstruction(_) => Self::BadRequest(error.to_string()),
             EngineError::FileStorage(error) => {
@@ -448,14 +452,53 @@ fn list_human_requests(state: &AppState, request: &Request) -> Handled {
     Ok(Response::json(&json!({ "human_requests": requests })))
 }
 
+/// Body of `POST /human-requests/{id}/answer`: `text` for a question, `decision` (with
+/// an optional `comment` and edited `args`) for an approval.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerBody {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    decision: Option<Decision>,
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default)]
+    args: Option<Value>,
+}
+
 fn answer_human_request(state: &AppState, request: &Request, id: &HumanRequestId) -> Handled {
-    let text = text_body(request)?;
-    let answer = Answer {
-        text: &text,
-        via: "web",
-        responder: None,
+    let body: AnswerBody = json_body(request)?;
+    let mut connection = state.connect()?;
+    let answered = match (body.decision, body.text) {
+        (Some(decision), None) => {
+            if body.args.as_ref().is_some_and(|args| !args.is_object()) {
+                return Err(AppError::BadRequest("`args` must be an object".to_owned()));
+            }
+            let comment = body.comment.as_deref().map(str::trim).filter(|comment| !comment.is_empty());
+            let verdict = Verdict {
+                decision,
+                args: body.args.as_ref().filter(|_| decision == Decision::Approve),
+                comment,
+                via: "web",
+                responder: None,
+            };
+            state.engine.decide_approval(&mut connection, id, verdict)?
+        }
+        (None, Some(text)) if !text.trim().is_empty() => {
+            let answer = Answer {
+                text: &text,
+                via: "web",
+                responder: None,
+            };
+            state.engine.answer_request(&mut connection, id, answer)?
+        }
+        _ => {
+            return Err(AppError::BadRequest(
+                "send `text` to answer a question, or `decision` (approve or reject) for an approval".to_owned(),
+            ));
+        }
     };
-    let answered = state.engine.answer_request(&mut state.connect()?, id, answer)?;
     Ok(Response::json(&answered))
 }
 
@@ -484,6 +527,29 @@ fn reload(state: &AppState) -> Response {
         object.insert("plugin_errors".to_owned(), json!(plugins.errors()));
     }
     Response::json(&summary)
+}
+
+/// The owner's own prompt, added to every case (design §7.6).
+fn user_prompt_json(state: &AppState) -> Handled {
+    let (content, updated_at) = state.engine.user_prompt()?.unzip();
+    Ok(Response::json(&json!({
+        "content": content.unwrap_or_default(),
+        "updated_at": updated_at,
+        "max_chars": clankjob_engine::user_prompt::MAX_USER_PROMPT_CHARS,
+    })))
+}
+
+/// Body of `PUT /user-prompt`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserPromptBody {
+    content: String,
+}
+
+fn save_user_prompt(state: &AppState, request: &Request) -> Handled {
+    let body: UserPromptBody = json_body(request)?;
+    state.engine.set_user_prompt(&body.content)?;
+    user_prompt_json(state)
 }
 
 /// An instance's status with how its channel has been doing, and whether it needs a look.
@@ -590,6 +656,8 @@ fn route(state: &AppState, request: &Request) -> Handled {
         (GET) (/api/v1/prompts) => { Ok(Response::json(&prompts_summary(&state.engine.prompts()))) },
         (GET) (/api/v1/prompts/profiles/{name: String}) => { get_prompt(state, &format!("profiles/{name}")) },
         (GET) (/api/v1/prompts/{name: String}) => { get_prompt(state, &name) },
+        (GET) (/api/v1/user-prompt) => { user_prompt_json(state) },
+        (PUT) (/api/v1/user-prompt) => { save_user_prompt(state, request) },
         (GET) (/api/v1/plugins) => { Ok(Response::json(&plugins_summary(state))) },
         (POST) (/api/v1/plugins/reload) => {
             state.plugins.reload();
@@ -673,7 +741,10 @@ mod tests {
                 None,
                 dir.path().join("files"),
                 clankjob_engine::channels::Channels::default(),
-                EngineSettings::default(),
+                EngineSettings {
+                    user_prompt_path: Some(dir.path().join("user_prompt.md")),
+                    ..EngineSettings::default()
+                },
             );
             let defaults = CaseDefaults {
                 llm: "default".to_owned(),
@@ -841,7 +912,7 @@ mod tests {
         let (reload_status, _) = api.call("POST", "/api/v1/admin/reload", None);
 
         assert_eq!((status, prompt_status, reload_status), (200, 200, 200));
-        assert_eq!(list["prompts"].as_array().unwrap().len(), 7);
+        assert_eq!(list["prompts"].as_array().unwrap().len(), 8);
         assert_eq!(prompt["source"], "builtin");
         assert_eq!(api.call("GET", "/api/v1/prompts/profiles/none", None).0, 404);
     }
@@ -962,6 +1033,84 @@ mod tests {
         assert_eq!(unknown, 400);
         assert_eq!(error["error"]["message"], "unknown human channel `discord_joe`");
         assert_eq!((created, case["human_channels"].clone()), (201, json!([])));
+    }
+
+    #[test]
+    fn approvals_take_a_decision_once() {
+        // Arrange
+        let api = TestApi::new();
+        let (_, case) = api.call("POST", "/api/v1/cases", Some(json!({"title": "t", "goal": "g"})));
+        let case_id = CaseId::from_string(case["id"].as_str().unwrap());
+        let id = HumanRequestId::generate();
+        let args = json!({"to": "bob@x.ca", "body": "Hi"});
+        let connection = api.state.connect().unwrap();
+        storage::human::insert_approval(
+            &connection,
+            &id,
+            &case_id,
+            "Email bob@x.ca",
+            "send_email",
+            &args,
+            Utc::now(),
+        )
+        .unwrap();
+        let url = format!("/api/v1/human-requests/{id}/answer");
+
+        // Act
+        let (as_text, _) = api.call("POST", &url, Some(json!({"text": "yes"})));
+        let (listed, open) = api.call("GET", "/api/v1/human-requests", None);
+        let edited = json!({"to": "bob@x.ca", "body": "Hello Bob"});
+        let (approved, request) = api.call(
+            "POST",
+            &url,
+            Some(json!({"decision": "approve", "args": edited, "comment": "ok"})),
+        );
+        let (again, _) = api.call("POST", &url, Some(json!({"decision": "reject"})));
+
+        // Assert
+        assert_eq!(as_text, 400);
+        assert_eq!(
+            (listed, open["human_requests"][0]["kind"].clone()),
+            (200, json!("approval"))
+        );
+        assert_eq!(open["human_requests"][0]["args"], args);
+        assert_eq!(approved, 200);
+        assert_eq!(
+            (request["decision"].clone(), request["execution"].clone()),
+            (json!("approve"), json!("pending"))
+        );
+        assert_eq!(request["args"], edited);
+        assert_eq!(again, 409);
+    }
+
+    #[test]
+    fn the_user_prompt_is_read_saved_and_limited() {
+        // Arrange
+        let api = TestApi::new();
+
+        // Act
+        let (_, empty) = api.call("GET", "/api/v1/user-prompt", None);
+        let (saved, prompt) = api.call(
+            "PUT",
+            "/api/v1/user-prompt",
+            Some(json!({"content": "Sign emails as Brad."})),
+        );
+        let too_long = "x".repeat(clankjob_engine::user_prompt::MAX_USER_PROMPT_CHARS + 1);
+        let (rejected, _) = api.call("PUT", "/api/v1/user-prompt", Some(json!({"content": too_long})));
+        let (_, after) = api.call("GET", "/api/v1/user-prompt", None);
+
+        // Assert
+        assert_eq!(
+            (empty["content"].clone(), empty["updated_at"].clone()),
+            (json!(""), Value::Null)
+        );
+        assert_eq!((saved, prompt["content"].clone()), (200, json!("Sign emails as Brad.")));
+        assert!(prompt["updated_at"].is_string());
+        assert_eq!(rejected, 400);
+        assert_eq!(
+            after["content"], "Sign emails as Brad.",
+            "a rejected save changes nothing"
+        );
     }
 
     #[test]

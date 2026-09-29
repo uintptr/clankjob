@@ -222,6 +222,7 @@ mod tests {
             instructions: &[],
             files: &[],
             guides: &[],
+            user_prompt: None,
             wake: None,
         };
         build_messages(events, &PromptSet::builtin(), &context, &|_| None).unwrap()
@@ -304,6 +305,7 @@ mod tests {
             instructions: &[],
             files: &[],
             guides: &[],
+            user_prompt: None,
             wake: None,
         };
         let loader = |id: &FileId| {

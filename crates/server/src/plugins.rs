@@ -120,7 +120,10 @@ impl PluginManager {
             "plugins loaded"
         );
         self.engine.channels().replace(channels, default);
-        let conflicts = self.engine.plugin_tools().replace(registry.tools(), registry.guides());
+        let conflicts = self
+            .engine
+            .plugin_tools()
+            .replace(registry.tools(), registry.guides(), registry.conditions());
         *self.conflicts.lock().unwrap_or_else(PoisonError::into_inner) = conflicts;
         let previous = std::mem::replace(
             &mut *self.current.write().unwrap_or_else(PoisonError::into_inner),
@@ -162,6 +165,13 @@ impl PluginManager {
                 }
             })
             .map(Some)
+    }
+
+    /// Stop reloading and stop (re)starting plugin processes, without waiting for calls in
+    /// progress: the first step of shutting down, before the engine's threads are joined.
+    pub fn retire(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.current().retire();
     }
 
     /// Stop watching and shut down every plugin process.

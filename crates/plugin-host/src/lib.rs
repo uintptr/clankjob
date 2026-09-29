@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use clankjob_core::channel::{ChannelError, HumanChannel};
-use clankjob_core::tool::{Guide, PluginTool};
-use command::{CommandTool, ToolManifest};
+use clankjob_core::tool::{Guide, PluginCondition, PluginTool};
+use command::{CommandCondition, CommandTool, ConditionManifest, ToolManifest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -66,6 +66,9 @@ struct Manifest {
     /// Guides: `{ name, description, file }`.
     #[serde(default)]
     guides: Vec<GuideManifest>,
+    /// Command wait conditions (`runtime = "command"`).
+    #[serde(default)]
+    conditions: Vec<toml::Value>,
     /// Programs that must be on `PATH`, e.g. `uv`.
     #[serde(default)]
     requires: Vec<String>,
@@ -227,6 +230,8 @@ pub struct PluginStatus {
     pub tools: Vec<ToolInfo>,
     /// Guides it offers (name and description).
     pub guides: Vec<ToolInfo>,
+    /// Wait conditions it offers `sleep` (name and description).
+    pub conditions: Vec<ToolInfo>,
 }
 
 impl PluginStatus {
@@ -242,6 +247,7 @@ impl PluginStatus {
             instances: Vec::new(),
             tools: Vec::new(),
             guides: Vec::new(),
+            conditions: Vec::new(),
         }
     }
 }
@@ -254,6 +260,7 @@ pub struct PluginRegistry {
     processes: Vec<Arc<ProcessPlugin>>,
     tools: Vec<Arc<CommandTool>>,
     guides: Vec<Guide>,
+    conditions: Vec<Arc<CommandCondition>>,
     errors: Vec<String>,
 }
 
@@ -271,6 +278,15 @@ impl PluginRegistry {
     #[must_use]
     pub fn tools(&self) -> Vec<Arc<dyn PluginTool>> {
         self.tools.iter().map(|tool| Arc::clone(tool) as Arc<dyn PluginTool>).collect()
+    }
+
+    /// The wait conditions plugins offer.
+    #[must_use]
+    pub fn conditions(&self) -> Vec<Arc<dyn PluginCondition>> {
+        self.conditions
+            .iter()
+            .map(|condition| Arc::clone(condition) as Arc<dyn PluginCondition>)
+            .collect()
     }
 
     /// The guides plugins offer.
@@ -319,6 +335,13 @@ impl PluginRegistry {
         status.checked(result);
         status.log(channel.plugin());
         Some(status.clone())
+    }
+
+    /// Stop (re)starting plugin processes, without waiting for calls in progress.
+    pub fn retire(&self) {
+        for process in &self.processes {
+            process.retire();
+        }
     }
 
     /// Ask every plugin process to exit.
@@ -510,6 +533,14 @@ fn load_command_plugin(
             .map_err(|error| format!("invalid [[tools]] entry: {error}"))?;
         tools.push(CommandTool::new(&manifest.id, dir, tool, env.clone())?);
     }
+    let mut conditions = Vec::with_capacity(manifest.conditions.len());
+    for raw in &manifest.conditions {
+        let condition: ConditionManifest = raw
+            .clone()
+            .try_into()
+            .map_err(|error| format!("invalid [[conditions]] entry: {error}"))?;
+        conditions.push(CommandCondition::new(&manifest.id, dir, condition, env.clone())?);
+    }
     let mut guides = Vec::with_capacity(manifest.guides.len());
     for guide in &manifest.guides {
         if guide.file.contains("..") || Path::new(&guide.file).is_absolute() {
@@ -527,10 +558,17 @@ fn load_command_plugin(
             content,
         });
     }
-    if tools.is_empty() && guides.is_empty() {
-        status.note = Some("no [[tools]] or [[guides]] in plugin.toml".to_owned());
+    if tools.is_empty() && guides.is_empty() && conditions.is_empty() {
+        status.note = Some("no [[tools]], [[conditions]] or [[guides]] in plugin.toml".to_owned());
         return Ok(());
     }
+    status.conditions = conditions
+        .iter()
+        .map(|condition| ToolInfo {
+            name: condition.name().to_owned(),
+            description: condition.description().to_owned(),
+        })
+        .collect();
     status.provides.push("tools".to_owned());
     status.tools = tools
         .iter()
@@ -546,8 +584,15 @@ fn load_command_plugin(
             description: guide.description.clone(),
         })
         .collect();
-    tracing::info!(plugin = %manifest.id, tools = tools.len(), guides = guides.len(), "command plugin loaded");
+    tracing::info!(
+        plugin = %manifest.id,
+        tools = tools.len(),
+        conditions = conditions.len(),
+        guides = guides.len(),
+        "command plugin loaded"
+    );
     registry.tools.extend(tools.into_iter().map(Arc::new));
+    registry.conditions.extend(conditions.into_iter().map(Arc::new));
     registry.guides.extend(guides);
     Ok(())
 }

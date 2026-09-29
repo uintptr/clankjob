@@ -27,6 +27,7 @@ pub mod waits;
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_channels.sql"),
+    include_str!("../migrations/0003_approvals_and_checks.sql"),
 ];
 
 /// How long a connection waits for a lock held by another connection before failing.

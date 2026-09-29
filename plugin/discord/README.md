@@ -103,6 +103,90 @@ Errors come back as JSON-RPC errors with `data.retryable`, so the server knows
 whether to try again (rate limits, 5xx, network) or give up (bad token, missing
 permission).
 
+## Design
+
+A **human channel** plugin: it has no LLM tools or wait conditions, only `HumanChannel`.
+It lives in `plugin/discord/` as an external Python plugin (standard library only,
+Python 3.11+) that implements the protocol of [design §9.8](../../docs/design.md), with tests against a fake Discord.
+The server loads it from `plugins_dir` and drives it through [design §10.3](../../docs/design.md). Its `validate_config`
+checks the whole setup with read-only calls: the token, that the channel is a text
+channel, the Message Content intent, the bot's effective permissions in the channel
+(roles and channel overwrites), and that each allowed responder is in the server and can
+reply in threads. The server runs it for every instance when plugins load and logs each
+problem with its fix; the Plugins page shows the result and can run it again ("Test
+now"); `check_config.py` runs it without the server and prints a checklist. Editing
+`config.toml` reloads the plugin by itself ([design §9.4](../../docs/design.md)); a new token in the environment needs a
+server restart.
+
+### Configuration
+
+Instances go in `plugin/discord/config.toml` (git-ignored; `config.example.toml` is the
+template) and are validated against `schema.json`:
+
+```toml
+[instances.discord_joe]
+bot_token = { secret = "discord_bot_token" }
+channel_id = "123456789012345678"
+allowed_responders = ["234567890123456789"]   # only these users can answer
+mention = true                                # ping them on questions and approvals
+# poll_interval = "20s"
+# notify_on = ["completed", "failed", "budget_exceeded"]
+```
+
+Links back to a case come from the server's `public_url`, passed as `case_url` in each
+request, so the plugin needs no URL of its own. `validate_config` and `healthcheck`
+check the token (`GET /users/@me`) and that the channel is visible.
+
+### Messages
+
+A question opens a **thread** on itself; a reply in the thread is the answer. Scoping
+replies to a thread is what keeps concurrent questions apart, with nothing to match up.
+
+```
+@joe
+**Electrician quote** needs your input
+Bob needs a photo of the electrical panel before confirming the price. Can you send one?
+-# Reply in the thread to answer
+<https://clank.acme.com/#/cases/01J9…>
+```
+
+An approval is answered with a **reaction**: the bot seeds ✅ and ❌, and a tap by an
+allowed responder decides. Editing the proposed action stays a web-only feature.
+
+````
+@joe
+**Electrician quote** wants your approval
+Send an email to bob@sparkyelectric.ca
+```
+{ "to": ["bob@sparkyelectric.ca"], "subject": "Quote request: 50A EV charger circuit" }
+```
+-# React ✅ to approve or ❌ to reject. To edit it first, use the web UI.
+````
+
+After resolution the bot edits the message with a status line ("Answered via web by
+joe", "No longer needed", "Case cancelled") and closes the question's thread.
+
+Every message sets `allowed_mentions` to the allowed responders only: questions are
+written by the LLM, and an `@everyone` in one must stay plain text.
+
+### Talking to Discord
+
+- **REST only**, polled: no gateway WebSocket and no public endpoint (`urllib`).
+- The poll cursor maps each open thread to the last message seen in it; approvals are
+  checked by reading the message's reactions.
+- Attachments are returned as links, and the host downloads them at once because
+  Discord CDN links expire.
+- Rate limits: short `429` waits are slept through; longer ones come back as retryable
+  errors so the host backs off. One or two API calls per open request per poll.
+- The bot needs the **Message Content** intent to read thread replies; an empty reply
+  from a responder is reported as a warning pointing at it.
+
+### Later: buttons
+
+Approve/Reject buttons need Discord **Interactions**, which call a public HTTPS endpoint.
+They would come in as a push source, written to a durable inbox table and resolved through
+the same answer path ([design §19](../../docs/design.md)). Reactions remain the fallback.
+
 ## Development
 
 Standard library only, Python 3.11+.

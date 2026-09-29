@@ -321,6 +321,10 @@ textarea {
     }
 }
 
+.hint.bad {
+    color: var(--human);
+}
+
 .checks-list {
     margin: 8px 0 0;
     padding: 0;
@@ -908,6 +912,60 @@ pre.raw {
 
 .ask .who a {
     color: inherit;
+}
+
+.approval > .hint {
+    display: block;
+    padding: 0 16px;
+    color: var(--muted);
+    font-size: 12.5px;
+}
+
+.approval-args {
+    display: grid;
+    gap: 8px;
+    margin: 10px 0;
+    padding: 0 16px;
+}
+
+.approval-args .arg {
+    display: grid;
+    grid-template-columns: minmax(70px, max-content) 1fr;
+    gap: 4px 12px;
+    align-items: start;
+}
+
+.approval-args .key {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.approval-args .value {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.approval-args input:not([type="checkbox"]),
+.approval-args textarea,
+.approval .box input[name="comment"] {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--border-in);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--ink);
+    font: inherit;
+}
+
+.approval .box input[name="comment"] {
+    margin-bottom: 8px;
+}
+
+@media (max-width: 600px) {
+    .approval-args .arg {
+        grid-template-columns: 1fr;
+    }
 }
 
 .ask .q {
