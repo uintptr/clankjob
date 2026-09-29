@@ -19,6 +19,7 @@ is never overwritten.
     python3 deploy.py ~/clankjob
     python3 deploy.py ~/clankjob --configure email      # configure one plugin later
     python3 deploy.py ~/clankjob --yes                  # no questions: defaults only
+    cd ~/clankjob && python3 deploy.py                  # from inside a setup: update it
 """
 
 import argparse
@@ -317,8 +318,17 @@ def configure_plugin(plugin: Path, asker: Asker, env: dict[str, str]) -> dict[st
 # ---------------------------------------------------------------- main
 
 
+def default_target(here: Path) -> Path:
+    """Where to set up when no directory is given: here when this is a setup already (so
+    a rerun from inside it updates it), else a new ./clankjob."""
+    if (here / "clankjob.toml").is_file() and (here / "compose.yaml").is_file():
+        return here
+    return here / "clankjob"
+
+
 def setup(args: argparse.Namespace, asker: Asker, run: Callable[[list[str]], int]) -> None:
-    target: Path = args.dir.expanduser().resolve()
+    target: Path = (args.dir or default_target(Path.cwd())).expanduser().resolve()
+    print(f"Setting up {target}")
     target.mkdir(parents=True, exist_ok=True)
     for directory in ("data", "prompts/profiles", "plugins"):
         (target / directory).mkdir(parents=True, exist_ok=True)
@@ -379,8 +389,8 @@ def setup(args: argparse.Namespace, asker: Asker, run: Callable[[list[str]], int
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("dir", type=Path, nargs="?", default=Path(
-        "clankjob"), help="where to set up (default ./clankjob)")
+    parser.add_argument("dir", type=Path, nargs="?",
+                        help="where to set up (default: here if this is a setup already, else ./clankjob)")
     parser.add_argument("--ref", default="main", help="branch, tag or commit to take the plugins from (default main)")
     parser.add_argument("--source", type=Path, help="a local clankjob checkout instead of downloading")
     parser.add_argument("--image-tag", default="latest", help="image tag, e.g. 1.2 (default latest)")

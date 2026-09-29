@@ -124,6 +124,15 @@ class FilesTests(unittest.TestCase):
 
 class SetupTests(unittest.TestCase):
 
+    def test_without_a_directory_a_setup_updates_itself_and_elsewhere_gets_a_new_one(self) -> None:
+        with tempfile.TemporaryDirectory() as work:
+            here = Path(work)
+            self.assertEqual(here / "clankjob", deploy.default_target(here))
+            (here / "compose.yaml").write_text("services: {}\n")
+            self.assertEqual(here / "clankjob", deploy.default_target(here))
+            (here / "clankjob.toml").write_text("")
+            self.assertEqual(here, deploy.default_target(here))
+
     def test_a_full_setup_then_a_rerun_that_keeps_everything(self) -> None:
         # Arrange
         with tempfile.TemporaryDirectory() as work:

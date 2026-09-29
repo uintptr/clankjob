@@ -34,7 +34,9 @@ creates:
 ```
 
 Run it again at any time to update the plugins or configure one you skipped
-(`--configure email`); it never overwrites a setting or secret you already have. Other
+(`--configure email`); it never overwrites a setting or secret you already have. Run
+from inside a setup, it updates that setup (`cd ~/clankjob && python3 deploy.py`); from
+anywhere else, give the directory, or it creates a new one in `./clankjob`. Other
 options: `--ref v1.2.3` (plugins of a release), `--image-tag 1.2`, `--port 8081`,
 `--source ~/src/clankjob` (a local checkout), `--yes` (no questions). Then:
 
