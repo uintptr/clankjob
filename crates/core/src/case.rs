@@ -98,6 +98,9 @@ pub struct NewCase {
     pub budgets: Budgets,
     /// Instructions the first activation already follows (design §7.5).
     pub instructions: Vec<NewInstruction>,
+    /// Channels its questions go to besides the web UI (design §10.4); `None` uses the
+    /// server's default.
+    pub human_channels: Option<Vec<String>>,
 }
 
 /// Instruction text to add to a case.
@@ -153,6 +156,8 @@ pub struct Case {
     pub result: Option<Value>,
     /// Summary given to `complete`, or reason given to `fail`.
     pub outcome: Option<String>,
+    /// Channels its questions and notifications go to besides the web UI.
+    pub human_channels: Vec<String>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// Last modification time.

@@ -51,6 +51,9 @@ pub(crate) fn change_state(
         storage::cases::update_state(connection, &case.id, to, now)?;
         let body = EventBody::StateChanged { from: case.state, to };
         storage::events::append_event(connection, &case.id, activation_id, &body, now)?;
+        if matches!(to, CaseState::Completed | CaseState::Failed) {
+            crate::channels::queue_finished(connection, &case.id, now)?;
+        }
     }
     Ok(())
 }
@@ -72,7 +75,7 @@ fn wake(connection: &Connection, case: &Case, reason: WakeReason, now: DateTime<
     }
     storage::events::append_event(connection, &case.id, None, &EventBody::Wake(reason), now)?;
     storage::waits::cancel_waits(connection, &case.id)?;
-    storage::human::close_open_requests(connection, &case.id, HumanRequestStatus::Superseded, now)?;
+    crate::channels::close_requests(connection, &case.id, HumanRequestStatus::Superseded, now)?;
     storage::queue::enqueue(connection, &case.id, now)?;
     Ok(())
 }
@@ -88,11 +91,14 @@ fn answer_open_request(
         return Err(EngineError::AlreadyResolved(request.id.clone()));
     }
     storage::waits::resolve_waits_of_kind(connection, &request.case_id, HUMAN_INPUT_KIND, WaitStatus::Fired)?;
+    let outcome = serde_json::json!({ "status": "answered", "via": answer.via, "responder": answer.responder });
+    crate::channels::queue_resolution(connection, &request.case_id, &request.id, &outcome, now)?;
     let case = load_case(connection, &request.case_id)?;
     let reason = WakeReason::HumanAnswer {
         request_id: request.id.clone(),
         question: request.question.clone(),
         answer: answer.text.to_owned(),
+        via: Some(answer.via.to_owned()),
     };
     wake(connection, &case, reason, now)
 }
@@ -296,7 +302,7 @@ pub fn cancel_case(connection: &mut Connection, case_id: &CaseId, now: DateTime<
         });
     }
     storage::waits::cancel_waits(&transaction, case_id)?;
-    storage::human::close_open_requests(&transaction, case_id, HumanRequestStatus::Cancelled, now)?;
+    crate::channels::close_requests(&transaction, case_id, HumanRequestStatus::Cancelled, now)?;
     storage::queue::remove(&transaction, case_id)?;
     change_state(&transaction, &case, CaseState::Cancelled, None, now)?;
     commit(transaction)?;
@@ -380,7 +386,7 @@ pub fn claim_next(
         // A case queued again while it was sleeping or finished was woken by something
         // newer (e.g. a message during its last activation): what it waited for is moot.
         storage::waits::cancel_waits(&transaction, &case.id)?;
-        storage::human::close_open_requests(&transaction, &case.id, HumanRequestStatus::Superseded, now)?;
+        crate::channels::close_requests(&transaction, &case.id, HumanRequestStatus::Superseded, now)?;
         change_state(&transaction, &case, CaseState::Running, None, now)?;
         let mut case = load_case(&transaction, &case.id)?;
         case.usage.activations = case.usage.activations.saturating_add(1);
@@ -413,6 +419,7 @@ mod tests {
             model: None,
             budgets: Budgets::default(),
             instructions: Vec::new(),
+            human_channels: None,
         }
     }
 

@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use crate::{Result, from_millis, parse_enum, to_millis};
 
-const COLUMNS: &str =
-    "id, title, goal, owner, profile, llm, model, state, budgets, usage, result, outcome, created_at, updated_at";
+const COLUMNS: &str = "id, title, goal, owner, profile, llm, model, state, budgets, usage, result, outcome, \
+                       created_at, updated_at, human_channels";
 
 /// Filter for [`list_cases`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,6 +27,7 @@ fn case_from_row(row: &Row<'_>) -> Result<Case> {
     let budgets: String = row.get(8)?;
     let usage: String = row.get(9)?;
     let result: Option<String> = row.get(10)?;
+    let human_channels: String = row.get(14)?;
     Ok(Case {
         id: CaseId::from_string(row.get::<_, String>(0)?),
         title: row.get(1)?,
@@ -40,6 +41,7 @@ fn case_from_row(row: &Row<'_>) -> Result<Case> {
         usage: serde_json::from_str(&usage)?,
         result: result.as_deref().map(serde_json::from_str).transpose()?,
         outcome: row.get(11)?,
+        human_channels: serde_json::from_str(&human_channels)?,
         created_at: from_millis(row.get(12)?)?,
         updated_at: from_millis(row.get(13)?)?,
     })
@@ -75,12 +77,13 @@ pub fn insert_case(connection: &Connection, id: &CaseId, new_case: &NewCase, now
         usage: Usage::default(),
         result: None,
         outcome: None,
+        human_channels: new_case.human_channels.clone().unwrap_or_default(),
         created_at: now,
         updated_at: now,
     };
     connection.execute(
         &format!(
-            "INSERT INTO cases ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?11)"
+            "INSERT INTO cases ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?11, ?12)"
         ),
         params![
             case.id.as_str(),
@@ -94,6 +97,7 @@ pub fn insert_case(connection: &Connection, id: &CaseId, new_case: &NewCase, now
             serde_json::to_string(&case.budgets)?,
             serde_json::to_string(&case.usage)?,
             to_millis(now),
+            serde_json::to_string(&case.human_channels)?,
         ],
     )?;
     Ok(case)

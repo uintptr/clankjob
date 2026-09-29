@@ -14,6 +14,7 @@ pub use rusqlite::{Connection, Transaction};
 
 pub mod activations;
 pub mod cases;
+pub mod channels;
 pub mod events;
 pub mod files;
 pub mod human;
@@ -23,7 +24,10 @@ pub mod queue;
 pub mod waits;
 
 /// Schema migrations, applied in order. The index + 1 is stored in `PRAGMA user_version`.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_channels.sql"),
+];
 
 /// How long a connection waits for a lock held by another connection before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -195,6 +199,7 @@ pub(crate) mod test_support {
             model: None,
             budgets: Budgets::default(),
             instructions: Vec::new(),
+            human_channels: Some(vec!["discord_joe".to_owned()]),
         };
         crate::cases::insert_case(connection, &id, &new_case, time(0)).unwrap();
         id

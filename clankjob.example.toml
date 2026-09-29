@@ -34,6 +34,14 @@ data_dir = "./data"
 # Where `{ secret = "…" }` references are read from.
 # secrets_dir = "/run/secrets"
 
+# Plugins, one directory each (see plugin/discord/README.md). With the Discord plugin
+# configured, questions from cases are also posted to Discord and can be answered there.
+# plugins_dir = "./plugin"
+
+# Chat channels new cases send questions to, besides the web UI. Omitted: every channel
+# that loaded. The New case form lets you change it per case.
+# default_human_channels = ["discord_joe"]
+
 # Threads running activations. Each one can run one case at a time.
 workers = 4
 

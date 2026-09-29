@@ -192,6 +192,13 @@ pub struct Config {
     /// Directory holding Docker secrets.
     #[serde(default = "default_secrets_dir")]
     pub secrets_dir: PathBuf,
+    /// Directory with one sub-directory per plugin (design §9.3).
+    #[serde(default)]
+    pub plugins_dir: Option<PathBuf>,
+    /// Channels questions go to for cases that don't choose; omitted means every
+    /// configured channel.
+    #[serde(default)]
+    pub default_human_channels: Option<Vec<String>>,
     /// Worker threads running activations.
     #[serde(default = "default_workers")]
     pub workers: usize,

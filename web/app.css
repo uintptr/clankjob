@@ -252,6 +252,82 @@ textarea {
     font-variant-numeric: tabular-nums;
 }
 
+.btn .n.bad {
+    background: var(--human-soft);
+    color: var(--human);
+}
+
+/* ---- plugins ---------------------------------------------------------- */
+
+.plugin-instance {
+    margin-top: 10px;
+    padding: 12px 14px;
+}
+
+.plugin-instance .line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+}
+
+.plugin-instance .links {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
+}
+
+.plugin-instance .links .hint {
+    color: var(--muted);
+    font-size: 12.5px;
+}
+
+.plugin-instance .issues {
+    margin: 6px 0 0;
+    padding-left: 18px;
+}
+
+.plugin-instance .issues li + li {
+    margin-top: 6px;
+}
+
+.plugin-instance .issues .fix {
+    color: var(--ink2);
+    font-size: 13px;
+}
+
+.checks-list {
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 13.5px;
+}
+
+.checks-list li {
+    display: flex;
+    gap: 8px;
+    padding: 2px 0;
+}
+
+.checks-list .mark {
+    width: 1em;
+    font-weight: 700;
+    text-align: center;
+}
+
+.checks-list .ok .mark {
+    color: var(--done);
+}
+
+.checks-list .bad .mark {
+    color: var(--human);
+}
+
+.checks-list .warn .mark {
+    color: var(--await);
+}
+
 /* ---- status bar ------------------------------------------------------- */
 
 .topwrap {
@@ -860,6 +936,27 @@ pre.raw {
 .field input[type="file"] {
     padding: 6px;
     font-size: 13px;
+}
+
+.field .checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+}
+
+.field .check {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.field .check input[type="checkbox"] {
+    display: inline-block;
+    width: auto;
+    margin: 0;
+    accent-color: var(--accent, currentColor);
 }
 
 .box textarea,

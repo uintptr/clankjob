@@ -9,6 +9,7 @@ use clankjob_core::file::FileKind;
 use clankjob_core::human::HumanRequestStatus;
 use clankjob_core::ids::{CaseId, FileId, HumanRequestId, InstructionId};
 use clankjob_engine::{Engine, EngineError};
+use clankjob_plugin_host::{InstanceState, InstanceStatus};
 use clankjob_storage::cases::CaseFilter;
 use clankjob_storage::human::Answer;
 use clankjob_storage::{self as storage, Connection, StorageError};
@@ -21,6 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::catalog::Catalog;
+use crate::plugins::PluginManager;
 
 /// Largest request body accepted, in bytes, except for file uploads.
 const MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
@@ -86,6 +88,7 @@ impl From<EngineError> for AppError {
             EngineError::AlreadyResolved(_) | EngineError::InvalidState { .. } => Self::Conflict(error.to_string()),
             EngineError::UnknownLlm(_)
             | EngineError::UnknownProfile(_)
+            | EngineError::UnknownChannel(_)
             | EngineError::InvalidFile(_)
             | EngineError::InvalidInstruction(_) => Self::BadRequest(error.to_string()),
             EngineError::FileStorage(error) => {
@@ -120,17 +123,26 @@ pub struct AppState {
     tokens: Vec<SecretString>,
     defaults: CaseDefaults,
     catalog: Arc<Catalog>,
+    plugins: Arc<PluginManager>,
 }
 
 impl AppState {
-    /// Bundle the engine, accepted API tokens, case defaults and the model catalog.
+    /// Bundle the engine, accepted API tokens, case defaults, the model catalog and the
+    /// plugins.
     #[must_use]
-    pub fn new(engine: Engine, tokens: Vec<SecretString>, defaults: CaseDefaults, catalog: Arc<Catalog>) -> Self {
+    pub fn new(
+        engine: Engine,
+        tokens: Vec<SecretString>,
+        defaults: CaseDefaults,
+        catalog: Arc<Catalog>,
+        plugins: Arc<PluginManager>,
+    ) -> Self {
         Self {
             engine,
             tokens,
             defaults,
             catalog,
+            plugins,
         }
     }
 
@@ -217,6 +229,9 @@ struct CreateCaseBody {
     budgets: Option<Budgets>,
     #[serde(default)]
     instructions: Vec<InstructionBody>,
+    /// Channels besides the web UI; omitted uses the server's default, `[]` means none.
+    #[serde(default)]
+    human_channels: Option<Vec<String>>,
 }
 
 /// An instruction in `POST /cases`, `POST` or `PUT /cases/{id}/instructions`.
@@ -250,6 +265,7 @@ fn create_case(state: &AppState, request: &Request) -> Handled {
         model: body.model,
         budgets: body.budgets.unwrap_or(state.defaults.budgets),
         instructions: body.instructions.into_iter().map(InstructionBody::into_new).collect(),
+        human_channels: body.human_channels,
     };
     let case = state.engine.create_case(&mut state.connect()?, &new_case)?;
     Ok(Response::json(&case).with_status_code(201))
@@ -461,7 +477,78 @@ fn get_prompt(state: &AppState, name: &str) -> Handled {
 fn reload(state: &AppState) -> Response {
     let prompts = state.engine.reload_prompts();
     tracing::info!(errors = prompts.errors().len(), "prompts reloaded through the API");
-    Response::json(&prompts_summary(&prompts))
+    let plugins = state.plugins.reload();
+    let mut summary = prompts_summary(&prompts);
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("plugin_errors".to_owned(), json!(plugins.errors()));
+    }
+    Response::json(&summary)
+}
+
+/// An instance's status with how its channel has been doing, and whether it needs a look.
+fn instance_json(state: &AppState, instance: &InstanceStatus) -> (Value, bool) {
+    let activity = state.engine.channels().activity(&instance.name);
+    let attention = instance.state == InstanceState::Error
+        || instance.error.is_some()
+        || !instance.problems.is_empty()
+        || (instance.state == InstanceState::On && activity.failing());
+    let mut value = json!(instance);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("activity".to_owned(), json!(activity));
+        object.insert("attention".to_owned(), Value::Bool(attention));
+    }
+    (value, attention)
+}
+
+/// Every plugin found, its instances, and whether anything needs a look (design §14.6).
+fn plugins_summary(state: &AppState) -> Value {
+    let mut attention = false;
+    let plugins: Vec<Value> = state
+        .plugins
+        .current()
+        .statuses()
+        .iter()
+        .map(|plugin| {
+            attention |= plugin.error.is_some();
+            let instances: Vec<Value> = plugin
+                .instances
+                .iter()
+                .map(|instance| {
+                    let (value, needs_look) = instance_json(state, instance);
+                    attention |= needs_look;
+                    value
+                })
+                .collect();
+            let mut value = json!(plugin);
+            if let Some(object) = value.as_object_mut() {
+                object.insert("instances".to_owned(), Value::Array(instances));
+            }
+            value
+        })
+        .collect();
+    json!({
+        "plugins_dir": state.plugins.dir().map(|dir| dir.display().to_string()),
+        "attention": attention,
+        "plugins": plugins,
+    })
+}
+
+/// Check an instance again, e.g. after fixing a permission in Discord.
+fn test_instance(state: &AppState, name: &str) -> Handled {
+    let registry = state.plugins.current();
+    if let Some(tested) = registry.test(name) {
+        return Ok(Response::json(&instance_json(state, &tested).0));
+    }
+    match registry.instance(name) {
+        None => Err(AppError::NotFound(format!("plugin instance `{name}` not found"))),
+        Some(instance) if instance.state == InstanceState::Off => Err(AppError::Conflict(format!(
+            "`{name}` is turned off (enabled = false in its config.toml)"
+        ))),
+        Some(instance) => Err(AppError::Conflict(format!(
+            "`{name}` did not load: {}",
+            instance.error.unwrap_or_default()
+        ))),
+    }
 }
 
 fn route(state: &AppState, request: &Request) -> Handled {
@@ -496,9 +583,16 @@ fn route(state: &AppState, request: &Request) -> Handled {
         (GET) (/api/v1/llms) => {
             Ok(Response::json(&json!({ "default_llm": state.defaults.llm, "llms": state.catalog.choices() })))
         },
+        (GET) (/api/v1/channels) => { Ok(Response::json(&json!({ "channels": state.engine.channels().list() }))) },
         (GET) (/api/v1/prompts) => { Ok(Response::json(&prompts_summary(&state.engine.prompts()))) },
         (GET) (/api/v1/prompts/profiles/{name: String}) => { get_prompt(state, &format!("profiles/{name}")) },
         (GET) (/api/v1/prompts/{name: String}) => { get_prompt(state, &name) },
+        (GET) (/api/v1/plugins) => { Ok(Response::json(&plugins_summary(state))) },
+        (POST) (/api/v1/plugins/reload) => {
+            state.plugins.reload();
+            Ok(Response::json(&plugins_summary(state)))
+        },
+        (POST) (/api/v1/plugin-instances/{name: String}/test) => { test_instance(state, &name) },
         (POST) (/api/v1/admin/reload) => { Ok(reload(state)) },
         _ => Err(AppError::NotFound(format!("no route for {} {}", request.method(), request.url())))
     )
@@ -570,7 +664,14 @@ mod tests {
             let db = Db::new(dir.path().join("test.db"));
             db.migrate().unwrap();
             let providers = HashMap::from([("default".to_owned(), Arc::new(UnusedProvider) as Arc<dyn LlmProvider>)]);
-            let engine = Engine::new(db, providers, None, dir.path().join("files"), EngineSettings::default());
+            let engine = Engine::new(
+                db,
+                providers,
+                None,
+                dir.path().join("files"),
+                clankjob_engine::channels::Channels::default(),
+                EngineSettings::default(),
+            );
             let defaults = CaseDefaults {
                 llm: "default".to_owned(),
                 profile: None,
@@ -583,7 +684,8 @@ mod tests {
                 provider: None,
             }]);
             let tokens = vec![SecretString::from("token".to_owned())];
-            let state = AppState::new(engine, tokens, defaults, Arc::new(catalog));
+            let plugins = Arc::new(PluginManager::new(None, dir.path().to_path_buf(), None, engine.clone()));
+            let state = AppState::new(engine, tokens, defaults, Arc::new(catalog), plugins);
             Self { state, _dir: dir }
         }
 
@@ -836,6 +938,24 @@ mod tests {
                 .iter()
                 .any(|event| event["payload"]["reason"] == "file_added")
         );
+    }
+
+    #[test]
+    fn channels_are_listed_and_unknown_ones_rejected() {
+        // Arrange
+        let api = TestApi::new();
+
+        // Act
+        let (listed, channels) = api.call("GET", "/api/v1/channels", None);
+        let body = json!({"title": "t", "goal": "g", "human_channels": ["discord_joe"]});
+        let (unknown, error) = api.call("POST", "/api/v1/cases", Some(body));
+        let (created, case) = api.call("POST", "/api/v1/cases", Some(json!({"title": "t", "goal": "g"})));
+
+        // Assert
+        assert_eq!((listed, channels), (200, json!({ "channels": [] })));
+        assert_eq!(unknown, 400);
+        assert_eq!(error["error"]["message"], "unknown human channel `discord_joe`");
+        assert_eq!((created, case["human_channels"].clone()), (201, json!([])));
     }
 
     #[test]

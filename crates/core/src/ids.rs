@@ -76,6 +76,10 @@ ulid_id!(
     /// Identifies an instruction of a case.
     InstructionId
 );
+ulid_id!(
+    /// Identifies a message queued for a human channel (design §10.3).
+    DeliveryId
+);
 
 #[cfg(test)]
 mod tests {

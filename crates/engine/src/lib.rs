@@ -21,6 +21,7 @@ use clankjob_storage::human::Answer;
 use clankjob_storage::{Connection, Db, StorageError};
 
 mod activation;
+pub mod channels;
 pub mod context;
 pub mod files;
 pub mod prompts;
@@ -28,6 +29,7 @@ mod scheduler;
 pub mod tools;
 pub mod transitions;
 
+use channels::Channels;
 use files::FileStore;
 use prompts::PromptSet;
 
@@ -60,6 +62,9 @@ pub enum EngineError {
     /// The case names a profile that does not exist.
     #[error("unknown profile `{0}`")]
     UnknownProfile(String),
+    /// The case names a human channel that is not configured.
+    #[error("unknown human channel `{0}`")]
+    UnknownChannel(String),
     /// No instruction of the case has this id.
     #[error("instruction {0} not found")]
     InstructionNotFound(InstructionId),
@@ -204,6 +209,7 @@ struct Shared {
     prompts: RwLock<Arc<PromptSet>>,
     prompts_dir: Option<PathBuf>,
     files: FileStore,
+    channels: Channels,
     settings: EngineSettings,
     signal: WorkSignal,
     shutdown: AtomicBool,
@@ -235,12 +241,14 @@ impl Engine {
     /// * `providers` - Configured LLMs by name
     /// * `prompts_dir` - Directory with prompt overrides, if any
     /// * `files_dir` - Directory holding the bytes of files added to cases
+    /// * `channels` - Human channels besides the web UI (design §10.3)
     /// * `settings` - Tuning knobs
     pub fn new(
         db: Db,
         providers: HashMap<String, Arc<dyn LlmProvider>>,
         prompts_dir: Option<PathBuf>,
         files_dir: PathBuf,
+        channels: Channels,
         settings: EngineSettings,
     ) -> Self {
         let prompts = prompts_dir
@@ -253,6 +261,7 @@ impl Engine {
                 prompts: RwLock::new(Arc::new(prompts)),
                 prompts_dir,
                 files: FileStore::new(files_dir),
+                channels,
                 settings,
                 signal: WorkSignal::default(),
                 shutdown: AtomicBool::new(false),
@@ -261,7 +270,7 @@ impl Engine {
         }
     }
 
-    /// Start the worker threads and the scheduler thread.
+    /// Start the worker threads, the scheduler thread and the channel thread.
     ///
     /// # Returns
     ///
@@ -286,6 +295,13 @@ impl Engine {
                 .name("scheduler".to_owned())
                 .spawn(move || scheduler_loop(&shared))?,
         );
+        // Always started: plugins can be loaded later, and it idles cheaply without them.
+        let shared = Arc::clone(&self.shared);
+        handles.push(
+            thread::Builder::new()
+                .name("channels".to_owned())
+                .spawn(move || channels::channel_loop(&shared))?,
+        );
         Ok(handles)
     }
 
@@ -299,6 +315,12 @@ impl Engine {
     #[must_use]
     pub fn db(&self) -> &Db {
         &self.shared.db
+    }
+
+    /// The configured human channels.
+    #[must_use]
+    pub fn channels(&self) -> &Channels {
+        &self.shared.channels
     }
 
     /// The prompt templates currently in use.
@@ -335,8 +357,9 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::UnknownLlm`] or [`EngineError::UnknownProfile`] if the case
-    /// refers to something that is not configured, [`EngineError::InvalidInstruction`] if its
+    /// Returns [`EngineError::UnknownLlm`], [`EngineError::UnknownProfile`] or
+    /// [`EngineError::UnknownChannel`] if the case refers to something that is not
+    /// configured, [`EngineError::InvalidInstruction`] if its
     /// instructions break a limit, or [`EngineError::Storage`].
     pub fn create_case(&self, connection: &mut Connection, new_case: &NewCase) -> Result<Case> {
         if !self.shared.providers.contains_key(&new_case.llm) {
@@ -350,7 +373,12 @@ impl Engine {
             return Err(EngineError::UnknownProfile(profile.to_owned()));
         }
         validate_instructions(new_case.instructions.iter().map(|i| (i.name.as_str(), i.content.as_str())))?;
-        let case = transitions::create_case(connection, new_case, Utc::now())?;
+        let human_channels = self.shared.channels.resolve(new_case.human_channels.as_deref())?;
+        let new_case = NewCase {
+            human_channels: Some(human_channels),
+            ..new_case.clone()
+        };
+        let case = transitions::create_case(connection, &new_case, Utc::now())?;
         self.shared.signal.notify();
         Ok(case)
     }
@@ -688,6 +716,36 @@ pub(crate) mod test_support {
             requeue_delay: Duration::ZERO,
             ..EngineSettings::default()
         };
-        Engine::new(test_db.db.clone(), providers, None, test_db.files_dir.clone(), settings)
+        Engine::new(
+            test_db.db.clone(),
+            providers,
+            None,
+            test_db.files_dir.clone(),
+            Channels::default(),
+            settings,
+        )
+    }
+
+    /// The same, with `channel` configured as `discord_joe`, the default channel.
+    pub fn engine_with_channels(
+        test_db: &TestDb,
+        provider: Arc<ScriptedProvider>,
+        channel: Arc<dyn clankjob_core::channel::HumanChannel>,
+    ) -> Engine {
+        let base = engine(test_db, provider);
+        let shared = &base.shared;
+        let channels = Channels::new(
+            std::collections::BTreeMap::from([("discord_joe".to_owned(), channel)]),
+            vec!["discord_joe".to_owned()],
+            Some("https://clank.example/".to_owned()),
+        );
+        Engine::new(
+            shared.db.clone(),
+            shared.providers.clone(),
+            None,
+            test_db.files_dir.clone(),
+            channels,
+            shared.settings.clone(),
+        )
     }
 }

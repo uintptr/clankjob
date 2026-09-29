@@ -298,6 +298,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "clankjob-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clankjob-core",
+ "humantime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "clankjob-server"
 version = "0.1.0"
 dependencies = [
@@ -306,6 +320,7 @@ dependencies = [
  "clankjob-core",
  "clankjob-engine",
  "clankjob-llm-openai",
+ "clankjob-plugin-host",
  "clankjob-storage",
  "humantime-serde",
  "rouille",

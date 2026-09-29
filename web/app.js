@@ -243,6 +243,10 @@ function updateCounts(cases) {
     );
 }
 
+function updatePluginAlert(attention) {
+    document.getElementById("plugin-alert").hidden = !attention;
+}
+
 function updateInboxCount(count) {
     const element = document.getElementById("inbox-count");
     element.hidden = count === 0;
@@ -256,9 +260,10 @@ function startGlobalPolling() {
     globalPolling = true;
     poll(async () => {
         if (!sessionToken) return;
-        const [{ human_requests: requests }, { cases }] = await Promise.all([api("/human-requests"), api("/cases?limit=1000")]);
+        const [{ human_requests: requests }, { cases }, plugins] = await Promise.all([api("/human-requests"), api("/cases?limit=1000"), api("/plugins")]);
         updateInboxCount(requests.length);
         updateCounts(cases);
+        updatePluginAlert(plugins.attention);
     }, 10000);
 }
 
@@ -344,10 +349,12 @@ function modelLabel(model) {
 async function newCaseDialog() {
     let profiles = [];
     let llms = { default_llm: "default", llms: [] };
+    let channels = [];
     try {
-        const [prompts, configured] = await Promise.all([api("/prompts"), api("/llms")]);
+        const [prompts, configured, humanChannels] = await Promise.all([api("/prompts"), api("/llms"), api("/channels")]);
         profiles = prompts.prompts.map((prompt) => prompt.name).filter((name) => name.startsWith("profiles/")).map((name) => name.slice("profiles/".length));
         llms = configured;
+        channels = humanChannels.channels;
     } catch (error) {
         report(error);
     }
@@ -426,6 +433,22 @@ async function newCaseDialog() {
     }
     renderInstructions();
 
+    // Questions always reach the web inbox; these add chat channels such as Discord.
+    const channelBoxes = channels.map((channel) => h("input", { type: "checkbox", value: channel.name, checked: channel.default }));
+    const channelField =
+        channels.length > 0 &&
+        h(
+            "div",
+            { class: "field" },
+            h("span", {}, "Also ask me on"),
+            h(
+                "div",
+                { class: "checks" },
+                channels.map((channel, index) => h("label", { class: "check" }, channelBoxes[index], h("span", { class: "mono" }, channel.name), h("span", { class: "muted" }, channel.plugin))),
+            ),
+            h("small", { class: "why" }, "Questions always show up in the inbox here too; the first answer wins."),
+        );
+
     const dialog = h("dialog", { class: "modal", "aria-labelledby": "new-case-title" });
     const close = () => {
         dialog.close();
@@ -457,6 +480,7 @@ async function newCaseDialog() {
             ),
             h("div", { class: llms.llms.length > 1 ? "two" : "" }, llms.llms.length > 1 && field("LLM", llmSelect), h("label", { class: "field" }, h("span", {}, "Model"), modelInput, modelHint)),
             h("div", { class: "field" }, h("span", {}, "Instructions"), instructionInput, instructionHint, instructionList),
+            channelField,
             suggestions,
             h(
                 "details",
@@ -487,6 +511,7 @@ async function newCaseDialog() {
         for (const key of ["max_activations", "max_turns_per_activation", "max_total_tokens"]) if (values[key]) budgets[key] = Number(values[key]);
         if (Object.keys(budgets).length) body.budgets = budgets;
         if (instructions.length) body.instructions = instructions;
+        if (channels.length) body.human_channels = channelBoxes.filter((box) => box.checked).map((box) => box.value);
         const created = await api("/cases", { method: "POST", body });
         close();
         toast("Case started. The agent is on it.");
@@ -718,7 +743,7 @@ function timelineRenderer(thread) {
             case "human_message":
                 return msg("human", "You", event, txt(reason.text));
             case "human_answer":
-                return msg("human", "You answered", event, h("div", { class: "txt muted" }, reason.question), txt(reason.answer));
+                return msg("human", reason.via && reason.via !== "web" ? `You answered on ${reason.via}` : "You answered", event, h("div", { class: "txt muted" }, reason.question), txt(reason.answer));
             case "condition_fired":
                 return msg("", "Woke up", event, txt(`The ${conditionName(reason.kind)} fired.`), reason.details.length > 0 && h("pre", { class: "raw" }, pretty(reason.details)));
             case "timed_out":
@@ -929,6 +954,7 @@ function caseDetail(pane, id) {
                 h("span", {}, "Owner ", h("b", {}, item.owner || "not set")),
                 h("span", {}, "Profile ", h("b", {}, item.profile || "none")),
                 h("span", {}, "Model ", h("b", {}, item.model ? `${item.llm} / ${item.model}` : item.llm)),
+                h("span", {}, "Asks via ", h("b", {}, ["web", ...(item.human_channels || [])].join(", "))),
                 h("span", {}, "Created ", h("b", {}, timeEl(item.created_at))),
                 h("span", {}, "Updated ", h("b", {}, timeEl(item.updated_at))),
             ),
@@ -1290,6 +1316,154 @@ function promptsView(view) {
     return () => {};
 }
 
+// ---------------------------------------------------------------- plugins
+
+const PLUGIN_STATES = {
+    on: ["completed", "On"],
+    off: ["", "Off"],
+    error: ["failed", "Error"],
+};
+
+function pluginStateChip(instance) {
+    if (instance.state === "on" && instance.attention) return h("span", { class: "chip waiting_for_human" }, h("i"), "Needs attention");
+    const [className, label] = PLUGIN_STATES[instance.state] || ["", instance.state];
+    return h("span", { class: `chip ${className}` }, h("i"), label);
+}
+
+/** Split "what: fix" as the plugin reports it. */
+function issueLine(text) {
+    const at = text.indexOf(": ");
+    if (at < 0) return h("li", {}, text);
+    return h("li", {}, h("b", {}, text.slice(0, at)), h("div", { class: "fix" }, text.slice(at + 2)));
+}
+
+function instanceCard(instance, onTest) {
+    const report = instance.report || {};
+    const activity = instance.activity || {};
+    const recentWarning = activity.last_warning_at && Date.now() - new Date(activity.last_warning_at).getTime() < 3600_000;
+    const summary = [report.bot && `bot ${report.bot}`, report.channel && `#${report.channel}`].filter(Boolean).join(" in ");
+    const findings = instance.findings || [];
+    const testButton =
+        instance.state === "on" &&
+        h(
+            "button",
+            {
+                class: "btn sm",
+                type: "button",
+                onclick: async (event) => {
+                    const button = event.currentTarget;
+                    button.disabled = true;
+                    button.textContent = "Testing…";
+                    try {
+                        const tested = await api(`/plugin-instances/${encodeURIComponent(instance.name)}/test`, { method: "POST" });
+                        toast(tested.attention ? `${instance.name} still needs attention.` : `${instance.name} looks good.`, tested.attention ? "bad" : "");
+                        onTest();
+                    } catch (error) {
+                        report(error);
+                        onTest();
+                    }
+                },
+            },
+            "Test now",
+        );
+    return h(
+        "div",
+        { class: "card plugin-instance" },
+        h(
+            "div",
+            { class: "line" },
+            pluginStateChip(instance),
+            h("b", { class: "mono" }, instance.name),
+            summary && h("span", { class: "muted" }, summary),
+            h("div", { class: "links" }, instance.checked_at && h("span", { class: "hint" }, "checked ", timeEl(instance.checked_at)), testButton),
+        ),
+        instance.state === "off" && h("p", { class: "muted" }, "Turned off with enabled = false in its config.toml."),
+        instance.error && h("div", { class: "notice bad" }, h("div", { class: "grow" }, instance.error)),
+        instance.problems.length > 0 && h("div", { class: "notice bad" }, h("div", { class: "grow" }, h("b", {}, "Not working until fixed"), h("ul", { class: "issues" }, instance.problems.map(issueLine)))),
+        instance.warnings.length > 0 && h("div", { class: "notice" }, h("div", { class: "grow" }, h("b", {}, "Worth fixing"), h("ul", { class: "issues" }, instance.warnings.map(issueLine)))),
+        instance.state === "on" &&
+            activity.last_error &&
+            h(
+                "div",
+                { class: activity.last_error_at > (activity.last_ok_at || "") ? "notice bad" : "notice plain" },
+                h("div", { class: "grow" }, h("b", {}, "Last error "), timeEl(activity.last_error_at), activity.last_ok_at ? h("span", {}, " · last success ", timeEl(activity.last_ok_at)) : "", h("pre", { class: "raw" }, activity.last_error)),
+            ),
+        instance.state === "on" && recentWarning && h("div", { class: "notice" }, h("div", { class: "grow" }, h("b", {}, "Reported "), timeEl(activity.last_warning_at), h("pre", { class: "raw" }, activity.last_warning))),
+        findings.length > 0 &&
+            h(
+                "details",
+                { class: "more" },
+                h("summary", {}, `All checks (${findings.filter((finding) => finding.ok).length}/${findings.length} passed)`),
+                h(
+                    "ul",
+                    { class: "checks-list" },
+                    findings.map((finding) =>
+                        h("li", { class: finding.ok ? "ok" : finding.required ? "bad" : "warn" }, h("span", { class: "mark" }, finding.ok ? "✓" : finding.required ? "✗" : "!"), h("span", {}, finding.what)),
+                    ),
+                ),
+            ),
+    );
+}
+
+function pluginsView(view) {
+    const reloadButton = h("button", { class: "btn sm", type: "button", onclick: () => reload().catch(report) }, "Reload plugins");
+    const body = pageFrame(view, "Plugins", "Loaded from the plugins directory. Edit a plugin's files and the server reloads it within seconds.", reloadButton);
+    const content = h("div");
+    body.append(content);
+    // Re-rendering while a test runs would reset its button, so polling waits for it.
+    let busy = false;
+
+    function render(summary) {
+        updatePluginAlert(summary.attention);
+        if (!summary.plugins_dir) {
+            content.replaceChildren(emptyCard("No plugins directory", "Set plugins_dir in clankjob.toml (e.g. \"./plugin\") to load plugins such as Discord."));
+            return;
+        }
+        if (!summary.plugins.length) {
+            content.replaceChildren(emptyCard("No plugins found", `Nothing with a plugin.toml in ${summary.plugins_dir}.`));
+            return;
+        }
+        content.replaceChildren(
+            h("p", { class: "muted mono" }, summary.plugins_dir),
+            ...summary.plugins.map((plugin) =>
+                section(
+                    plugin.name || plugin.id,
+                    [plugin.id, plugin.version && `v${plugin.version}`, plugin.runtime, ...plugin.provides.map((what) => what.replace("_", " "))].filter(Boolean).join(" · "),
+                    plugin.error && h("div", { class: "notice bad" }, h("div", { class: "grow" }, h("b", {}, "Did not load. "), plugin.error)),
+                    plugin.note && h("div", { class: "notice plain" }, h("div", { class: "grow" }, plugin.note)),
+                    plugin.instances.map((instance) =>
+                        instanceCard(instance, () => {
+                            busy = false;
+                            refresh().catch(report);
+                        }),
+                    ),
+                ),
+            ),
+        );
+        for (const button of content.querySelectorAll(".plugin-instance button")) button.addEventListener("click", () => (busy = true));
+    }
+
+    async function refresh() {
+        if (busy) return;
+        render(await api("/plugins"));
+    }
+
+    async function reload() {
+        reloadButton.disabled = true;
+        reloadButton.textContent = "Reloading…";
+        try {
+            const summary = await api("/plugins/reload", { method: "POST" });
+            toast(summary.attention ? "Plugins reloaded; some need attention." : "Plugins reloaded.", summary.attention ? "bad" : "");
+            render(summary);
+        } finally {
+            reloadButton.disabled = false;
+            reloadButton.textContent = "Reload plugins";
+        }
+    }
+
+    return poll(refresh, 5000);
+}
+
 // ---------------------------------------------------------------- shell
 
 let current = { section: null, dispose: null, select: null };
@@ -1327,6 +1501,9 @@ function route() {
             break;
         case "prompts":
             current = { section, dispose: promptsView(view), select: null };
+            break;
+        case "plugins":
+            current = { section, dispose: pluginsView(view), select: null };
             break;
         default:
             current = { section: null, dispose: null, select: null };

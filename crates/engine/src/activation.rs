@@ -119,6 +119,7 @@ fn ask_human(connection: &Connection, case: &Case, args: &AskHumanArgs) -> Resul
     };
     let request_id = HumanRequestId::generate();
     storage::human::insert_request(connection, &request_id, &case.id, &args.question, now)?;
+    crate::channels::queue_question(connection, case, &request_id, &args.question, now)?;
     let human_input = WaitCondition {
         id: WaitConditionId::generate(),
         case_id: case.id.clone(),
@@ -592,6 +593,7 @@ mod tests {
             model: None,
             budgets,
             instructions: Vec::new(),
+            human_channels: None,
         };
         engine.create_case(connection, &new_case).unwrap()
     }
@@ -774,6 +776,7 @@ mod tests {
             model: None,
             budgets: Budgets::default(),
             instructions,
+            human_channels: None,
         }
     }
 

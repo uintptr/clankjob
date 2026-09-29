@@ -243,6 +243,162 @@ def notification_content(title: str, text: str, case_url: str | None) -> str:
     return f"**{truncate(title, 200)}**\n{truncate(text, 1500)}{link_line(case_url)}"
 
 
+# ---------------------------------------------------------------- setup checks
+
+# Permission bits, https://discord.com/developers/docs/topics/permissions
+ADMINISTRATOR = 1 << 3
+ALL_PERMISSIONS = (1 << 53) - 1
+
+# What the bot needs in the channel: name, bit, why.
+BOT_PERMISSIONS: tuple[tuple[str, int, str], ...] = (
+    ("View Channel", 1 << 10, "see the channel"),
+    ("Send Messages", 1 << 11, "post questions"),
+    ("Read Message History", 1 << 16, "read replies"),
+    ("Add Reactions", 1 << 6, "seed the approval reactions"),
+    ("Create Public Threads", 1 << 35, "open a thread per question"),
+    ("Send Messages in Threads", 1 << 38, "post in question threads"),
+)
+# Nice to have: without it, answered threads are archived but not locked.
+OPTIONAL_PERMISSIONS: tuple[tuple[str, int, str], ...] = (
+    ("Manage Threads", 1 << 34, "lock a question's thread once it is answered"),
+)
+# What an allowed responder needs to answer.
+RESPONDER_PERMISSIONS: tuple[tuple[str, int], ...] = (
+    ("View Channel", 1 << 10),
+    ("Send Messages in Threads", 1 << 38),
+)
+
+# Application flags: the Message Content intent, for verified bots and for bots in
+# fewer than 100 servers.
+MESSAGE_CONTENT_INTENT = (1 << 18) | (1 << 19)
+
+# Channel types a question can be posted to with a thread: text and announcement.
+THREADABLE_CHANNELS = (0, 5)
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One setup check. A failed `required` check breaks the plugin; others degrade it."""
+
+    ok: bool
+    required: bool
+    what: str
+    fix: str = ""
+
+    def to_json(self) -> Json:
+        return {"ok": self.ok, "required": self.required, "what": self.what, "fix": self.fix}
+
+
+def permission_bits(value: object) -> int:
+    """Discord sends permission sets as decimal strings."""
+    return int(value) if isinstance(value, str) and value.isdigit() else 0
+
+
+def effective_permissions(user_id: str, member_roles: list[str], guild: Json, channel: Json) -> int:
+    """A member's permissions in a channel: roles, then the channel's overwrites (Discord's algorithm)."""
+    guild_id = str(guild.get("id"))
+    if user_id == str(guild.get("owner_id")):
+        return ALL_PERMISSIONS
+    raw_roles = guild.get("roles")
+    roles = {str(role.get("id")): permission_bits(role.get("permissions"))
+             for role in (raw_roles if isinstance(raw_roles, list) else []) if isinstance(role, dict)}
+    permissions = roles.get(guild_id, 0)  # @everyone's role id is the guild id
+    for role in member_roles:
+        permissions |= roles.get(role, 0)
+    if permissions & ADMINISTRATOR:
+        return ALL_PERMISSIONS
+    raw_overwrites = channel.get("permission_overwrites")
+    overwrites = {str(item.get("id")): (permission_bits(item.get("allow")), permission_bits(item.get("deny")))
+                  for item in (raw_overwrites if isinstance(raw_overwrites, list) else []) if isinstance(item, dict)}
+    allow, deny = overwrites.get(guild_id, (0, 0))
+    permissions = (permissions & ~deny) | allow
+    allow = deny = 0
+    for role in member_roles:
+        role_allow, role_deny = overwrites.get(role, (0, 0))
+        allow, deny = allow | role_allow, deny | role_deny
+    permissions = (permissions & ~deny) | allow
+    allow, deny = overwrites.get(user_id, (0, 0))
+    return (permissions & ~deny) | allow
+
+
+def member_roles(api: DiscordApi, guild_id: str, user_id: str) -> list[str] | None:
+    """The member's role ids, or None if they are not in the server."""
+    try:
+        member = call_object(api, "GET", f"/guilds/{guild_id}/members/{user_id}")
+    except PluginError as error:
+        if error.status == 404:
+            return None
+        raise
+    roles = member.get("roles")
+    return [str(role) for role in roles] if isinstance(roles, list) else []
+
+
+def diagnose(api: DiscordApi, instance: Instance) -> tuple[Json, list[Finding]]:
+    """Check everything the plugin needs, with read-only calls.
+
+    Raises PluginError if the token is refused or the channel cannot be seen at all;
+    anything else is reported as a finding.
+    """
+    bot = call_object(api, "GET", "/users/@me")
+    channel = call_object(api, "GET", f"/channels/{instance.channel_id}")
+    bot_id = str(bot.get("id"))
+    report: Json = {"bot": bot.get("username"), "channel": channel.get("name")}
+    findings: list[Finding] = []
+
+    def unchecked(what: str, error: PluginError) -> None:
+        findings.append(Finding(False, False, f"could not check {what}: {error}"))
+
+    try:
+        application = call_object(api, "GET", "/applications/@me")
+        flags = application.get("flags")
+        has_intent = isinstance(flags, int) and bool(flags & MESSAGE_CONTENT_INTENT)
+        findings.append(Finding(has_intent, True, "Message Content intent",
+                                "Developer Portal -> Bot -> Privileged Gateway Intents -> Message Content Intent -> Save"))
+        public = application.get("bot_public") is True
+        findings.append(Finding(not public, False, "bot is private (only you can add it to servers)",
+                                "Developer Portal -> Installation -> Install Link: None, then Bot -> Public Bot: off"))
+    except PluginError as error:
+        unchecked("the application settings", error)
+
+    kind = channel.get("type")
+    findings.append(Finding(kind in THREADABLE_CHANNELS, True, "channel is a text channel (threads can be opened)",
+                            "pick a regular text channel; forums and voice channels are not supported"))
+
+    guild_id = channel.get("guild_id")
+    if not isinstance(guild_id, str):
+        findings.append(Finding(False, True, "channel is in a server", "use a server channel, not a DM"))
+        return report, findings
+    try:
+        guild = call_object(api, "GET", f"/guilds/{guild_id}")
+        roles = member_roles(api, guild_id, bot_id) or []
+    except PluginError as error:
+        unchecked("the bot's permissions", error)
+        return report, findings
+    granted = effective_permissions(bot_id, roles, guild, channel)
+    for name, bit, why in BOT_PERMISSIONS:
+        findings.append(Finding(bool(granted & bit), True, f"bot can {why} ({name})",
+                                f"give the bot's role {name} in #{channel.get('name')} (server or channel settings)"))
+    for name, bit, why in OPTIONAL_PERMISSIONS:
+        findings.append(Finding(bool(granted & bit), False, f"bot can {why} ({name})",
+                                f"optional: give the bot's role {name}"))
+
+    for user in instance.allowed_responders:
+        try:
+            roles = member_roles(api, guild_id, user)
+        except PluginError as error:
+            unchecked(f"responder {user}", error)
+            continue
+        if roles is None:
+            findings.append(Finding(False, True, f"responder {user} is a member of the server",
+                                    "check the id: Developer Mode on, right-click yourself -> Copy User ID"))
+            continue
+        allowed = effective_permissions(user, roles, guild, channel)
+        missing = [name for name, bit in RESPONDER_PERMISSIONS if not allowed & bit]
+        findings.append(Finding(not missing, True, f"responder {user} can reply in question threads",
+                                f"give them {', '.join(missing)} in #{channel.get('name')}"))
+    return report, findings
+
+
 # ---------------------------------------------------------------- the plugin
 
 
@@ -310,12 +466,19 @@ class Plugin:
         return {"protocol": PROTOCOL}
 
     def check(self, params: Json) -> Json:
-        """Validate the configuration against Discord: the token works and the channel is visible."""
+        """Validate the configuration against Discord.
+
+        Fails if the token is refused or the channel is invisible. Everything else
+        (intent, permissions, responders) is reported: `problems` break the plugin,
+        `warnings` degrade it. `findings` has every check, for check_config.py.
+        """
         instance = instance_from(params)
-        api = self.client_for(instance.token)
-        bot = call_object(api, "GET", "/users/@me")
-        channel = call_object(api, "GET", f"/channels/{instance.channel_id}")
-        return {"bot": bot.get("username"), "channel": channel.get("name")}
+        report, findings = diagnose(self.client_for(instance.token), instance)
+        failed = [finding for finding in findings if not finding.ok]
+        return {**report,
+                "problems": [f"{f.what}: {f.fix}" for f in failed if f.required],
+                "warnings": [f"{f.what}: {f.fix}" if f.fix else f.what for f in failed if not f.required],
+                "findings": [finding.to_json() for finding in findings]}
 
     def deliver(self, params: Json) -> Json:
         """Post a question (with a thread) or an approval (with two reactions)."""

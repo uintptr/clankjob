@@ -31,6 +31,9 @@ pub enum WakeReason {
         question: String,
         /// The answer.
         answer: String,
+        /// Channel it came from: `web`, or a channel instance such as `discord_joe`.
+        #[serde(default)]
+        via: Option<String>,
     },
     /// A wait condition fired.
     ConditionFired {

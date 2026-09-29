@@ -235,6 +235,7 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
                     request_id: HumanRequestId::generate(),
                     question: "Proceed?".to_owned(),
                     answer: "Yes".to_owned(),
+                    via: Some("web".to_owned()),
                 },
                 WakeReason::ConditionFired {
                     condition_id: condition_id.clone(),

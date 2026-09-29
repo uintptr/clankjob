@@ -15,6 +15,7 @@ chrono.workspace = true
 clankjob-core.workspace = true
 clankjob-engine.workspace = true
 clankjob-llm-openai.workspace = true
+clankjob-plugin-host.workspace = true
 clankjob-storage.workspace = true
 humantime-serde.workspace = true
 rouille.workspace = true

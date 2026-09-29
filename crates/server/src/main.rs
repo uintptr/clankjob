@@ -4,7 +4,7 @@
 //! Usage: `clankjob [CONFIG]`. The configuration path defaults to `$CLANKJOB_CONFIG`,
 //! then `/config/clankjob.toml`. `SIGHUP` reloads prompt templates.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use std::thread;
 
 use anyhow::{Context, anyhow};
 use clankjob_core::llm::LlmProvider;
+use clankjob_engine::channels::Channels;
 use clankjob_engine::{Engine, EngineSettings};
 use clankjob_llm_openai::{OpenAiCompatible, OpenAiConfig};
 use clankjob_storage::Db;
@@ -24,6 +25,7 @@ mod api;
 mod catalog;
 mod config;
 mod cors;
+mod plugins;
 mod web;
 
 use config::{Config, ProviderKind};
@@ -116,7 +118,17 @@ fn run() -> anyhow::Result<()> {
     };
     // Rejected prompt files are logged by the engine as they are loaded.
     let files_dir = config.data_dir.join("files");
-    let engine = Engine::new(db, providers, config.prompts_dir.clone(), files_dir, settings);
+    let channels = Channels::new(BTreeMap::new(), Vec::new(), config.public_url.clone());
+    let engine = Engine::new(db, providers, config.prompts_dir.clone(), files_dir, channels, settings);
+    // Every plugin is loaded and checked before the server starts listening.
+    let plugins = Arc::new(plugins::PluginManager::new(
+        config.plugins_dir.clone(),
+        config.secrets_dir.clone(),
+        config.default_human_channels.clone(),
+        engine.clone(),
+    ));
+    plugins.reload();
+    plugins.watch().context("starting the plugin watcher")?;
     let workers = engine.start().context("starting engine threads")?;
 
     let defaults = api::CaseDefaults {
@@ -125,7 +137,7 @@ fn run() -> anyhow::Result<()> {
         budgets: config.budgets,
     };
     catalog::spawn_refresher(Arc::clone(&catalog), MODEL_REFRESH_INTERVAL).context("starting the model catalog")?;
-    let state = api::AppState::new(engine.clone(), tokens, defaults, catalog);
+    let state = api::AppState::new(engine.clone(), tokens, defaults, catalog, Arc::clone(&plugins));
     let cors = cors::Cors::new(config.cors_origins());
     let server = rouille::Server::new(&config.listen, move |request| {
         if let Some(preflight) = cors.preflight(request) {
@@ -144,6 +156,7 @@ fn run() -> anyhow::Result<()> {
         if signal == SIGHUP {
             let prompts = engine.reload_prompts();
             tracing::info!(errors = prompts.errors().len(), "prompts reloaded on SIGHUP");
+            plugins.reload();
             continue;
         }
         tracing::info!(signal, "shutting down");
@@ -166,6 +179,7 @@ fn run() -> anyhow::Result<()> {
         // Interrupted activations keep their lease and resume after the next start.
         tracing::warn!("shutdown grace period elapsed; exiting with work in progress");
     }
+    plugins.shutdown();
     Ok(())
 }
 

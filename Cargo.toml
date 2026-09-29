@@ -12,6 +12,7 @@ publish = false
 clankjob-core = { path = "crates/core" }
 clankjob-engine = { path = "crates/engine" }
 clankjob-llm-openai = { path = "crates/llm-openai" }
+clankjob-plugin-host = { path = "crates/plugin-host" }
 clankjob-storage = { path = "crates/storage" }
 
 # External crates

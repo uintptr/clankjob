@@ -14,9 +14,9 @@ other copy is marked as answered.
 Everything is plain REST, polled by the server: no gateway connection, no public
 endpoint, nothing to expose to the internet.
 
-> The server side of plugins (the plugin host, human requests delivered to
-> channels) is planned for milestones 3 and 4 of [the design](../../docs/design.md).
-> Until then this plugin is complete and tested on its own, but not yet called.
+> Questions, answers and notifications work today. Approvals (✅/❌) are ready here
+> but wait on approvals in the server, and attachments in replies are not imported
+> yet (the agent is told a file was sent).
 
 ## Setup
 
@@ -48,6 +48,28 @@ cp config.example.toml config.toml
 bot_token = { secret = "discord_bot_token" }   # or { env = "DISCORD_BOT_TOKEN" }
 channel_id = "123456789012345678"
 allowed_responders = ["234567890123456789"]
+```
+
+**5. Point the server at it.** In `clankjob.toml`:
+
+```toml
+plugins_dir = "./plugin"          # "/plugins" in a container
+public_url = "https://clank.acme.com"   # optional: adds a link to the case
+```
+
+Start the server with the token in its environment (`DISCORD_BOT_TOKEN`, or whatever
+`bot_token = { env = … }` names). At startup the server runs the same checks as
+`check_config.py` below and logs `channel ready`, or an error per problem (with the fix)
+and `channel loaded with problems`. The web UI's **Plugins** page shows the same, with
+a **Test now** button, and the server reloads the plugin by itself when you edit
+`config.toml`. A new token in the environment still needs a server restart. New cases send their questions to every loaded channel unless the
+New case form or `default_human_channels` says otherwise.
+
+**Check it on its own** at any time, without the server:
+
+```sh
+./check_config.py            # token, intent, permissions, responders
+./check_config.py --notify   # also post a test message
 ```
 
 ## Safety

@@ -269,12 +269,85 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual((instance.channel_id, instance.allowed_responders), ("100", ("200",)))
 
-    def test_healthcheck_reports_bot_and_channel(self) -> None:
-        fake = FakeDiscord()
-        fake.routes[("GET", "/users/@me")] = {"username": "clankbot"}
-        fake.routes[("GET", f"/channels/{CHANNEL}")] = {"name": "clankjob"}
 
-        self.assertEqual(make_plugin(fake).handle("healthcheck", params()), {"bot": "clankbot", "channel": "clankjob"})
+GUILD = "500"
+BOT_ROLE = "600"
+# View Channel, Send Messages, Read Message History, Add Reactions, Create Public
+# Threads, Send Messages in Threads.
+BOT_NEEDS = (1 << 10) | (1 << 11) | (1 << 16) | (1 << 6) | (1 << 35) | (1 << 38)
+
+
+def healthy_discord() -> FakeDiscord:
+    """A server where everything is set up right, except the optional Manage Threads."""
+    fake = FakeDiscord()
+    fake.routes[("GET", "/users/@me")] = {"id": BOT, "username": "clankbot"}
+    fake.routes[("GET", "/applications/@me")] = {"flags": 1 << 19, "bot_public": False}
+    fake.routes[("GET", f"/channels/{CHANNEL}")] = {
+        "id": CHANNEL, "name": "general", "type": 0, "guild_id": GUILD, "permission_overwrites": []}
+    fake.routes[("GET", f"/guilds/{GUILD}")] = {"id": GUILD, "owner_id": "1", "roles": [
+        {"id": GUILD, "permissions": str((1 << 10) | (1 << 38))},
+        {"id": BOT_ROLE, "permissions": str(BOT_NEEDS)}]}
+    fake.routes[("GET", f"/guilds/{GUILD}/members/{BOT}")] = {"roles": [BOT_ROLE]}
+    fake.routes[("GET", f"/guilds/{GUILD}/members/{OWNER}")] = {"roles": []}
+    return fake
+
+
+def failed(report: Json, key: str) -> list[str]:
+    items = report.get(key)
+    return [str(item).split(":")[0] for item in items] if isinstance(items, list) else []
+
+
+class SetupCheckTests(unittest.TestCase):
+
+    def test_a_correct_setup_passes_with_only_the_optional_warning(self) -> None:
+        report = make_plugin(healthy_discord()).handle("validate_config", params())
+
+        self.assertEqual((report["bot"], report["channel"], report["problems"]), ("clankbot", "general", []))
+        self.assertEqual(failed(report, "warnings"), [
+                         "bot can lock a question's thread once it is answered (Manage Threads)"])
+        self.assertEqual(make_plugin(healthy_discord()).handle("healthcheck", params())["problems"], [])
+
+    def test_missing_intent_permissions_and_responder_are_problems(self) -> None:
+        # Arrange
+        fake = healthy_discord()
+        fake.routes[("GET", "/applications/@me")] = {"flags": 0, "bot_public": True}
+        channel = fake.routes[("GET", f"/channels/{CHANNEL}")]
+        assert isinstance(channel, dict)
+        # The channel takes Create Public Threads away from the bot's role.
+        channel["permission_overwrites"] = [{"id": BOT_ROLE, "type": 0, "allow": "0", "deny": str(1 << 35)}]
+        fake.routes[("GET", f"/guilds/{GUILD}/members/{OWNER}")] = PluginError("404: Unknown Member", status=404)
+
+        # Act
+        report = make_plugin(fake).handle("validate_config", params())
+
+        # Assert
+        self.assertEqual(failed(report, "problems"), [
+            "Message Content intent",
+            "bot can open a thread per question (Create Public Threads)",
+            f"responder {OWNER} is a member of the server",
+        ])
+        self.assertIn("bot is private (only you can add it to servers)", failed(report, "warnings"))
+
+    def test_administrators_and_the_owner_have_every_permission(self) -> None:
+        guild: Json = {"id": GUILD, "owner_id": OWNER, "roles": [
+            {"id": GUILD, "permissions": "0"}, {"id": "7", "permissions": str(1 << 3)}]}
+        deny_all: Json = {"permission_overwrites": [{"id": GUILD, "allow": "0", "deny": str(plugin.ALL_PERMISSIONS)}]}
+
+        self.assertEqual(plugin.effective_permissions(OWNER, [], guild, deny_all), plugin.ALL_PERMISSIONS)
+        self.assertEqual(plugin.effective_permissions(STRANGER, ["7"], guild, deny_all), plugin.ALL_PERMISSIONS)
+        self.assertEqual(plugin.effective_permissions(STRANGER, [], guild, deny_all), 0)
+
+    def test_a_forum_channel_is_a_problem_and_an_invisible_channel_an_error(self) -> None:
+        fake = healthy_discord()
+        channel = fake.routes[("GET", f"/channels/{CHANNEL}")]
+        assert isinstance(channel, dict)
+        channel["type"] = 15
+        report = make_plugin(fake).handle("validate_config", params())
+        fake.routes[("GET", f"/channels/{CHANNEL}")] = PluginError("403: Missing Access", status=403)
+
+        self.assertIn("channel is a text channel (threads can be opened)", failed(report, "problems"))
+        with self.assertRaises(PluginError):
+            make_plugin(fake).handle("validate_config", params())
 
 
 class RpcTests(unittest.TestCase):

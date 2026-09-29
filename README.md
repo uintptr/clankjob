@@ -78,9 +78,10 @@ clankjob is young. Milestone 1, the engine every case depends on, is done and te
 | OpenAI-compatible LLM adapter                                       | Available |
 | REST API with bearer tokens, prompt templates, profiles, hot reload | Available |
 | Web UI: cases, timeline, inbox, prompts, light and dark themes      | Available |
+| Discord: get asked, answer from chat, get notified when done        | Available |
+| Python plugins (human channels so far)                              | Available |
 | Email plugin (IMAP/SMTP)                                            | Planned   |
-| Discord: get notified and answer from chat                          | Planned   |
-| Python plugins, Docker image                                        | Planned   |
+| Approvals, Docker image                                             | Planned   |
 
 The full design, including everything planned, is in [docs/design.md](docs/design.md).
 
@@ -198,7 +199,10 @@ crates/
   storage/      SQLite schema, migrations and repositories
   engine/       activation loop, scheduler, worker pool, prompt templates
   llm-openai/   OpenAI-compatible adapter
+  plugin-host/  loads plugins and runs Python ones as child processes
   server/       REST API, configuration, process lifecycle (the `clankjob` binary)
+plugin/
+  discord/      Discord human channel (Python, standard library only)
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/
   design.md     the full design

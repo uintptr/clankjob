@@ -9,7 +9,7 @@ when a timer fires), and continue until they are done.
 The platform is split into:
 
 - **Server**: a Rust REST API built on [rouille](https://github.com/tomaka/rouille),
-  plus the case engine, scheduler and (planned) plugin host.
+  plus the case engine, scheduler and plugin host.
 - **Web client**: a single-page app, compiled into the server binary, that creates,
   monitors and steers cases.
 
@@ -34,10 +34,11 @@ marked **(built)**, **(partly built)** or **(planned)**.
 | Instructions (always in context) and files (read on demand)              | Built                 | §7.5      |
 | OpenAI-compatible LLM adapter, model discovery, images for vision models | Built                 | §8        |
 | Questions to the owner, answered from the web client                     | Built                 | §10.1     |
-| Approvals, delivery to chat channels, first-answer-wins across channels  | Planned (milestone 3) | §9.7, §10 |
-| Plugin host, plugin instances, external plugin protocol                  | Planned (milestone 4) | §9        |
+| Questions and notifications on chat channels, first answer wins          | Built                 | §10       |
+| Plugin host: plugin directory, instances, protocol, reload, Plugins page | Built for channels    | §9, §15   |
+| Plugin tools and wait conditions, approvals                              | Planned (milestone 4) | §9, §9.7  |
 | Email plugin                                                             | Planned               | §11       |
-| Discord plugin                                                           | Built, not yet wired  | §12       |
+| Discord plugin                                                           | Built                 | §12       |
 | REST API                                                                 | Partly built          | §14       |
 | Web client                                                               | Built                 | §15       |
 | SQLite storage                                                           | Built                 | §16       |
@@ -103,8 +104,8 @@ ______________________________________________________________________
 
 ```
 ┌───────────────────────────┐
-│        Web client         │  cases, timeline, inbox, instructions, files, prompts
-└─────────────┬─────────────┘
+│        Web client         │  cases, timeline, inbox, instructions, files, prompts,
+└─────────────┬─────────────┘  plugins (status, test, reload)
               │ HTTPS / JSON (REST), same origin
 ┌─────────────▼──────────────────────────────────────────────────────┐
 │ Server process (Rust)                                              │
@@ -118,15 +119,15 @@ ______________________________________________________________________
 │  ┌──────────────────────┐        ┌─────────────▼─────────────┐     │
 │  │ Scheduler thread     │───────▶│ Work queue (DB-backed)    │     │
 │  │ wait-condition checks│ enqueue└─────────────┬─────────────┘     │
-│  │ + channel pollers    │                      │ claim             │
-│  │ + delivery dispatcher│        ┌─────────────▼─────────────┐     │
+│  │ Channel thread:      │                      │ claim             │
+│  │ outbox + answer polls│        ┌─────────────▼─────────────┐     │
 │  └──────────┬───────────┘        │ Worker pool (N threads)   │     │
 │             │                    │ runs Activations          │     │
 │             │                    └───┬──────────────┬────────┘     │
 │             │                        │              │              │
 │  ┌──────────▼────────────────────────▼───┐   ┌──────▼──────────┐   │
-│  │ Plugin host (planned)                 │   │ LLM provider    │   │
-│  │ registry · instances · tools · checks │   │ + model catalog │   │
+│  │ Plugin host                           │   │ LLM provider    │   │
+│  │ registry · processes · watch + reload │   │ + model catalog │   │
 │  └──────────┬────────────────────────────┘   └──────┬──────────┘   │
 │             │                                       │              │
 │  ┌──────────▼───────────────────────────────────────▼───────────┐  │
@@ -137,8 +138,11 @@ ______________________________________________________________________
      Mail server · Discord API                LLM provider API
 ```
 
-The channel pollers, delivery dispatcher and plugin host are planned; everything else in
-the diagram is built.
+Everything in the diagram is built. The channel thread sends queued channel messages
+and polls channels for answers (§10.3). The plugin host so far only serves human
+channels: it loads `plugins_dir`, runs plugin processes, checks each instance, and
+reloads when the directory changes (§9.4). Plugin tools and plugin wait-condition checks
+are planned.
 
 ### 3.1 Why this shape
 
@@ -152,7 +156,7 @@ the diagram is built.
   conditions and transcripts all live in the database, so a crash or restart loses
   nothing (see §17). Configuration (server settings, plugin instances, prompts) lives in
   files next to the server instead (§9.4, §18).
-- **External plugins are child processes** (planned). Python plugins run as long-lived
+- **External plugins are child processes** (built). Python plugins run as long-lived
   processes owned by the plugin host and are called over stdio (§9.8). The host treats
   them exactly like compiled-in plugins.
 
@@ -164,8 +168,9 @@ crates/
   storage/       # rusqlite repositories, embedded migrations                (built)
   engine/        # activation loop, scheduler, workers, prompts, files       (built)
   llm-openai/    # OpenAI-compatible adapter                                 (built)
-  server/        # rouille routes, config, CORS, model catalog, main()       (built)
-  plugin-host/   # plugin loading, config files, ProcessPlugin               (planned)
+  server/        # rouille routes, config, CORS, model catalog,              (built)
+                 # plugin manager (load, watch, reload), main()
+  plugin-host/   # plugin loading, config files, ProcessPlugin               (built)
   plugin-email/  # IMAP/SMTP plugin, compiled in                             (planned)
 plugin/
   discord/       # Discord human channel, an external Python plugin          (built)
@@ -533,7 +538,13 @@ pub struct CompletionResponse {
 
 ______________________________________________________________________
 
-## 9. Plugin system (planned, milestone 4)
+## 9. Plugin system (partly built)
+
+**Built** (`crates/plugin-host`): loading `plugins_dir`, manifests, `config.toml`
+instances with secret references, external plugins as child processes over JSON-RPC
+(§9.8), and the human-channel half of a plugin (§10.3), which is what the Discord plugin
+needs. **Planned** (milestone 4): the `Plugin` trait below with tools and wait
+conditions, built-in plugins, `plugin_kv`, and approvals.
 
 ### 9.1 Principles
 
@@ -690,15 +701,22 @@ username = "joe@example.com"
 password = { env = "YAHOO_APP_PASSWORD" }      # or from an environment variable
 ```
 
-1. **Loading.** At startup and on reload, the host reads every `config.toml`, resolves
-   secret references (`{ secret = … }` from the secrets directory, `{ env = … }` from the
-   environment) exactly as the server config does (§18.2), validates each instance against
-   the plugin's config schema, then calls `validate_config()`.
+1. **Loading (built).** At startup (before the server listens) and on every reload, the
+   host reads every `config.toml`, resolves secret references (`{ secret = … }` from the
+   secrets directory, `{ env = … }` from the server's environment) exactly as the server
+   config does (§18.2), then calls `validate_config()`, which checks the whole setup
+   (§12). Planned: validating against the plugin's `schema.json` first.
 2. **Secrets stay out of the database.** Resolved values live only in memory. Fields
    marked `x-secret` should use a reference; a literal value is accepted but logged as a
    warning.
-3. **Reload is all-or-nothing per plugin.** If a plugin's new config fails validation, the
-   old instances for that plugin stay active and the error is shown in the web client.
+3. **Reload (built).** The server watches `plugins_dir` (every 3 s; a change must hold
+   for 1 s so a save in progress isn't loaded) and reloads on any change to a plugin's
+   files, ignoring hidden files, `__pycache__` and `*.log`. `SIGHUP`, `POST /admin/reload`
+   and `POST /plugins/reload` reload too. A reload loads and checks everything into a new
+   registry, swaps it in whole, then shuts down the old processes; a retired process never
+   restarts. Messages queued for a channel that is briefly missing are retried. The
+   result, errors included, is shown on the web client's Plugins page (§15). Planned:
+   keeping a plugin's old instances when its new config is invalid.
 4. **Removed or disabled instances** (`enabled = false`) fail their pending wait
    conditions gracefully, and affected cases are woken with an `instance_disabled` event.
 5. Instance names are unique across all plugins; they are the stable id cases and wait
@@ -732,12 +750,13 @@ External plugins run as **child processes** of the server and speak **JSON-RPC 2
 stdin/stdout**, one JSON message per line. stderr is captured into the server log with
 the plugin id attached.
 
-**Starting.** For `runtime = "python"`, the host runs the entrypoint with `uv run`,
-adding `--with-requirements requirements.txt` when that file exists. The dependency
-cache lives on the data volume (`UV_CACHE_DIR=/data/cache/uv`), so the plugin directory
-can stay read-only and dependencies survive restarts. `runtime = "exec"` runs the
-entrypoint directly. The process gets a minimal environment: no server secrets, only
-`PATH`, `HOME`, `TZ` and the cache variables.
+**Starting (built).** For `runtime = "python"`, the host runs `python3 <entrypoint>` in
+the plugin's directory; `runtime = "exec"` runs the entrypoint directly. The process
+starts on first use and answers `initialize` before anything else. It gets a minimal
+environment: no server secrets, only `PATH`, `HOME`, `TZ`, `LANG` and `LC_ALL`.
+Planned: running with `uv run --with-requirements requirements.txt` when the plugin has
+dependencies, with the cache on the data volume (`UV_CACHE_DIR=/data/cache/uv`) so the
+plugin directory can stay read-only.
 
 **Methods (host → plugin).** They mirror the `Plugin` and `HumanChannel` traits:
 
@@ -760,12 +779,20 @@ the host whether trying again can help.
   which the host writes to `plugin_kv` in the same transaction as the call's event. A
   plugin process never needs a database and can be restarted at any time.
 - **One process serves every instance** of its plugin, because config comes with each
-  call. `concurrency` in the manifest sets how many processes run in parallel; each
-  process handles one call at a time.
-- **Timeouts** per method (defaults: `call_tool` 60 s, `check` 30 s, others 10 s). A
-  process that times out or crashes is killed and restarted with backoff. The failed
-  call is reported as a tool error or check error, which the core already handles.
-- **Reload** restarts a plugin's processes after its directory changed.
+  call. Each process handles one call at a time. Planned: `concurrency` in the manifest
+  sets how many processes run in parallel (one today).
+- **Timeouts** per method (built: `poll` 60 s, `initialize` 10 s, the others 30 s;
+  planned: `call_tool` 60 s, `check` 30 s). A process that times out, exits or writes
+  invalid JSON is killed and started again on the next call, and the failed call is
+  reported as a retryable error, which the outbox retries.
+- **Checks (built).** Each instance's `validate_config` runs when plugins load (startup,
+  before the server listens, and every reload) and on demand (`POST /plugin-instances/{name}/test`, the Plugins page's "Test now"). Its result is kept
+  (§14.6) and logged: problems as errors with their fix, warnings as warnings. An instance
+  whose check fails or reports problems still loads, so fixing the cause (e.g. inviting
+  the bot) and testing again is enough; only an invalid config (a missing secret, no
+  `allowed_responders`) keeps it from loading.
+- **Shutdown (built).** On exit the host sends `shutdown` and kills what remains.
+- **Reload (built)** replaces a plugin's processes after its directory changed (§9.4).
 - A small Python helper module that implements the JSON-RPC loop and decorators for tools
   and checks can be shipped later; the protocol above is the contract.
 
@@ -773,7 +800,7 @@ ______________________________________________________________________
 
 ## 10. Human-in-the-loop
 
-### 10.1 Human requests (partly built)
+### 10.1 Human requests (questions built)
 
 Whenever a case needs a person, the core creates a **human request**:
 
@@ -782,22 +809,23 @@ Whenever a case needs a person, the core creates a **human request**:
 | `question` | `ask_human`, or two LLM replies in a row without a tool call | free text                                                                 | Built   |
 | `approval` | a tool that requires approval (§9.7)                         | approve / reject (with an optional comment); editing the args is web-only | Planned |
 
-Human requests belong to the **core**, not to any plugin. A request can be answered from
-any channel; today the web client is the only one (the inbox, the case page, or a message
-to the case, which answers its open question). Every answer goes through one transaction:
+Human requests belong to the **core**, not to any plugin. A question can be answered
+from the web client (the inbox, the case page, or a message to the case, which answers its
+open question) or from any chat channel it was posted to (§10.3). Every answer goes
+through one transaction:
 
 ```
 UPDATE human_requests SET status = 'answered', answer = ?, answered_via = ?, responder = ?
 WHERE id = ? AND status = 'open'
-  1 row  → fire the case's core.human_input condition, append a human_answer wake,
-           cancel its other conditions, set the case pending and enqueue it;
-           (planned) queue `on_resolved` for every channel the request was delivered to
-  0 rows → already resolved: the API answers 409 and the UI says so
+  1 row  → fire the case's core.human_input condition, append a human_answer wake
+           (with `via`), cancel its other conditions, set the case pending and enqueue it,
+           and queue an `on_resolved` update for every channel the question was posted to
+  0 rows → already resolved: the API answers 409; a late channel reply is ignored
 ```
 
-**The first answer wins.** Planned with chat channels: answering in the web client edits
-the Discord message to "Answered via web", and a late reply in Discord is told the
-question was already answered.
+**The first answer wins.** Answering in the web client edits the Discord message to
+"Answered via web" and closes its thread; answering in Discord shows "Answered via
+discord_joe" in the timeline.
 
 ### 10.2 Waiting on a human and something else (built)
 
@@ -807,87 +835,105 @@ owner for the panel photo, but if Bob replies in the meantime, wake up."_
 Internally the question is a `core.human_input` wait condition. The scheduler never polls
 it; only the answer fires it, or its deadline times it out. It sits next to any other
 conditions, and the first to fire wins. If another condition or the timeout wins, the
-question is marked `superseded` (and, planned, channels update their message to "no
-longer needed").
+question is marked `superseded` and channels update their message to "No longer needed".
 
-### 10.3 Human channels (planned, milestone 3)
+### 10.3 Human channels (built for questions and notifications)
 
-A plugin becomes a human channel by returning an implementation of this trait from
-`Plugin::human_channel()`:
+The engine only knows this trait (`crates/core/src/channel.rs`). The plugin host
+implements it for each instance of an external plugin whose manifest has
+`[human_channel]` (§9), by calling the plugin's methods of the same name (§9.8):
 
 ```rust
 pub trait HumanChannel: Send + Sync {
-    /// Post a question or approval to the human. The returned ref (e.g. a Discord
-    /// message id) is stored in `channel_deliveries` and used to match replies.
-    fn deliver(&self, inst: &InstanceCtx, req: &HumanRequestView)
-        -> Result<DeliveryRef, PluginError>;
+    fn plugin(&self) -> &str;                       // e.g. "discord"
+    fn allowed_responders(&self) -> &[String];      // channel user ids
+    fn poll_interval(&self) -> Duration;            // default 20 s, at least 5 s
+    fn notifies(&self, event: &str) -> bool;        // `notify_on`
 
-    /// Look for answers to the requests still open on this channel (the host passes
-    /// each one's `DeliveryRef`), since `cursor`. Called by the channel poller once per
-    /// instance, not once per case. MUST NOT call the LLM.
-    fn poll(&self, inst: &InstanceCtx, open: &[OpenDelivery], cursor: Option<&serde_json::Value>)
-        -> Result<PollResult, PluginError>;
+    /// Post a question: `{ kind, case_title, text, case_url }`. The returned value
+    /// (e.g. Discord message and thread ids) is stored and handed back later.
+    fn deliver(&self, request: &Value) -> Result<Value, ChannelError>;
 
-    /// The request was answered elsewhere, superseded or cancelled: update the message.
-    fn on_resolved(&self, inst: &InstanceCtx, delivery: &DeliveryRef, outcome: &OutcomeView)
-        -> Result<(), PluginError>;
+    /// Look for answers to the questions still open on this channel, since `cursor`.
+    /// Called once per instance, not once per case. MUST NOT call the LLM.
+    fn poll(&self, open: &[OpenDelivery], cursor: &Value) -> Result<PollResult, ChannelError>;
 
-    /// Informational notification (case completed, failed, budget exceeded, …).
-    fn notify(&self, inst: &InstanceCtx, n: &NotificationView) -> Result<(), PluginError> { Ok(()) }
+    /// The question was answered, superseded or cancelled: update the message.
+    /// `outcome` is `{ status, via?, responder? }`.
+    fn on_resolved(&self, delivery: &Value, outcome: &Value) -> Result<(), ChannelError>;
+
+    /// Informational message: `{ event, case_title, text, case_url }`.
+    fn notify(&self, notification: &Value) -> Result<(), ChannelError>;
 }
 
-pub struct OpenDelivery {
-    pub request_id: HumanRequestId,
-    pub delivery: DeliveryRef,            // what `deliver` returned, opaque to the core
-}
+pub struct OpenDelivery { pub request_id: HumanRequestId, pub delivery: Value }
 
 pub struct PollResult {
-    pub replies: Vec<InboundReply>,
-    pub cursor: Option<serde_json::Value>,
-    pub warnings: Vec<String>,            // logged; e.g. a missing channel permission
+    pub replies: Vec<ChannelReply>,  // request_id, external_id, responder, text?, decision?, attachments
+    pub cursor: Value,               // stored in channel_cursors, handed back next poll
+    pub warnings: Vec<String>,       // logged, e.g. a missing permission or intent
 }
 
-pub struct InboundReply {
-    pub request_id: HumanRequestId,       // which open request this answers
-    pub external_id: String,              // channel message id, for dedup
-    pub responder: String,                // channel user id
-    pub text: Option<String>,             // a question's answer
-    pub decision: Option<Decision>,       // an approval's approve / reject
-    pub attachments: Vec<InboundFile>,    // links the host downloads at once
-}
+pub struct ChannelError { pub message: String, pub retryable: bool }
 ```
 
-**Outbound.** When a request is created, the same transaction writes one
-`channel_deliveries` row per target channel. A **delivery dispatcher** thread calls
-`deliver()`, retrying with backoff. A failed delivery never blocks the case, because the
-request is always visible in the web client. Notifications and `on_resolved` updates go
-through the same outbox.
+Payloads are JSON because they pass through unchanged to the plugin process.
 
-**Inbound.** A **channel poller** calls `poll()` for each enabled channel instance every
-`poll_interval` (default 20 s), passing the requests still open on that channel. The
-plugin does the channel-specific matching (a thread reply, a reaction) and returns
-answers already tied to a `request_id`. For each reply the core:
+**Outbound.** Messages go through the `channel_deliveries` outbox (§16), written in the
+same transaction as what they are about:
 
-1. checks `responder` against the instance's `allowed_responders` again (the plugin
+| Queued when                                                   | `kind`         | Sent as             |
+| ------------------------------------------------------------- | -------------- | ------------------- |
+| `ask_human` (or the nudge) opens a question                   | `request`      | `deliver`           |
+| a question is answered, superseded or cancelled               | `resolution`   | `on_resolved`       |
+| a case becomes `completed` or `failed` (or a budget stops it) | `notification` | `notify`, if wanted |
+
+A **channel thread** in the engine sends due messages in order. Retryable errors are
+retried after 10 s, doubling up to 15 minutes, 8 attempts in all; other errors fail the
+message at once. A message for a channel that is not loaded (e.g. during a plugin reload,
+or while its plugin is broken) counts as retryable, so it goes out once the channel is
+back. A failed delivery never blocks the case, because the question is always
+in the web inbox. A question already settled before it could be posted is skipped, and so
+is the resolution update for a question that was never posted.
+
+**Inbound.** The same thread calls `poll()` for each channel every `poll_interval`, when
+it has questions open. The plugin does the channel-specific matching (a thread reply, a
+reaction) and returns answers already tied to a `request_id`. For each reply the engine:
+
+1. ignores it unless the question is one of the open ones it passed;
+2. checks `responder` against the instance's `allowed_responders` again (the plugin
    already filters; the core does not trust it blindly);
-2. deduplicates it on `external_id`;
-3. downloads any attachments into the case's files (§7.5), since channel links expire;
-4. records the answer (§10.1) with the text (question) or the decision (approval),
-   `answered_via` set to the instance.
+3. records the answer (§10.1) with `answered_via` set to the instance and `responder` to
+   the channel user id. An answer that lost the race is ignored.
 
-The poll cursor is stored in `plugin_kv`, so replies sent while the server was down are
-picked up after a restart (Discord keeps message history). Replying to a notification to
-send a case a plain message is future work.
+The cursor is saved after the answers, in `channel_cursors`, so replies sent while the
+server was down are picked up after a restart (Discord keeps message history), and a
+reply seen twice is harmless because only the first answer counts.
 
-### 10.4 Routing (planned)
+**Activity.** For each channel the thread remembers, in memory, the last successful call,
+the last error and the last warning a poll reported (e.g. "a reply had no readable text:
+enable the Message Content intent"). The API and the Plugins page show them, and an
+error newer than the last success marks the instance as needing attention (§14.6).
 
-- Every case has an `owner` (built) and a list of `human_channels` (planned, e.g.
-  `["discord_joe"]`). If the list is omitted, a server-wide `default_human_channels`
-  applies.
+**Reload.** The engine's channel set is swapped as a whole when plugins reload (§9.4):
+the thread reads the current set on every pass, new cases can only name loaded channels,
+and cases keep the channel names they were created with.
+
+Not yet: approval decisions are ignored (approvals don't exist yet, §9.7), and reply
+attachments are not downloaded; the answer tells the agent a file was sent and names it.
+Replying to a notification to send a case a plain message is future work.
+
+### 10.4 Routing (built)
+
+- Every case has an `owner` and a list of `human_channels`, set at creation (the New case
+  form offers the loaded channels). If the list is omitted, `default_human_channels`
+  from the server config applies; if that is omitted too, every loaded channel. `[]`
+  means the web client only.
 - The web client is always a channel and can't be removed.
-- Each channel instance chooses which notifications it sends (`notify_on`). Human requests
-  are always delivered.
-- Links back to a case are built from the server's `public_url` (§17.3).
+- Each channel instance chooses which notifications it sends (`notify_on`). Questions are
+  always delivered.
+- Links back to a case are built from the server's `public_url` (§17.3), as
+  `{public_url}/#/cases/{id}`; without it, messages have no link.
 
 ______________________________________________________________________
 
@@ -1016,12 +1062,20 @@ on a per-instance schedule.
 
 ______________________________________________________________________
 
-## 12. Discord plugin (built, not yet wired)
+## 12. Discord plugin (built)
 
 A **human channel** plugin: it has no LLM tools or wait conditions, only `HumanChannel`.
 It lives in `plugin/discord/` as an external Python plugin (standard library only,
 Python 3.11+) that implements the protocol of §9.8, with tests against a fake Discord.
-The server side that calls it (§10.3) is not built yet.
+The server loads it from `plugins_dir` and drives it through §10.3. Its `validate_config`
+checks the whole setup with read-only calls: the token, that the channel is a text
+channel, the Message Content intent, the bot's effective permissions in the channel
+(roles and channel overwrites), and that each allowed responder is in the server and can
+reply in threads. The server runs it for every instance when plugins load and logs each
+problem with its fix; the Plugins page shows the result and can run it again ("Test
+now"); `check_config.py` runs it without the server and prints a checklist. Editing
+`config.toml` reloads the plugin by itself (§9.4); a new token in the environment needs a
+server restart.
 
 ### 12.1 Configuration
 
@@ -1179,16 +1233,18 @@ POST /api/v1/cases
   "llm": "default",
   "model": "openai/gpt-4.1-mini",
   "budgets": { "max_activations": 20, "max_turns_per_activation": 30, "max_total_tokens": 2000000 },
-  "instructions": [{ "name": "tone.md", "content": "Be polite. Never offer more than $1,500." }]
+  "instructions": [{ "name": "tone.md", "content": "Be polite. Never offer more than $1,500." }],
+  "human_channels": ["discord_joe"]
 }
 ```
 
 `profile`, `llm` and `budgets` default to the server's `default_profile`, `default_llm` and
-`[budgets]`; `model` defaults to the LLM's default model. Response `201`: the case,
+`[budgets]`; `model` defaults to the LLM's default model; `human_channels` defaults to
+`default_human_channels` (§10.4), and an unknown channel is a `400`. Response `201`: the case,
 `{ "id": "01J9…", "state": "pending", "usage": {…}, … }`.
 
-Planned: `PATCH /cases/{id}` (title, owner, budgets), and `plugin_instances` and
-`human_channels` on cases.
+Planned: `PATCH /cases/{id}` (title, owner, budgets, channels), and `plugin_instances` on
+cases.
 
 ### 14.2 Human requests (partly built)
 
@@ -1214,28 +1270,41 @@ only available from the web channel.
 | `GET`  | `/prompts`                 | Effective templates and profiles: source (built-in or file), hash, load errors. |
 | `GET`  | `/prompts/{name}`          | One effective template, with its content.                                       |
 | `GET`  | `/prompts/profiles/{name}` | One profile, with its content.                                                  |
-| `POST` | `/admin/reload`            | Reload the prompt templates (same as `SIGHUP`).                                 |
+| `POST` | `/admin/reload`            | Reload the prompt templates and plugins (same as `SIGHUP`).                     |
 
-Planned: reloading the server config and plugins as well.
+Planned: reloading `clankjob.toml` itself.
 
-### 14.5 Plugins (planned)
+### 14.5 Human channels (built)
+
+| Method | Path        | Description                                                                       |
+| ------ | ----------- | --------------------------------------------------------------------------------- |
+| `GET`  | `/channels` | `{ "channels": [{ "name", "plugin", "default" }] }`: the loaded channels (§10.3). |
+
+### 14.6 Plugins (built)
 
 Plugins and their instances are defined by files (§9.4), so these endpoints are read-only
-apart from testing.
+apart from testing and reloading.
 
-| Method | Path                            | Description                                                                            |
-| ------ | ------------------------------- | -------------------------------------------------------------------------------------- |
-| `GET`  | `/plugins`                      | Loaded plugins: manifest, runtime, config schema, tools, condition kinds, load errors. |
-| `GET`  | `/plugin-instances`             | Instances with their config (secrets redacted) and health.                             |
-| `POST` | `/plugin-instances/{name}/test` | Run `validate_config` + `healthcheck`.                                                 |
+| Method | Path                            | Description                                                                                      |
+| ------ | ------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `GET`  | `/plugins`                      | Every plugin found (id, name, version, runtime, what it provides, load error) and its instances. |
+| `POST` | `/plugins/reload`               | Load every plugin again (§9.4) and return the same as `GET /plugins`.                            |
+| `POST` | `/plugin-instances/{name}/test` | Run the instance's check again; `404` if unknown, `409` if it is off or did not load.            |
 
-### 14.6 Health (built)
+Each instance has `state` (`on`, `off`: `enabled = false`, `error`: invalid config), the
+last check (`report`, `problems`, `warnings`, `findings`, `checked_at`, `error` if the
+check could not run), `activity` from the channel thread (`last_ok_at`, `last_error`,
+`last_warning`, with times), and `attention`: problems, a failed check, or an error newer
+than the last success. The top-level `attention` is set when any plugin or instance needs
+a look; the web client shows it in the navigation. Secrets are never included.
+
+### 14.7 Health (built)
 
 `GET /healthz`, without auth: `200` when the database answers and the scheduler ticked in
 the last two minutes, `503` otherwise, with
 `{ "database", "scheduler", "last_scheduler_tick" }`.
 
-### 14.7 Errors (built)
+### 14.8 Errors (built)
 
 ```json
 { "error": { "code": "bad_request", "message": "`title` and `goal` must not be empty" } }
@@ -1250,7 +1319,7 @@ the last two minutes, `503` otherwise, with
 | `413`  | `payload_too_large` | Body over 2 MB, or a file over 20 MB.                                               |
 | `500`  | `internal`          | Anything else; details are logged, not returned.                                    |
 
-### 14.8 rouille notes
+### 14.9 rouille notes
 
 - Routing with `router!`. Each handler maps engine and storage errors to the format above.
 - Handlers only touch the database, the file store and the work queue; they never call
@@ -1274,10 +1343,16 @@ the same origin as the API. Everything the server sends is inserted as text, nev
   - The **detail** pane shows the state chip and details, the open question with an answer
     box, the result or failure reason, the goal, the **instructions** (write, upload, edit,
     remove), the **files** (add, preview text, view images), what the case is waiting
-    for, budget use, notes, the **timeline**, and a message box.
+    for, budget use, notes, the **timeline** (answers from a chat channel say which), and a
+    message box. The details line shows where the case asks ("web, discord_joe").
 - **New case**: title, goal, owner, profile, LLM, model (with the catalog's suggestions,
-  prices and context size), instructions, and budgets.
+  prices and context size), instructions, the chat channels to also ask on (when any are
+  loaded, pre-ticked from the default), and budgets.
 - **Inbox**: every open question across cases, answerable in place.
+- **Plugins**: each plugin and instance with an On / Off / Error / Needs attention chip,
+  what the last check found (problems and warnings with their fix, and every check in a
+  collapsible list), the channel's last error or warning, "Test now" per instance, and
+  "Reload plugins". The navigation link shows a red mark when something needs attention.
 - **Prompts**: effective templates and profiles, their source and hash, rejected files,
   and "Reload from disk".
 
@@ -1286,8 +1361,7 @@ the same origin as the API. Everything the server sends is inserted as text, nev
 thread-per-request, so long-lived WebSockets are a poor fit; Server-Sent Events are a
 possible later upgrade.
 
-Planned: approvals in the inbox, the channel each answer came from, a plugins page, and
-file downloads.
+Planned: approvals in the inbox and file downloads.
 
 ______________________________________________________________________
 
@@ -1303,7 +1377,8 @@ milliseconds.
 cases
   id, title, goal, owner, profile, llm, model, state, budgets (json),
   usage (json: activations, input_tokens, output_tokens), result (json),
-  outcome (the complete summary or the failure reason), created_at, updated_at
+  outcome (the complete summary or the failure reason), created_at, updated_at,
+  human_channels (json: channel instance names, §10.4)
 
 events                       -- append-only; `seq` orders them and is the polling cursor
   seq, case_id, activation_id, kind, payload (json), created_at
@@ -1332,12 +1407,20 @@ instructions                 -- owner guidance, always in the prompt, editable (
 files                        -- bytes in data/files/<id> (§7.5)
   id, case_id, name, media_type, kind (text/pdf/image), size, sha256,
   text (extracted), pages, created_at
+
+channel_deliveries           -- outbox for channel messages (§10.3)
+  id, case_id, human_request_id (nullable), channel,
+  kind (request/notification/resolution), payload (json),
+  status (pending/sent/failed/skipped), external (json: what `deliver` returned),
+  attempts, next_attempt_at, last_error, created_at, updated_at
+
+channel_cursors              -- where each channel's poll continues
+  channel, cursor (json), updated_at
 ```
 
 **Planned:**
 
 ```
-cases                        + human_channels (json)
 wait_conditions              + instance_name, check_every, cursor (json), lease_until
 human_requests               + kind (question/approval), instance_name, tool, args (json)
 files                        + source (owner / third party)
@@ -1347,14 +1430,6 @@ case_plugins                 -- plugin instances are defined in files (§9.4) an
 
 plugin_kv                    -- host-provided storage for plugins
   instance_name, case_id (nullable), key, value (json)
-
-channel_deliveries           -- outbox for channel messages
-  id, case_id, human_request_id (nullable), channel_instance_name,
-  kind (request/notification/resolution_update), payload (json),
-  status (pending/sent/failed), external_ref, attempts, created_at
-
-channel_inbound              -- dedup of processed replies
-  channel_instance_name, external_id, human_request_id (nullable), processed_at
 
 outbox                       -- side effects of plugin tools (§17.1)
   id, case_id, instance_name, tool, args (json), idempotency_key,
@@ -1383,10 +1458,12 @@ ______________________________________________________________________
   call event, then execute it and mark it `sent`. A crash between those steps is
   reconciled on restart; the email plugin checks the sent folder for the Message-ID
   before re-sending.
-- **Channel messages go through an outbox (planned)**: `channel_deliveries` rows are
-  written in the same transaction as the request, so a crash never loses a notification.
-  The channel poll cursor and `channel_inbound` dedup table mean each reply is processed
-  exactly once.
+- **Channel messages go through an outbox (built)**: `channel_deliveries` rows are
+  written in the same transaction as the question or state change, so a crash never loses
+  a message. A message sent but not yet marked sent when the server dies is sent again
+  after the restart (at-least-once). The poll cursor is saved after the answers it led
+  to, and a reply seen twice can only lose the first-answer race, so each reply counts at
+  most once.
 - **Plugin-check leases (planned)**: wait-condition checks are claimed with `lease_until`
   so a slow check is never run twice.
 
@@ -1398,6 +1475,9 @@ ______________________________________________________________________
 - **LLM fatal errors**: the case fails with the provider's error.
 - **Tool errors**: returned to the LLM as a tool error so it can adapt. They are not
   retried silently.
+- **Channel messages (built)**: retried with backoff, 8 attempts over about an hour (§10.3).
+- **Plugin processes (built)**: a process that times out, exits or writes invalid JSON is
+  killed and started again on the next call (§9.8).
 - **Plugin check errors (planned)**: backoff on the condition (§6.2).
 
 ### 17.3 Security
@@ -1418,14 +1498,16 @@ ______________________________________________________________________
   notifications. The web client is served from the same origin as the API, so it never
   needs CORS. Browser pages on `public_url` or `allowed_origins` get CORS headers
   (including preflight answers); every other origin gets none, and the browser blocks it.
-- **Channel identity (planned)**: an answer from a chat channel carries the owner's
-  authority, so only replies from the instance's `allowed_responders` are accepted.
+- **Channel identity (built)**: an answer from a chat channel carries the owner's
+  authority, so only replies from the instance's `allowed_responders` are accepted, checked
+  by the plugin and again by the engine. Messages can only mention those users.
   Channel text is still treated as data when it's rendered into the LLM context.
-- **Secrets (built for the server, planned for plugins)**: secrets are references in
-  config files (`{ secret = … }`, `{ env = … }`), resolved at startup. They are never
-  written to the database, never logged, never returned by the API, never shown to the
-  LLM, and (planned) never passed to plugin processes except in their own instance config.
-- **Plugins are trusted code (planned)**: an external plugin runs with the server's user.
+- **Secrets (built)**: secrets are references in config files (`{ secret = … }`,
+  `{ env = … }`), resolved at startup, for the server and for plugin instances alike. They
+  are never written to the database, never logged, never returned by the API, never shown
+  to the LLM, and only passed to a plugin process inside its own instance config. A
+  `{ secret = … }` whose name looks like a secret value is refused without echoing it.
+- **Plugins are trusted code (built)**: an external plugin runs with the server's user.
   It gets a minimal environment and only its own config, but nothing stops a malicious
   plugin from reading the data volume. Only install plugins you trust.
 - **Audit (built)**: events and human requests form an audit trail of what each case did
@@ -1433,6 +1515,9 @@ ______________________________________________________________________
 
 ### 17.4 Observability
 
+- **Built**: the Plugins page and `GET /plugins` (§14.6) show each plugin instance's
+  state, last check, and recent errors and warnings, with a mark in the navigation when
+  one needs attention.
 - **Built**: logs through `tracing`, as text or JSON (`CLANKJOB_LOG_FORMAT=json`), with the
   level from `RUST_LOG` (default `info`). Activations log their case and activation ids;
   failures, retries, rejected prompts and model-catalog refreshes are logged.
@@ -1474,6 +1559,8 @@ allowed_origins = ["http://localhost:5173"] # optional, for UIs hosted elsewhere
 data_dir = "/data"
 prompts_dir = "/prompts"                    # optional
 secrets_dir = "/run/secrets"                # the default
+plugins_dir = "/plugins"                    # optional; one directory per plugin (§9.3)
+default_human_channels = ["discord_joe"]    # optional; omitted = every loaded channel
 workers = 4                                 # activation threads
 shutdown_grace = "30s"
 default_llm = "default"
@@ -1501,8 +1588,8 @@ max_total_tokens = 2000000
 Unknown keys are rejected at startup, so a typo is an error, not a silently ignored
 setting. `public_url` and `allowed_origins` must be `http(s)://` URLs. Secrets are
 `{ secret = "name" }` (a file in `secrets_dir`), `{ env = "NAME" }`, or a literal string
-(accepted, but logged as a warning). Planned: `plugins_dir`, `check_workers` and
-`default_human_channels`, with the plugin host.
+(accepted, but logged as a warning). Planned: `check_workers`, with plugin wait
+conditions.
 
 ### 18.3 Image (planned)
 
@@ -1530,12 +1617,14 @@ setting. `public_url` and `allowed_origins` must be `http(s)://` URLs. Secrets a
 - **Fast recovery after restart (built).** Leases are cleared at startup, so interrupted
   cases resume at once.
 - **Migrations (built)** run at startup, before any thread starts.
-- **Health check (built).** `GET /healthz` (§14.6), for Docker's `HEALTHCHECK`.
+- **Health check (built).** `GET /healthz` (§14.7), for Docker's `HEALTHCHECK`.
 - **Backups.** Don't copy the live database file. Use `VACUUM INTO` on a timer, or a
   Litestream sidecar that streams the database to S3-compatible storage. Back up
   `data/files/` alongside it.
-- **Reload (built).** `SIGHUP` or `POST /admin/reload` reloads the prompt templates.
-  Planned: reloading `clankjob.toml` and the plugins without a restart.
+- **Reload (built).** `SIGHUP` or `POST /admin/reload` reloads the prompt templates and
+  the plugins; plugins also reload by themselves when their files change (§9.4). A new
+  or changed secret in the environment still needs a restart. Planned: reloading
+  `clankjob.toml` without a restart.
 
 ### 18.5 Compose example (planned)
 
@@ -1570,9 +1659,10 @@ ______________________________________________________________________
 
 ## 19. Open questions & future work
 
-- **Next milestones**: human requests delivered to chat channels and approvals
-  (milestone 3, §10), then the plugin host and the external plugin protocol
-  (milestone 4, §9), then the email plugin (§11).
+- **Next milestones**: approvals (§9.7, answered in the web or with Discord reactions),
+  then plugin tools and wait conditions (milestone 4, §9), then the email plugin (§11).
+- **Channel attachments**: download files sent in a Discord reply into the case (§7.5)
+  before the links expire.
 - **Compaction** of long transcripts (§7.3).
 - **Cost budgets in dollars**, using the prices the model catalog already collects (§8).
 - **Scheduler precision**: sleep until the next due condition instead of a fixed 15 s tick.
@@ -1580,6 +1670,12 @@ ______________________________________________________________________
   (wasmtime), so an untrusted plugin can't read the data volume.
 - **Python plugin SDK**: a helper module implementing the JSON-RPC loop of §9.8.
 - **Editing plugin config from the web client**, writing back to the files.
+- **Finer plugin reload**: reload only the plugin whose files changed, and keep its old
+  instances running when its new config is invalid.
+- **Plugin trouble notifications**: tell the owner (e.g. by email, or another channel)
+  when a channel starts failing, instead of relying on the Plugins page.
+- **Retry empty Discord replies**: stop the poll cursor before a reply whose text arrived
+  empty (Message Content intent off), so turning the intent on later picks it up.
 - **Push wake-ups**: IMAP IDLE, provider webhooks, or Discord Interactions (buttons), via
   a new optional `Plugin::subscribe()` that writes to a durable inbox table and can fire
   conditions or resolve human requests immediately. Polling stays the fallback.
