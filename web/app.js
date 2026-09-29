@@ -161,6 +161,17 @@ function writeStorage(key, value) {
 }
 
 let sessionToken = readStorage(TOKEN_KEY);
+// Set at startup from /healthz: the server runs with `require_token = false` (testing).
+let openAccess = false;
+
+function signedIn() {
+    return openAccess || Boolean(sessionToken);
+}
+
+/** The Authorization header, when there is a token to send. */
+function authHeaders() {
+    return sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
+}
 
 function applyTheme(theme) {
     if (theme === "auto") document.documentElement.removeAttribute("data-theme");
@@ -200,7 +211,7 @@ class ApiError extends Error {
 }
 
 async function api(path, { method = "GET", body } = {}) {
-    const headers = { Authorization: `Bearer ${sessionToken}` };
+    const headers = authHeaders();
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const response = await fetch(`/api/v1${path}`, {
         method,
@@ -280,7 +291,7 @@ function startGlobalPolling() {
     if (globalPolling) return;
     globalPolling = true;
     poll(async () => {
-        if (!sessionToken) return;
+        if (!signedIn()) return;
         const [{ human_requests: requests }, { cases }, plugins] = await Promise.all([api("/human-requests"), api("/cases?limit=1000"), api("/plugins")]);
         updateInboxCount(requests.length);
         updateCounts(cases);
@@ -920,7 +931,7 @@ function timelineRenderer(thread) {
 async function uploadFile(caseId, file) {
     const response = await fetch(`/api/v1/cases/${encodeURIComponent(caseId)}/files?name=${encodeURIComponent(file.name)}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/octet-stream" },
+        headers: { ...authHeaders(), "Content-Type": "application/octet-stream" },
         body: file,
     });
     const data = await response.json().catch(() => null);
@@ -947,7 +958,7 @@ function fileRow(caseId, file) {
     async function load() {
         if (file.kind === "image") {
             // An <img> cannot send the bearer token, so the bytes are fetched and shown from a blob URL.
-            const response = await fetch(`/api/v1${base}/content`, { headers: { Authorization: `Bearer ${sessionToken}` } });
+            const response = await fetch(`/api/v1${base}/content`, { headers: authHeaders() });
             if (!response.ok) throw new ApiError(response.status, null, "Could not load this image.");
             const url = URL.createObjectURL(await response.blob());
             body.replaceChildren(h("img", { class: "preview", src: url, alt: file.name }));
@@ -1659,10 +1670,11 @@ function pluginsView(view) {
 let current = { section: null, dispose: null, select: null };
 
 function route() {
-    const signedIn = Boolean(sessionToken);
-    document.getElementById("top-actions").hidden = !signedIn;
-    document.getElementById("counts").hidden = !signedIn;
-    const [section, rawId] = signedIn ? (location.hash || "#/cases").slice(2).split("/") : ["signin"];
+    const isSignedIn = signedIn();
+    document.getElementById("top-actions").hidden = !isSignedIn;
+    document.getElementById("counts").hidden = !isSignedIn;
+    document.getElementById("sign-out").hidden = openAccess;
+    const [section, rawId] = isSignedIn ? (location.hash || "#/cases").slice(2).split("/") : ["signin"];
     const id = rawId ? decodeURIComponent(rawId) : null;
     for (const link of document.querySelectorAll("[data-nav]")) {
         if (link.dataset.nav === section) link.setAttribute("aria-current", "page");
@@ -1707,5 +1719,14 @@ document.getElementById("sign-out").addEventListener("click", signOut);
 document.getElementById("new-case").addEventListener("click", () => newCaseDialog());
 window.addEventListener("hashchange", route);
 pollHealth();
-if (sessionToken) startGlobalPolling();
-route();
+// Ask the server whether it wants a token before showing the sign-in page.
+fetch("/healthz")
+    .then((response) => response.json())
+    .then((health) => {
+        openAccess = health?.token_required === false;
+    })
+    .catch(() => {})
+    .finally(() => {
+        if (signedIn()) startGlobalPolling();
+        route();
+    });

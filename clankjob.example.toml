@@ -58,6 +58,10 @@ default_llm = "default"
 [api]
 # Bearer tokens accepted by the API and the web UI sign-in. At least one is required.
 tokens = [{ env = "CLANKJOB_TOKEN" }]
+# For testing on a trusted machine only: serve every request without a token (the web UI
+# skips its sign-in page). Anyone who can reach the server can then run cases, and with
+# the shell plugin, run commands. Also CLANKJOB_REQUIRE_TOKEN=false in the environment.
+# require_token = false
 
 # LLMs. Each [llm.<name>] can be picked per case; `default_llm` names the fallback.
 # Any OpenAI-compatible endpoint works. The model must support tool calling.

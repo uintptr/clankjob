@@ -164,8 +164,13 @@ fn default_llm_timeout() -> Duration {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiConfig {
-    /// Accepted bearer tokens; at least one is required.
+    /// Accepted bearer tokens; at least one is required unless `require_token` is off.
+    #[serde(default)]
     pub tokens: Vec<SecretRef>,
+    /// Whether requests need a token (default). Off, anyone who can reach the server can
+    /// use it, which is only for testing on a trusted machine.
+    #[serde(default = "default_true")]
+    pub require_token: bool,
 }
 
 /// The whole configuration file.
@@ -256,7 +261,7 @@ impl Config {
         S: AsRef<str>,
     {
         let config: Self = toml::from_str(text.as_ref())?;
-        if config.api.tokens.is_empty() {
+        if config.api.require_token && config.api.tokens.is_empty() {
             return Err(ConfigError::Invalid("`api.tokens` needs at least one token".to_owned()));
         }
         if !config.llm.contains_key(&config.default_llm) {
@@ -306,6 +311,7 @@ impl Config {
     /// | `CLANKJOB_PLUGINS_DIR` | `plugins_dir` |
     /// | `CLANKJOB_PROMPTS_DIR` | `prompts_dir` |
     /// | `CLANKJOB_SECRETS_DIR` | `secrets_dir` |
+    /// | `CLANKJOB_REQUIRE_TOKEN` | `api.require_token` (`false`/`0`/`no` or `true`/`1`/`yes`) |
     ///
     /// # Arguments
     ///
@@ -343,6 +349,15 @@ impl Config {
         if let Some(dir) = get("CLANKJOB_SECRETS_DIR") {
             self.secrets_dir = PathBuf::from(dir);
             applied.push("CLANKJOB_SECRETS_DIR");
+        }
+        if let Some(require) = get("CLANKJOB_REQUIRE_TOKEN") {
+            match require.to_ascii_lowercase().as_str() {
+                "false" | "0" | "no" | "off" => self.api.require_token = false,
+                "true" | "1" | "yes" | "on" => self.api.require_token = true,
+                // A typo must not open the server: keep the file's setting.
+                _ => return applied,
+            }
+            applied.push("CLANKJOB_REQUIRE_TOKEN");
         }
         applied
     }
@@ -406,6 +421,31 @@ mod tests {
         assert_eq!(config.data_dir, PathBuf::from("/data"));
         assert_eq!(config.plugins_dir, Some(PathBuf::from("/plugins")));
         assert_eq!(config.prompts_dir, None, "an empty variable changes nothing");
+    }
+
+    #[test]
+    fn a_token_is_required_unless_turned_off_in_the_file_or_the_environment() {
+        let no_tokens = MINIMAL.replace(r#"tokens = [{ secret = "api_token" }]"#, "");
+        let open = MINIMAL.replace(r#"tokens = [{ secret = "api_token" }]"#, "require_token = false");
+
+        assert!(Config::parse(MINIMAL).unwrap().api.require_token);
+        assert!(matches!(Config::parse(&no_tokens), Err(ConfigError::Invalid(_))));
+        assert!(!Config::parse(open).unwrap().api.require_token);
+
+        let mut config = Config::parse(MINIMAL).unwrap();
+        assert!(
+            config
+                .apply_overrides(|_| Some("maybe".to_owned()))
+                .iter()
+                .all(|name| *name != "CLANKJOB_REQUIRE_TOKEN")
+        );
+        assert!(
+            config.api.require_token,
+            "a value that is not a boolean keeps the token required"
+        );
+        let applied = config.apply_overrides(|name| (name == "CLANKJOB_REQUIRE_TOKEN").then(|| "False".to_owned()));
+        assert_eq!(applied, ["CLANKJOB_REQUIRE_TOKEN"]);
+        assert!(!config.api.require_token);
     }
 
     #[test]

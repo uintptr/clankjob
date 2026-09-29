@@ -11,9 +11,10 @@ Downloads the repository once (or uses a local checkout), then in the target dir
     data/             the database and case files
 
 It asks for each value, with the example's value as the default; secrets are typed
-hidden and only ever written to .env. Running it again updates the plugins and keeps
-everything you set: an existing config.toml, clankjob.toml, compose.yaml or .env value
-is never overwritten.
+hidden and only ever written to .env. Running it again updates the plugins and compose.yaml
+(keeping its port and image tag; the previous one is saved as compose.yaml.bak) and keeps
+everything you set: an existing config.toml, clankjob.toml or .env value is never
+overwritten.
 
     curl -fsSLO https://raw.githubusercontent.com/uintptr/clankjob/main/deploy/deploy.py
     python3 deploy.py ~/clankjob
@@ -23,6 +24,7 @@ is never overwritten.
 """
 
 import argparse
+import difflib
 import getpass
 import json
 import re
@@ -38,6 +40,7 @@ from pathlib import Path, PurePosixPath
 
 REPO = "uintptr/clankjob"
 IMAGE = "ghcr.io/uintptr/clankjob"
+DEFAULT_PORT = 8080
 # One line of a TOML file this script can fill in: `key = value  # comment`.
 VALUE_LINE = re.compile(r'^(?P<indent>\s*)(?P<key>[A-Za-z0-9_-]+)\s*=\s*(?P<value>"[^"]*"|\[[^\]]*\]|\{[^}]*\}'
                         r'|true|false|-?\d+(?:\.\d+)?)\s*(?P<comment>#.*)?$')
@@ -286,6 +289,45 @@ def compose_file(template: str, port: int, tag: str) -> str:
     return "\n".join(kept) + "\n"
 
 
+def compose_settings(text: str) -> tuple[int | None, str | None]:
+    """The published port and image tag of an existing compose.yaml, when found."""
+    port = re.search(r'"(?:[\d.]+:)?(\d+):8080"', text)
+    tag = re.search(rf"image: {re.escape(IMAGE)}:([^\s\"']+)", text)
+    return (int(port.group(1)) if port else None), (tag.group(1) if tag else None)
+
+
+def update_compose(path: Path, template: str, port: int | None, tag: str | None, keep: bool) -> int:
+    """Write compose.yaml from the template, or bring an existing one up to date: its port
+    and image tag carry over unless given, and the previous file is kept as
+    compose.yaml.bak when anything changes. Returns the port it publishes."""
+    if not path.exists():
+        port = port or DEFAULT_PORT
+        path.write_text(compose_file(template, port, tag or "latest"), encoding="utf-8")
+        print("compose.yaml: written")
+        return port
+    old = path.read_text(encoding="utf-8")
+    old_port, old_tag = compose_settings(old)
+    port = port or old_port or DEFAULT_PORT
+    if keep:
+        print("compose.yaml: kept (--keep-compose)")
+        return port
+    new = compose_file(template, port, tag or old_tag or "latest")
+    if new == old:
+        print("compose.yaml: up to date")
+        return port
+    backup = path.with_name("compose.yaml.bak")
+    backup.write_text(old, encoding="utf-8")
+    path.write_text(new, encoding="utf-8")
+    changes = [line for line in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0)
+               if line[:1] in "+-" and not line.startswith(("+++", "---"))]
+    print(f"compose.yaml: updated ({len(changes)} lines changed; the previous one is {backup.name})")
+    for line in changes[:40]:
+        print(f"  {line}")
+    if len(changes) > 40:
+        print(f"  … and {len(changes) - 40} more: diff {backup.name} compose.yaml")
+    return port
+
+
 def server_config(template: str, asker: Asker, env: dict[str, str]) -> tuple[str, dict[str, str]]:
     """clankjob.toml from the example: public URL, LLM endpoint, model and its key."""
     print("\nServer (clankjob.toml)")
@@ -341,13 +383,9 @@ def setup(args: argparse.Namespace, asker: Asker, run: Callable[[list[str]], int
         names = copy_plugins(source, target / "plugins")
         print(f"Plugins: {', '.join(names)} (in {target / 'plugins'})")
 
-        compose = target / "compose.yaml"
-        if compose.exists():
-            print("compose.yaml: kept (delete it to regenerate)")
-        else:
-            compose.write_text(compose_file((source / "deploy" / "compose.yaml").read_text(encoding="utf-8"),
-                                            args.port, args.image_tag), encoding="utf-8")
-            print("compose.yaml: written")
+        port = update_compose(target / "compose.yaml",
+                              (source / "deploy" / "compose.yaml").read_text(encoding="utf-8"),
+                              args.port, args.image_tag, args.keep_compose)
 
         config = target / "clankjob.toml"
         if config.exists():
@@ -379,7 +417,7 @@ def setup(args: argparse.Namespace, asker: Asker, run: Callable[[list[str]], int
 
     print(f"\nReady in {target}. Next:")
     print(f"  cd {target} && docker compose up -d")
-    print(f"  then open http://127.0.0.1:{args.port} and sign in with CLANKJOB_TOKEN from .env")
+    print(f"  then open http://127.0.0.1:{port} and sign in with CLANKJOB_TOKEN from .env")
     print("  check a plugin:  docker compose exec clankjob /plugins/<id>/check_config.py")
     if shutil.which("docker") and asker.yes("\nStart it now (docker compose up -d)?", False):
         status = run(["docker", "compose", "--project-directory", str(target), "up", "-d"])
@@ -393,8 +431,11 @@ def main() -> int:
                         help="where to set up (default: here if this is a setup already, else ./clankjob)")
     parser.add_argument("--ref", default="main", help="branch, tag or commit to take the plugins from (default main)")
     parser.add_argument("--source", type=Path, help="a local clankjob checkout instead of downloading")
-    parser.add_argument("--image-tag", default="latest", help="image tag, e.g. 1.2 (default latest)")
-    parser.add_argument("--port", type=int, default=8080, help="local port for the web UI and API (default 8080)")
+    parser.add_argument("--image-tag", help="image tag, e.g. 1.2 (default: the current one, else latest)")
+    parser.add_argument("--port", type=int,
+                        help=f"local port for the web UI and API (default: the current one, else {DEFAULT_PORT})")
+    parser.add_argument("--keep-compose", action="store_true",
+                        help="leave an existing compose.yaml as it is instead of updating it")
     parser.add_argument("--configure", action="append", metavar="PLUGIN", help="configure this plugin (repeatable)")
     parser.add_argument("--yes", action="store_true", help="ask nothing: take defaults, configure no plugin")
     args = parser.parse_args()

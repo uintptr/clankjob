@@ -133,12 +133,33 @@ class SetupTests(unittest.TestCase):
             (here / "clankjob.toml").write_text("")
             self.assertEqual(here, deploy.default_target(here))
 
+    def test_an_old_compose_is_updated_keeping_its_port_and_tag_and_backed_up(self) -> None:
+        template = (REPO / "deploy/compose.yaml").read_text()
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work) / "compose.yaml"
+            old = deploy.compose_file(template, 8081, "1.2").split("\n  sandbox:")[0] + "\n"
+            path.write_text(old)
+            self.assertEqual((8081, "1.2"), deploy.compose_settings(old))
+
+            self.assertEqual(8081, deploy.update_compose(path, template, None, None, keep=False))
+            self.assertIn("sandbox:", path.read_text())
+            self.assertEqual((8081, "1.2"), deploy.compose_settings(path.read_text()))
+            self.assertEqual(old, (Path(work) / "compose.yaml.bak").read_text())
+
+            updated = path.read_text()
+            deploy.update_compose(path, template, None, None, keep=False)
+            self.assertEqual(updated, path.read_text(), "an up-to-date file is left alone")
+            self.assertEqual(9000, deploy.update_compose(path, template, 9000, None, keep=True))
+            self.assertEqual(updated, path.read_text(), "--keep-compose changes nothing")
+            deploy.update_compose(path, template, 9000, "latest", keep=False)
+            self.assertEqual((9000, "latest"), deploy.compose_settings(path.read_text()))
+
     def test_a_full_setup_then_a_rerun_that_keeps_everything(self) -> None:
         # Arrange
         with tempfile.TemporaryDirectory() as work:
             target = Path(work) / "clankjob"
-            args = argparse.Namespace(dir=target, ref="main", source=REPO, image_tag="latest", port=8080,
-                                      configure=None, yes=False)
+            args = argparse.Namespace(dir=target, ref="main", source=REPO, image_tag=None, port=None,
+                                      keep_compose=False, configure=None, yes=False)
             asker = ScriptedAsker({"LLM API key": "sk-or-1", "Configure the email": "y",
                                    "EMAIL_ADDRESS": "me@gmail.com", "EMAIL_PASSWORD": "app-pw",
                                    "Start it now": "n"})

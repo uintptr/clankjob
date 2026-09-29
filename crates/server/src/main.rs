@@ -80,6 +80,25 @@ fn build_providers(config: &Config) -> anyhow::Result<HashMap<String, Arc<dyn Ll
         .collect()
 }
 
+/// The accepted API tokens, or `None` (with a warning) when `api.require_token` is off.
+fn api_tokens(config: &Config) -> anyhow::Result<Option<Vec<SecretString>>> {
+    if !config.api.require_token {
+        tracing::warn!(
+            listen = %config.listen,
+            "no API token required (api.require_token = false): anyone who can reach the server can run cases"
+        );
+        return Ok(None);
+    }
+    let tokens = config
+        .api
+        .tokens
+        .iter()
+        .map(|token| token.resolve(&config.secrets_dir))
+        .collect::<Result<_, _>>()
+        .context("API tokens")?;
+    Ok(Some(tokens))
+}
+
 fn run() -> anyhow::Result<()> {
     let path = config_path();
     let mut config = Config::load(&path).with_context(|| format!("loading {}", path.display()))?;
@@ -87,13 +106,7 @@ fn run() -> anyhow::Result<()> {
     if !overridden.is_empty() {
         tracing::info!(variables = ?overridden, "configuration overridden by the environment");
     }
-    let tokens: Vec<SecretString> = config
-        .api
-        .tokens
-        .iter()
-        .map(|token| token.resolve(&config.secrets_dir))
-        .collect::<Result<_, _>>()
-        .context("API tokens")?;
+    let tokens = api_tokens(&config)?;
     let providers = build_providers(&config)?;
     let catalog = Arc::new(catalog::Catalog::new(
         config

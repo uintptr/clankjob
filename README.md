@@ -119,6 +119,10 @@ model = "openai/gpt-4.1-mini"
 Secrets are never written in the file itself. They are references to environment
 variables (`{ env = "…" }`) or Docker secrets (`{ secret = "…" }`).
 
+To test without a token, set `require_token = false` under `[api]` (or
+`CLANKJOB_REQUIRE_TOKEN=false`): the API and web UI then need no sign-in. Anyone who can
+reach the server can use it, so keep it to a trusted machine.
+
 **2. Run the server:**
 
 ```sh

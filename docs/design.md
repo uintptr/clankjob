@@ -1197,7 +1197,9 @@ ______________________________________________________________________
 Base path `/api/v1`. JSON in and out, except file uploads (raw bytes) and file content.
 Auth: `Authorization: Bearer <token>` on everything except `/healthz` and the web client's
 static files. Tokens come from the config (`[api] tokens`) and are compared in constant
-time.
+time. For testing, `[api] require_token = false` (or `CLANKJOB_REQUIRE_TOKEN=false`) serves
+every request without one: the server logs a warning at startup, `/healthz` reports
+`"token_required": false`, and the web client then skips its sign-in page.
 
 ### 14.1 Cases (built)
 
@@ -1611,7 +1613,8 @@ Unknown keys are rejected at startup, so a typo is an error, not a silently igno
 setting. Environment variables override the listen address and the directories, so one
 file serves both a local run and the container, whose image sets them: `CLANKJOB_LISTEN`
 (`0.0.0.0:8080`), `CLANKJOB_DATA_DIR` (`/data`), `CLANKJOB_PLUGINS_DIR` (`/plugins`),
-`CLANKJOB_PROMPTS_DIR` (`/prompts`) and `CLANKJOB_SECRETS_DIR`; the startup log lists the
+`CLANKJOB_PROMPTS_DIR` (`/prompts`) and `CLANKJOB_SECRETS_DIR`, and
+`CLANKJOB_REQUIRE_TOKEN=false` turns off the API token for testing (§14); the startup log lists the
 ones that took effect. `public_url` and `allowed_origins` must be `http(s)://` URLs. Secrets are
 `{ secret = "name" }` (a file in `secrets_dir`), `{ env = "NAME" }`, or a literal string
 (accepted, but logged as a warning). Planned: `check_workers`, with plugin wait

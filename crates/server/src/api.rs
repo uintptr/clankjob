@@ -124,19 +124,20 @@ pub struct CaseDefaults {
 /// Everything request handlers need.
 pub struct AppState {
     engine: Engine,
-    tokens: Vec<SecretString>,
+    /// Accepted bearer tokens, or `None` when no token is required.
+    tokens: Option<Vec<SecretString>>,
     defaults: CaseDefaults,
     catalog: Arc<Catalog>,
     plugins: Arc<PluginManager>,
 }
 
 impl AppState {
-    /// Bundle the engine, accepted API tokens, case defaults, the model catalog and the
-    /// plugins.
+    /// Bundle the engine, accepted API tokens (`None`: no token required), case defaults,
+    /// the model catalog and the plugins.
     #[must_use]
     pub fn new(
         engine: Engine,
-        tokens: Vec<SecretString>,
+        tokens: Option<Vec<SecretString>>,
         defaults: CaseDefaults,
         catalog: Arc<Catalog>,
         plugins: Arc<PluginManager>,
@@ -162,6 +163,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn authorized(state: &AppState, request: &Request) -> bool {
+    let Some(tokens) = &state.tokens else {
+        return true;
+    };
     let Some(token) = request
         .header("Authorization")
         .and_then(|header| header.strip_prefix("Bearer "))
@@ -169,7 +173,7 @@ fn authorized(state: &AppState, request: &Request) -> bool {
         return false;
     };
     // `fold` instead of `any` so every token is compared, whichever one matches.
-    state.tokens.iter().fold(false, |found, accepted| {
+    tokens.iter().fold(false, |found, accepted| {
         constant_time_eq(accepted.expose_secret().as_bytes(), token.as_bytes()) | found
     })
 }
@@ -211,8 +215,14 @@ fn health(state: &AppState) -> Response {
     let last_tick = state.engine.last_scheduler_tick();
     let scheduler = last_tick.is_some_and(|tick| Utc::now().signed_duration_since(tick) < chrono::Duration::minutes(2));
     let status = if database && scheduler { 200 } else { 503 };
-    Response::json(&json!({ "database": database, "scheduler": scheduler, "last_scheduler_tick": last_tick }))
-        .with_status_code(status)
+    // `token_required` tells the web UI whether to show its sign-in page.
+    Response::json(&json!({
+        "database": database,
+        "scheduler": scheduler,
+        "last_scheduler_tick": last_tick,
+        "token_required": state.tokens.is_some(),
+    }))
+    .with_status_code(status)
 }
 
 /// Body of `POST /cases`.
@@ -757,10 +767,21 @@ mod tests {
                 suggested: vec!["cheap-model".to_owned(), "big-model".to_owned()],
                 provider: None,
             }]);
-            let tokens = vec![SecretString::from("token".to_owned())];
             let plugins = Arc::new(PluginManager::new(None, dir.path().to_path_buf(), None, engine.clone()));
-            let state = AppState::new(engine, tokens, defaults, Arc::new(catalog), plugins);
+            let state = AppState::new(
+                engine,
+                Some(vec![SecretString::from("token".to_owned())]),
+                defaults,
+                Arc::new(catalog),
+                plugins,
+            );
             Self { state, _dir: dir }
+        }
+
+        fn without_token() -> Self {
+            let mut api = Self::new();
+            api.state.tokens = None;
+            api
         }
 
         fn call(&self, method: &str, url: &str, body: Option<Value>) -> (u16, Value) {
@@ -799,6 +820,26 @@ mod tests {
             );
             assert_eq!(response.status_code, 401);
         }
+    }
+
+    #[test]
+    fn without_a_required_token_any_request_is_served_and_health_says_so() {
+        let api = TestApi::without_token();
+
+        let response = handle(
+            &api.state,
+            &Request::fake_http("GET", "/api/v1/cases", vec![], Vec::new()),
+        );
+        let health = handle(&api.state, &Request::fake_http("GET", "/healthz", vec![], Vec::new()));
+
+        assert_eq!(response.status_code, 200);
+        let (mut reader, _) = health.data.into_reader_and_size();
+        let mut text = String::new();
+        reader.read_to_string(&mut text).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["token_required"],
+            json!(false)
+        );
     }
 
     #[test]
