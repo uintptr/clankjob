@@ -92,6 +92,27 @@ pub struct ViewImageArgs {
     pub file: String,
 }
 
+/// Arguments of `read_guide`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadGuideArgs {
+    /// Guide name, as listed under Guides.
+    pub name: String,
+}
+
+/// Names of the core tools; plugin tools cannot take them.
+pub const CORE_TOOL_NAMES: &[&str] = &[
+    "sleep",
+    "ask_human",
+    "complete",
+    "fail",
+    "note_set",
+    "note_delete",
+    "read_file",
+    "view_image",
+    "read_guide",
+];
+
 /// Characters `read_file` returns when `max_chars` is not given.
 pub const DEFAULT_READ_CHARS: usize = 20_000;
 /// Most characters one `read_file` call returns.
@@ -116,6 +137,8 @@ pub enum CoreTool {
     ReadFile(ReadFileArgs),
     /// Show an image file to the model.
     ViewImage(ViewImageArgs),
+    /// Read a plugin's guide.
+    ReadGuide(ReadGuideArgs),
 }
 
 fn parse_args<T>(call: &ToolCall) -> Result<T, String>
@@ -142,6 +165,7 @@ impl CoreTool {
             "note_delete" => parse_args(call).map(Self::NoteDelete),
             "read_file" => parse_args(call).map(Self::ReadFile),
             "view_image" => parse_args(call).map(Self::ViewImage),
+            "read_guide" => parse_args(call).map(Self::ReadGuide),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -253,8 +277,9 @@ fn file_tool_specs(vision: bool) -> Vec<ToolSpec> {
 ///
 /// * `has_files` - The case has files, so `read_file` is offered
 /// * `vision` - The model can see images, so `view_image` is offered too
+/// * `has_guides` - Plugins offer guides, so `read_guide` is offered
 #[must_use]
-pub fn core_tool_specs(has_files: bool, vision: bool) -> Vec<ToolSpec> {
+pub fn core_tool_specs(has_files: bool, vision: bool, has_guides: bool) -> Vec<ToolSpec> {
     let condition = json!({
         "type": "object",
         "properties": {
@@ -340,6 +365,17 @@ pub fn core_tool_specs(has_files: bool, vision: bool) -> Vec<ToolSpec> {
     ];
     if has_files {
         specs.extend(file_tool_specs(vision));
+    }
+    if has_guides {
+        specs.push(spec(
+            "read_guide",
+            "Read one of the guides listed under Guides: instructions for a kind of task. Read it before starting that task.",
+            json!({
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "The guide's name, as listed under Guides."}},
+                "required": ["name"]
+            }),
+        ));
     }
     specs
 }
@@ -459,7 +495,10 @@ mod tests {
     #[test]
     fn specs_cover_every_parsable_tool() {
         let names = |has_files, vision| -> Vec<String> {
-            core_tool_specs(has_files, vision).into_iter().map(|spec| spec.name).collect()
+            core_tool_specs(has_files, vision, false)
+                .into_iter()
+                .map(|spec| spec.name)
+                .collect()
         };
 
         assert_eq!(
@@ -468,6 +507,8 @@ mod tests {
         );
         assert_eq!(names(true, false).last().map(String::as_str), Some("read_file"));
         assert_eq!(names(true, true)[6..], ["read_file", "view_image"]);
+        let every: Vec<String> = core_tool_specs(true, true, true).into_iter().map(|spec| spec.name).collect();
+        assert_eq!(every, CORE_TOOL_NAMES);
         assert!(matches!(
             CoreTool::parse(&call("read_file", json!({"file": "a.pdf", "offset": 10}))).unwrap(),
             CoreTool::ReadFile(ReadFileArgs {

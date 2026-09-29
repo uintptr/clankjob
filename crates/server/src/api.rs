@@ -526,9 +526,11 @@ fn plugins_summary(state: &AppState) -> Value {
             value
         })
         .collect();
+    let conflicts = state.plugins.conflicts();
     json!({
         "plugins_dir": state.plugins.dir().map(|dir| dir.display().to_string()),
-        "attention": attention,
+        "attention": attention || !conflicts.is_empty(),
+        "conflicts": conflicts,
         "plugins": plugins,
     })
 }
@@ -838,7 +840,7 @@ mod tests {
         let (reload_status, _) = api.call("POST", "/api/v1/admin/reload", None);
 
         assert_eq!((status, prompt_status, reload_status), (200, 200, 200));
-        assert_eq!(list["prompts"].as_array().unwrap().len(), 6);
+        assert_eq!(list["prompts"].as_array().unwrap().len(), 7);
         assert_eq!(prompt["source"], "builtin");
         assert_eq!(api.call("GET", "/api/v1/prompts/profiles/none", None).0, 404);
     }

@@ -31,6 +31,8 @@ pub struct PluginManager {
     current: RwLock<Arc<PluginRegistry>>,
     reloading: Mutex<()>,
     stopped: AtomicBool,
+    /// Tools and guides left out because their name was taken.
+    conflicts: Mutex<Vec<String>>,
 }
 
 impl PluginManager {
@@ -57,6 +59,7 @@ impl PluginManager {
             current: RwLock::new(Arc::new(PluginRegistry::default())),
             reloading: Mutex::new(()),
             stopped: AtomicBool::new(false),
+            conflicts: Mutex::new(Vec::new()),
         }
     }
 
@@ -64,6 +67,12 @@ impl PluginManager {
     #[must_use]
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref()
+    }
+
+    /// Tools and guides left out at the last load because their name was taken.
+    #[must_use]
+    pub fn conflicts(&self) -> Vec<String> {
+        self.conflicts.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// The registry in use.
@@ -102,8 +111,17 @@ impl PluginManager {
                 .cloned()
                 .collect(),
         };
-        tracing::info!(channels = ?names, ?default, errors = registry.errors().len(), "plugins loaded");
+        tracing::info!(
+            channels = ?names,
+            ?default,
+            tools = registry.tools().len(),
+            guides = registry.guides().len(),
+            errors = registry.errors().len(),
+            "plugins loaded"
+        );
         self.engine.channels().replace(channels, default);
+        let conflicts = self.engine.plugin_tools().replace(registry.tools(), registry.guides());
+        *self.conflicts.lock().unwrap_or_else(PoisonError::into_inner) = conflicts;
         let previous = std::mem::replace(
             &mut *self.current.write().unwrap_or_else(PoisonError::into_inner),
             Arc::clone(&registry),

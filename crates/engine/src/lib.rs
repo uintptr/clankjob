@@ -24,6 +24,7 @@ mod activation;
 pub mod channels;
 pub mod context;
 pub mod files;
+pub mod plugin_tools;
 pub mod prompts;
 mod scheduler;
 pub mod tools;
@@ -31,6 +32,7 @@ pub mod transitions;
 
 use channels::Channels;
 use files::FileStore;
+use plugin_tools::PluginTools;
 use prompts::PromptSet;
 
 /// Errors from engine operations.
@@ -210,6 +212,7 @@ struct Shared {
     prompts_dir: Option<PathBuf>,
     files: FileStore,
     channels: Channels,
+    plugin_tools: PluginTools,
     settings: EngineSettings,
     signal: WorkSignal,
     shutdown: AtomicBool,
@@ -262,6 +265,7 @@ impl Engine {
                 prompts_dir,
                 files: FileStore::new(files_dir),
                 channels,
+                plugin_tools: PluginTools::default(),
                 settings,
                 signal: WorkSignal::default(),
                 shutdown: AtomicBool::new(false),
@@ -321,6 +325,12 @@ impl Engine {
     #[must_use]
     pub fn channels(&self) -> &Channels {
         &self.shared.channels
+    }
+
+    /// Tools and guides offered by plugins; swapped when plugins are reloaded.
+    #[must_use]
+    pub fn plugin_tools(&self) -> &PluginTools {
+        &self.shared.plugin_tools
     }
 
     /// The prompt templates currently in use.
@@ -408,37 +418,7 @@ impl Engine {
         name: &str,
         bytes: &[u8],
     ) -> Result<CaseFile> {
-        let name = files::clean_name(name).map_err(EngineError::InvalidFile)?;
-        if bytes.is_empty() || bytes.len() > files::MAX_FILE_BYTES {
-            return Err(EngineError::InvalidFile(format!(
-                "`{name}` must be between 1 byte and {} MB",
-                files::MAX_FILE_BYTES / 1024 / 1024
-            )));
-        }
-        let existing = clankjob_storage::files::list_files(connection, case_id)?;
-        let total: u64 = existing.iter().map(|file| file.size).sum();
-        let size = bytes.len() as u64;
-        if existing.len() >= files::MAX_CASE_FILES || total.saturating_add(size) > files::MAX_CASE_FILE_BYTES {
-            return Err(EngineError::InvalidFile(format!(
-                "a case holds at most {} files and {} MB",
-                files::MAX_CASE_FILES,
-                files::MAX_CASE_FILE_BYTES / 1024 / 1024
-            )));
-        }
-        let inspected = files::inspect(&name, bytes).map_err(EngineError::InvalidFile)?;
-        let file = CaseFile {
-            id: FileId::generate(),
-            case_id: case_id.clone(),
-            name,
-            media_type: inspected.media_type,
-            kind: inspected.kind,
-            size,
-            sha256: prompts::sha256_hex(bytes),
-            text_chars: inspected.text.as_ref().map(|text| text.chars().count() as u64),
-            text: inspected.text,
-            pages: inspected.pages,
-            created_at: Utc::now(),
-        };
+        let file = prepare_file(connection, case_id, name, bytes)?;
         // Bytes first: a row must never point at a missing file. If the row cannot be
         // written, the orphaned bytes are removed again.
         self.shared.files.write(&file.id, bytes)?;
@@ -548,6 +528,48 @@ impl Engine {
     pub fn cancel_case(&self, connection: &mut Connection, case_id: &CaseId) -> Result<()> {
         transitions::cancel_case(connection, case_id, Utc::now())
     }
+}
+
+/// Check a new file against the size and per-case limits and inspect its content
+/// (design §7.5). Nothing is stored.
+///
+/// # Errors
+///
+/// Returns [`EngineError::InvalidFile`] for an unsupported, empty or oversized file or a
+/// case over its file limits, or [`EngineError::Storage`].
+pub(crate) fn prepare_file(connection: &Connection, case_id: &CaseId, name: &str, bytes: &[u8]) -> Result<CaseFile> {
+    let name = files::clean_name(name).map_err(EngineError::InvalidFile)?;
+    if bytes.is_empty() || bytes.len() > files::MAX_FILE_BYTES {
+        return Err(EngineError::InvalidFile(format!(
+            "`{name}` must be between 1 byte and {} MB",
+            files::MAX_FILE_BYTES / 1024 / 1024
+        )));
+    }
+    let existing = clankjob_storage::files::list_files(connection, case_id)?;
+    let total: u64 = existing.iter().map(|file| file.size).sum();
+    let size = bytes.len() as u64;
+    if existing.len() >= files::MAX_CASE_FILES || total.saturating_add(size) > files::MAX_CASE_FILE_BYTES {
+        return Err(EngineError::InvalidFile(format!(
+            "a case holds at most {} files and {} MB",
+            files::MAX_CASE_FILES,
+            files::MAX_CASE_FILE_BYTES / 1024 / 1024
+        )));
+    }
+    let inspected = files::inspect(&name, bytes).map_err(EngineError::InvalidFile)?;
+    let file = CaseFile {
+        id: FileId::generate(),
+        case_id: case_id.clone(),
+        name,
+        media_type: inspected.media_type,
+        kind: inspected.kind,
+        size,
+        sha256: prompts::sha256_hex(bytes),
+        text_chars: inspected.text.as_ref().map(|text| text.chars().count() as u64),
+        text: inspected.text,
+        pages: inspected.pages,
+        created_at: Utc::now(),
+    };
+    Ok(file)
 }
 
 /// `time + duration`, saturating at the latest representable time instead of overflowing.

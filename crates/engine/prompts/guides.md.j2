@@ -1,0 +1,8 @@
+## Guides
+
+Plugins offer instructions for some kinds of tasks. When the goal or a message matches
+one, read it with `read_guide` before starting, and follow it.
+
+{% for guide in guides %}
+- `{{ guide.name }}` ({{ guide.plugin }}): {{ guide.description }}
+{% endfor %}

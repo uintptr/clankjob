@@ -14,10 +14,13 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use clankjob_core::channel::{ChannelError, HumanChannel};
+use clankjob_core::tool::{Guide, PluginTool};
+use command::{CommandTool, ToolManifest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 mod channel;
+pub mod command;
 pub mod process;
 
 pub use channel::{DEFAULT_NOTIFY_ON, ProcessChannel};
@@ -38,6 +41,8 @@ pub enum Runtime {
     Python,
     /// Any executable.
     Exec,
+    /// Tools that are command lines, declared in the manifest (§9.9).
+    Command,
 }
 
 /// `plugin.toml`. Fields the host does not use yet (tools, wait conditions) are ignored.
@@ -55,6 +60,25 @@ struct Manifest {
     entrypoint: Option<String>,
     #[serde(default)]
     human_channel: Option<toml::Table>,
+    /// Command tools (`runtime = "command"`).
+    #[serde(default)]
+    tools: Vec<toml::Value>,
+    /// Guides: `{ name, description, file }`.
+    #[serde(default)]
+    guides: Vec<GuideManifest>,
+    /// Programs that must be on `PATH`, e.g. `uv`.
+    #[serde(default)]
+    requires: Vec<String>,
+}
+
+/// A guide: `[[guides]]` in `plugin.toml`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuideManifest {
+    name: String,
+    description: String,
+    /// Markdown file inside the plugin directory.
+    file: String,
 }
 
 /// A plugin's `config.toml`.
@@ -62,6 +86,19 @@ struct Manifest {
 struct PluginConfig {
     #[serde(default)]
     instances: BTreeMap<String, toml::Table>,
+    /// Environment variables for a command plugin's tools; values may be secret
+    /// references, e.g. `YT_PROXY_URL = { env = "YT_PROXY_URL" }`.
+    #[serde(default)]
+    env: toml::Table,
+}
+
+/// A tool as listed by the API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolInfo {
+    /// Name the LLM calls.
+    pub name: String,
+    /// What it does.
+    pub description: String,
 }
 
 /// Whether an instance is running.
@@ -186,6 +223,10 @@ pub struct PluginStatus {
     pub note: Option<String>,
     /// Its instances.
     pub instances: Vec<InstanceStatus>,
+    /// Tools it offers the LLM.
+    pub tools: Vec<ToolInfo>,
+    /// Guides it offers (name and description).
+    pub guides: Vec<ToolInfo>,
 }
 
 impl PluginStatus {
@@ -199,6 +240,8 @@ impl PluginStatus {
             error: None,
             note: None,
             instances: Vec::new(),
+            tools: Vec::new(),
+            guides: Vec::new(),
         }
     }
 }
@@ -209,6 +252,8 @@ pub struct PluginRegistry {
     statuses: Mutex<Vec<PluginStatus>>,
     channels: BTreeMap<String, Arc<ProcessChannel>>,
     processes: Vec<Arc<ProcessPlugin>>,
+    tools: Vec<Arc<CommandTool>>,
+    guides: Vec<Guide>,
     errors: Vec<String>,
 }
 
@@ -220,6 +265,18 @@ impl PluginRegistry {
             .iter()
             .map(|(name, channel)| (name.clone(), Arc::clone(channel) as Arc<dyn HumanChannel>))
             .collect()
+    }
+
+    /// The tools plugins offer the LLM.
+    #[must_use]
+    pub fn tools(&self) -> Vec<Arc<dyn PluginTool>> {
+        self.tools.iter().map(|tool| Arc::clone(tool) as Arc<dyn PluginTool>).collect()
+    }
+
+    /// The guides plugins offer.
+    #[must_use]
+    pub fn guides(&self) -> Vec<Guide> {
+        self.guides.clone()
     }
 
     /// Every plugin found and the state of its instances.
@@ -287,6 +344,9 @@ impl PluginRegistry {
 #[must_use]
 pub fn load(plugins_dir: &Path, secrets_dir: &Path) -> PluginRegistry {
     let mut registry = PluginRegistry::default();
+    // Plugins run with their own directory as working directory, so every path handed to
+    // them must be absolute; `plugins_dir` is often relative (`./plugin`).
+    let plugins_dir = &std::fs::canonicalize(plugins_dir).unwrap_or_else(|_| plugins_dir.to_path_buf());
     let mut statuses = Vec::new();
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(plugins_dir) {
         Ok(entries) => entries
@@ -349,9 +409,15 @@ fn load_plugin(
             manifest.protocol
         ));
     }
+    for program in &manifest.requires {
+        command::require(program).map_err(|error| format!("needs `{program}`: {error}"))?;
+    }
+    if manifest.runtime == Runtime::Command {
+        return load_command_plugin(dir, secrets_dir, &manifest, registry, status);
+    }
     if manifest.human_channel.is_none() {
-        tracing::info!(plugin = %manifest.id, "plugin skipped: only human channels are supported so far");
-        status.note = Some("not loaded: only human channel plugins are supported so far".to_owned());
+        tracing::info!(plugin = %manifest.id, "plugin skipped: it provides neither a human channel nor command tools");
+        status.note = Some("not loaded: only human channels and command tools are supported so far".to_owned());
         return Ok(());
     }
     let entrypoint = manifest.entrypoint.as_deref().ok_or("`entrypoint` is required")?;
@@ -362,6 +428,7 @@ fn load_plugin(
         Runtime::Python => vec!["python3".to_owned(), entrypoint.to_owned()],
         Runtime::Exec => vec![dir.join(entrypoint).to_string_lossy().into_owned()],
         Runtime::Builtin => return Err("no built-in plugin with this id".to_owned()),
+        Runtime::Command => return Err("a command plugin cannot be a human channel".to_owned()),
     };
     let config_path = dir.join("config.toml");
     if !config_path.is_file() {
@@ -408,6 +475,80 @@ fn load_plugin(
     if used {
         registry.processes.push(process);
     }
+    Ok(())
+}
+
+/// Load a command plugin: its tools and guides, all or nothing.
+fn load_command_plugin(
+    dir: &Path,
+    secrets_dir: &Path,
+    manifest: &Manifest,
+    registry: &mut PluginRegistry,
+    status: &mut PluginStatus,
+) -> Result<(), String> {
+    let config_path = dir.join("config.toml");
+    let env = if config_path.is_file() {
+        let config: PluginConfig = read_toml(&config_path)?;
+        let Value::Object(resolved) = resolve(toml::Value::Table(config.env), secrets_dir, "env")? else {
+            return Err("`env` must be a table".to_owned());
+        };
+        resolved
+            .into_iter()
+            .map(|(name, value)| match value {
+                Value::String(text) => Ok((name, text)),
+                other => Ok((name, other.to_string())),
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?
+    } else {
+        BTreeMap::new()
+    };
+    let mut tools = Vec::with_capacity(manifest.tools.len());
+    for raw in &manifest.tools {
+        let tool: ToolManifest = raw
+            .clone()
+            .try_into()
+            .map_err(|error| format!("invalid [[tools]] entry: {error}"))?;
+        tools.push(CommandTool::new(&manifest.id, dir, tool, env.clone())?);
+    }
+    let mut guides = Vec::with_capacity(manifest.guides.len());
+    for guide in &manifest.guides {
+        if guide.file.contains("..") || Path::new(&guide.file).is_absolute() {
+            return Err(format!(
+                "guide `{}`: the file must be inside the plugin directory",
+                guide.name
+            ));
+        }
+        let content = std::fs::read_to_string(dir.join(&guide.file))
+            .map_err(|error| format!("guide `{}`: cannot read {}: {error}", guide.name, guide.file))?;
+        guides.push(Guide {
+            plugin: manifest.id.clone(),
+            name: guide.name.clone(),
+            description: guide.description.clone(),
+            content,
+        });
+    }
+    if tools.is_empty() && guides.is_empty() {
+        status.note = Some("no [[tools]] or [[guides]] in plugin.toml".to_owned());
+        return Ok(());
+    }
+    status.provides.push("tools".to_owned());
+    status.tools = tools
+        .iter()
+        .map(|tool| ToolInfo {
+            name: tool.spec().name.clone(),
+            description: tool.spec().description.clone(),
+        })
+        .collect();
+    status.guides = guides
+        .iter()
+        .map(|guide| ToolInfo {
+            name: guide.name.clone(),
+            description: guide.description.clone(),
+        })
+        .collect();
+    tracing::info!(plugin = %manifest.id, tools = tools.len(), guides = guides.len(), "command plugin loaded");
+    registry.tools.extend(tools.into_iter().map(Arc::new));
+    registry.guides.extend(guides);
     Ok(())
 }
 
@@ -634,6 +775,57 @@ for line in sys.stdin:
         assert_eq!(channel.poll_interval(), MIN_POLL_INTERVAL);
         assert!(channel.notifies("failed") && !channel.notifies("completed"));
         assert_eq!(channel.plugin(), "chat");
+    }
+
+    #[test]
+    fn command_plugins_load_tools_guides_and_env() {
+        // Arrange
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("youtube");
+        std::fs::create_dir_all(dir.join("guides")).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            "id = \"youtube\"\nruntime = \"command\"\nrequires = [\"sh\"]\n\
+             [[tools]]\nname = \"echo_env\"\ndescription = \"Print the proxy.\"\n\
+             command = [\"sh\", \"-c\", \"echo $YT_PROXY_URL\"]\n\
+             [[guides]]\nname = \"calls\"\ndescription = \"Earnings calls.\"\nfile = \"guides/calls.md\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("guides/calls.md"), "Cite timestamps.").unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[env]\nYT_PROXY_URL = { secret = \"proxy\" }\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("proxy"), "http://proxy:8080\n").unwrap();
+        let broken = root.path().join("needs");
+        std::fs::create_dir(&broken).unwrap();
+        std::fs::write(
+            broken.join("plugin.toml"),
+            "id = \"needs\"\nruntime = \"command\"\nrequires = [\"no-such-tool-xyz\"]\n",
+        )
+        .unwrap();
+
+        // Act
+        let loaded = load(root.path(), root.path());
+        let tools = loaded.tools();
+        let output = tools[0].run(&json!({})).unwrap();
+
+        // Assert
+        assert_eq!(
+            output,
+            clankjob_core::tool::ToolOutput::Json(json!({ "output": "http://proxy:8080\n", "truncated": false }))
+        );
+        assert_eq!(loaded.guides()[0].content, "Cite timestamps.");
+        let statuses = loaded.statuses();
+        let needs = statuses.iter().find(|plugin| plugin.id == "needs").unwrap();
+        assert!(needs.error.as_deref().unwrap().contains("needs `no-such-tool-xyz`"));
+        let youtube = statuses.iter().find(|plugin| plugin.id == "youtube").unwrap();
+        assert_eq!(
+            (youtube.tools[0].name.as_str(), youtube.guides[0].name.as_str()),
+            ("echo_env", "calls")
+        );
+        assert_eq!(youtube.provides, ["tools"]);
     }
 
     #[test]

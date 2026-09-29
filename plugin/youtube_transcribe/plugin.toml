@@ -1,0 +1,65 @@
+# clankjob plugin manifest (design section 9.9): command tools and guides.
+id = "youtube_transcribe"
+name = "YouTube transcripts"
+version = "0.1.0"
+runtime = "command"
+# scripts/yt.py runs through `uv run --script`, which installs its dependencies.
+requires = ["uv"]
+
+[[tools]]
+name = "youtube_transcript"
+description = """Download the transcript (captions) of a YouTube video, with [MM:SS] timestamps. \
+Use it whenever the owner mentions a YouTube video or asks what a video says. The transcript is \
+saved as a case file: read it with `read_file`, in parts if it is long, and answer from it, \
+never from memory."""
+command = ["scripts/yt.py", "transcript", "{video}", "--format", "stamped", "--chunk", "120", "--width", "0"]
+output = "file"
+file_name = "youtube-{video}.md"
+# The first run installs the script's dependencies.
+timeout = "3m"
+
+[tools.options]
+lang = ["--lang", "{lang}"]
+translate = ["--translate", "{translate}"]
+
+[tools.args.video]
+description = "YouTube URL (watch, youtu.be, shorts, embed, live) or the 11-character video id."
+required = true
+
+[tools.args.lang]
+description = "Caption language code to prefer, e.g. `de` (default `en`). See youtube_caption_languages."
+
+[tools.args.translate]
+description = "Translate the captions to this language code, e.g. `en`, when no track exists in it."
+
+[[tools]]
+name = "youtube_caption_languages"
+description = "List the caption tracks of a YouTube video: language, manual or auto-generated, translatable."
+command = ["scripts/yt.py", "langs", "{video}"]
+output = "text"
+timeout = "3m"
+
+[tools.args.video]
+description = "YouTube URL or the 11-character video id."
+required = true
+
+[[tools]]
+name = "youtube_video_info"
+description = "Title and channel of a YouTube video."
+command = ["scripts/yt.py", "info", "{video}"]
+output = "text"
+timeout = "3m"
+
+[tools.args.video]
+description = "YouTube URL or the 11-character video id."
+required = true
+
+[[guides]]
+name = "youtube-questions"
+description = "Answering questions about, or summarising, a YouTube video."
+file = "guides/youtube-questions.md"
+
+[[guides]]
+name = "earnings-call-analysis"
+description = "Analysing an earnings call or investor video through the Bezos and Buffett frameworks."
+file = "guides/earnings-call-analysis.md"

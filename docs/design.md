@@ -36,7 +36,8 @@ marked **(built)**, **(partly built)** or **(planned)**.
 | Questions to the owner, answered from the web client                     | Built                 | §10.1     |
 | Questions and notifications on chat channels, first answer wins          | Built                 | §10       |
 | Plugin host: plugin directory, instances, protocol, reload, Plugins page | Built for channels    | §9, §15   |
-| Plugin tools and wait conditions, approvals                              | Planned (milestone 4) | §9, §9.7  |
+| Command plugins: CLI scripts as LLM tools, plus guides                   | Built                 | §9.9      |
+| Protocol plugin tools, plugin wait conditions, approvals                 | Planned (milestone 4) | §9, §9.7  |
 | Email plugin                                                             | Planned               | §11       |
 | Discord plugin                                                           | Built                 | §12       |
 | REST API                                                                 | Partly built          | §14       |
@@ -265,6 +266,10 @@ so they are never picked up later.
 | `note_delete` | `key`                                                     | Deletes a note.                                                                                                    |
 | `read_file`   | `file`, `offset?`, `max_chars?`                           | Reads a case file's text in chunks (§7.5). Offered only when the case has files.                                   |
 | `view_image`  | `file`                                                    | Shows an image file to the model (§7.5). Offered only when the case has files and the model has `vision = true`.   |
+| `read_guide`  | `name`                                                    | Returns a plugin guide: instructions for a kind of task (§9.9). Offered only when a plugin offers guides.          |
+
+Next to these, every case is offered the tools of every loaded command plugin (§9.9), e.g.
+`youtube_transcript`. A plugin tool cannot take a core tool's name.
 
 A `WaitCondition` as seen by the LLM:
 
@@ -389,6 +394,8 @@ The **system prompt** is made of these sections, in order:
    budget, the goal, and the case's **notes**.
 4. `instructions`: the owner's instructions in full, if any (§7.5).
 5. `files`: the **list** of the case's files, if any (§7.5).
+6. `guides`: the **list** of plugin guides (name, plugin, when to use it), if any, with
+   the advice to read the matching one with `read_guide` before starting (§9.9).
 
 The **messages** are the event log rendered in order: each wake as a user message (via the
 `wake` template, stamped with the event's own time so past messages never change), each
@@ -423,6 +430,7 @@ the same name.
   case_header.md     title, owner, times, budget, goal, notes
   instructions.md    how the owner's instructions are presented (§7.5)
   files.md           how the list of case files is presented (§7.5)
+  guides.md          how the list of plugin guides is presented (§9.9)
   wake.md            how each wake reason is presented (§6.3)
   nudge.md           sent when the LLM answers without calling a tool (§5)
   profiles/
@@ -431,7 +439,7 @@ the same name.
 
 - **Templates** use `minijinja` (Jinja2 syntax) with strict undefined variables. The
   variables are `now`, `case` (title, goal, owner, created_at), `budgets`, `usage`,
-  `notes`, `tools`, `instructions`, `files`, and `wake` for the wake template.
+  `notes`, `tools`, `instructions`, `files`, `guides`, and `wake` for the wake template.
 - **Profiles** are optional behaviour packs. A case chooses one with `"profile": "quotes"`
   when it is created, or gets `default_profile` from the server config. The profile is
   rendered after the system template.
@@ -795,6 +803,76 @@ the host whether trying again can help.
 - **Reload (built)** replaces a plugin's processes after its directory changed (§9.4).
 - A small Python helper module that implements the JSON-RPC loop and decorators for tools
   and checks can be shipped later; the protocol above is the contract.
+
+### 9.9 Command plugins (built)
+
+Many useful capabilities already exist as command-line scripts, often written as agent
+"slash commands": a script plus instructions on when and how to use it. A **command
+plugin** (`runtime = "command"`) turns such a directory into LLM tools without any plugin
+protocol: each tool is a command line declared in `plugin.toml`, and instructions become
+**guides** the agent reads on demand. `plugin/youtube_transcribe` is the first one.
+
+```toml
+id = "youtube_transcribe"
+runtime = "command"
+requires = ["uv"]                     # programs that must be on PATH, checked at load
+
+[[tools]]
+name = "youtube_transcript"           # what the LLM calls; ^[a-zA-Z0-9_-]{1,64}$
+description = "Download the transcript of a YouTube video… read it with `read_file`."
+command = ["scripts/yt.py", "transcript", "{video}", "--format", "stamped"]
+output = "file"                       # auto (default) | text | file
+file_name = "youtube-{video}.md"
+timeout = "3m"                        # default 2m
+
+[tools.options]                       # added only when the optional argument is given
+lang = ["--lang", "{lang}"]
+
+[tools.args.video]
+description = "YouTube URL or 11-character video id."
+required = true
+
+[tools.args.lang]                     # type: string (default) | integer | number | boolean
+description = "Caption language code, e.g. `de`."
+
+[[guides]]
+name = "earnings-call-analysis"
+description = "Analysing an earnings call through the Bezos and Buffett frameworks."
+file = "guides/earnings-call-analysis.md"
+```
+
+- **Who sees them.** Every case is offered every loaded plugin tool, so asking any case
+  about a video just works; the LLM picks the tool from its description. Guides are
+  listed (name and when to use it) in the system prompt, and read in full only through
+  `read_guide`, so long instructions cost nothing until needed. Per-case opt-out is
+  future work.
+- **Arguments.** The host builds the JSON Schema from `[tools.args]` and checks every call
+  against it before anything runs: required arguments, types, `enum`, no unknown
+  arguments, at most 2 000 characters, no NUL. A `{name}` in `command` must be a required
+  argument; optional ones go in `options`. Values become separate `argv` entries, never
+  shell text, and a string value may not start with `-`, so the LLM cannot inject options
+  (e.g. `--out /etc/passwd`).
+- **Running.** The program is found relative to the plugin (a path with `/`, which may not
+  leave the directory) or on `PATH`. It runs in the plugin directory with the same
+  minimal environment as protocol plugins, plus the plugin's `config.toml` `[env]` table,
+  whose values may be secret references (e.g. `YT_PROXY_URL = { env = "YT_PROXY_URL" }`).
+  stdin is closed; stdout and stderr are read up to 8 MB. On timeout the process is
+  killed. A non-zero exit is a tool error for the LLM, carrying the end of stderr.
+- **Output.** `text` returns stdout inline (up to 20 000 characters); `file` stores it as a
+  case file (§7.5) and returns its name, size and a preview, so the LLM reads it with
+  `read_file` in parts; `auto` returns up to 12 000 characters inline and stores anything
+  longer. `file_name` placeholders are made safe (no URL scheme, only letters, digits,
+  `.`, `-`, `_`), and a name already used in the case gets ` (2)`. Stored output counts
+  toward the case's file limits, and adding it does not wake the case, since the running
+  activation already sees it.
+- **Outside the transaction.** A plugin tool runs before the tool call's write
+  transaction opens, so a slow download never blocks other writers. If the server stops
+  mid-call, the call runs again when the case resumes; command tools should therefore be
+  safe to repeat (fetching is; tools with side effects wait for the outbox, §17.1).
+- **Loading.** A command plugin loads all or nothing: a bad tool, an unreadable guide or
+  a missing `requires` program marks the plugin as not loaded, with the reason, on the
+  Plugins page. A tool or guide whose name is taken (by a core tool or another plugin) is
+  left out and listed as a conflict (§14.6). Reload works as for other plugins (§9.4).
 
 ______________________________________________________________________
 
@@ -1291,6 +1369,10 @@ apart from testing and reloading.
 | `POST` | `/plugins/reload`               | Load every plugin again (§9.4) and return the same as `GET /plugins`.                            |
 | `POST` | `/plugin-instances/{name}/test` | Run the instance's check again; `404` if unknown, `409` if it is off or did not load.            |
 
+Each plugin also lists the `tools` (name, description) and `guides` (name, description)
+it offers (§9.9), and the response has `conflicts`: tools or guides left out because
+their name was taken.
+
 Each instance has `state` (`on`, `off`: `enabled = false`, `error`: invalid config), the
 last check (`report`, `problems`, `warnings`, `findings`, `checked_at`, `error` if the
 check could not run), `activity` from the channel thread (`last_ok_at`, `last_error`,
@@ -1352,7 +1434,8 @@ the same origin as the API. Everything the server sends is inserted as text, nev
 - **Plugins**: each plugin and instance with an On / Off / Error / Needs attention chip,
   what the last check found (problems and warnings with their fix, and every check in a
   collapsible list), the channel's last error or warning, "Test now" per instance, and
-  "Reload plugins". The navigation link shows a red mark when something needs attention.
+  "Reload plugins". Command plugins list their tools and guides, offered to every case.
+  The navigation link shows a red mark when something needs attention.
 - **Prompts**: effective templates and profiles, their source and hash, rejected files,
   and "Reload from disk".
 
@@ -1659,6 +1742,9 @@ ______________________________________________________________________
 
 ## 19. Open questions & future work
 
+- **Per-case plugin tools**: opt a case out of some tools, or limit a case to some.
+- **Tool guides by skill format**: load `SKILL.md`-style directories (frontmatter with a
+  name and description) as guides without a manifest entry.
 - **Next milestones**: approvals (§9.7, answered in the web or with Discord reactions),
   then plugin tools and wait conditions (milestone 4, §9), then the email plugin (§11).
 - **Channel attachments**: download files sent in a Discord reply into the case (§7.5)

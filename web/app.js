@@ -1425,12 +1425,29 @@ function pluginsView(view) {
         }
         content.replaceChildren(
             h("p", { class: "muted mono" }, summary.plugins_dir),
+            // replaceChildren would print `false`, so an absent notice is an empty string.
+            summary.conflicts.length > 0
+                ? h("div", { class: "notice bad" }, h("div", { class: "grow" }, h("b", {}, "Left out because the name is taken"), h("ul", { class: "issues" }, summary.conflicts.map((text) => h("li", {}, text)))))
+                : "",
             ...summary.plugins.map((plugin) =>
                 section(
                     plugin.name || plugin.id,
                     [plugin.id, plugin.version && `v${plugin.version}`, plugin.runtime, ...plugin.provides.map((what) => what.replace("_", " "))].filter(Boolean).join(" · "),
                     plugin.error && h("div", { class: "notice bad" }, h("div", { class: "grow" }, h("b", {}, "Did not load. "), plugin.error)),
                     plugin.note && h("div", { class: "notice plain" }, h("div", { class: "grow" }, plugin.note)),
+                    (plugin.tools.length > 0 || plugin.guides.length > 0) &&
+                        h(
+                            "div",
+                            { class: "card plugin-instance" },
+                            h("div", { class: "line" }, h("span", { class: "chip completed" }, h("i"), "On"), h("span", { class: "muted" }, "Offered to every case")),
+                            plugin.tools.length > 0 && h("dl", { class: "tool-list" }, plugin.tools.flatMap((tool) => [h("dt", { class: "mono" }, tool.name), h("dd", {}, tool.description)])),
+                            plugin.guides.length > 0 &&
+                                h(
+                                    "dl",
+                                    { class: "tool-list" },
+                                    plugin.guides.flatMap((guide) => [h("dt", {}, h("span", { class: "tag" }, "guide"), " ", h("span", { class: "mono" }, guide.name)), h("dd", {}, guide.description)]),
+                                ),
+                        ),
                     plugin.instances.map((instance) =>
                         instanceCard(instance, () => {
                             busy = false;

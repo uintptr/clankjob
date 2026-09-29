@@ -32,15 +32,19 @@ pub const INSTRUCTIONS: &str = "instructions";
 /// Template listing the files added to a case, in the system prompt.
 pub const FILES: &str = "files";
 
+/// Template listing the guides plugins offer, in the system prompt.
+pub const GUIDES: &str = "guides";
+
 /// Name prefix of profile templates, e.g. `profiles/quotes`.
 const PROFILE_PREFIX: &str = "profiles/";
 
 /// Built-in templates. `include_str!` embeds each file in the binary at compile time.
-const BUILTINS: [(&str, &str); 6] = [
+const BUILTINS: [(&str, &str); 7] = [
     (SYSTEM, include_str!("../prompts/system.md.j2")),
     (CASE_HEADER, include_str!("../prompts/case_header.md.j2")),
     (INSTRUCTIONS, include_str!("../prompts/instructions.md.j2")),
     (FILES, include_str!("../prompts/files.md.j2")),
+    (GUIDES, include_str!("../prompts/guides.md.j2")),
     (WAKE, include_str!("../prompts/wake.md.j2")),
     (NUDGE, include_str!("../prompts/nudge.md.j2")),
 ];
@@ -117,6 +121,8 @@ pub struct PromptContext<'a> {
     pub instructions: &'a [Instruction],
     /// Files added to the case, as presented to the agent.
     pub files: &'a [crate::files::FileView],
+    /// Guides plugins offer, read with `read_guide`.
+    pub guides: &'a [clankjob_core::tool::Guide],
     /// Why the case woke up; only set when rendering the `wake` template.
     pub wake: Option<&'a WakeReason>,
 }
@@ -172,6 +178,37 @@ where
     })
 }
 
+/// Sample files, guides and instructions for [`validate`].
+fn sample_material() -> (
+    [crate::files::FileView; 1],
+    [clankjob_core::tool::Guide; 1],
+    [Instruction; 1],
+) {
+    let files = [crate::files::FileView {
+        name: "notes.md".to_owned(),
+        kind: FileKind::Text,
+        size: "1 KB".to_owned(),
+        pages: Some(1),
+        access: crate::files::Access::ReadFile,
+        note: None,
+    }];
+    let guides = [clankjob_core::tool::Guide {
+        plugin: "plugin".to_owned(),
+        name: "guide".to_owned(),
+        description: "When to use it.".to_owned(),
+        content: String::new(),
+    }];
+    let instructions = [Instruction {
+        id: InstructionId::generate(),
+        case_id: CaseId::generate(),
+        name: "tone.md".to_owned(),
+        content: "Be polite.".to_owned(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }];
+    (files, guides, instructions)
+}
+
 /// Render a template against sample data covering every variable it may use.
 fn validate(name: &str, source: &str) -> Result<(), RenderError> {
     let budgets = Budgets::default();
@@ -190,22 +227,7 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         description: "A tool.".to_owned(),
         parameters: serde_json::json!({"type": "object"}),
     }];
-    let files = [crate::files::FileView {
-        name: "notes.md".to_owned(),
-        kind: FileKind::Text,
-        size: "1 KB".to_owned(),
-        pages: Some(1),
-        access: crate::files::Access::ReadFile,
-        note: None,
-    }];
-    let instructions = [Instruction {
-        id: InstructionId::generate(),
-        case_id: CaseId::generate(),
-        name: "tone.md".to_owned(),
-        content: "Be polite.".to_owned(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    }];
+    let (files, guides, instructions) = sample_material();
     let base = PromptContext {
         now: "2026-01-01T00:00:00Z".to_owned(),
         case: CaseView {
@@ -220,6 +242,7 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         tools: &tools,
         instructions: &instructions,
         files: &files,
+        guides: &guides,
         wake: None,
     };
     match role_of(name) {
@@ -463,6 +486,7 @@ mod tests {
             tools: &[],
             instructions: &[],
             files: &[],
+            guides: &[],
             wake: None,
         }
     }

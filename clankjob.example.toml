@@ -34,8 +34,9 @@ data_dir = "./data"
 # Where `{ secret = "…" }` references are read from.
 # secrets_dir = "/run/secrets"
 
-# Plugins, one directory each (see plugin/discord/README.md). With the Discord plugin
-# configured, questions from cases are also posted to Discord and can be answered there.
+# Plugins, one directory each. With the Discord plugin configured, questions from cases
+# are also posted to Discord and can be answered there (plugin/discord/README.md); with
+# youtube_transcribe, every case can read YouTube videos (needs `uv` on PATH).
 # plugins_dir = "./plugin"
 
 # Chat channels new cases send questions to, besides the web UI. Omitted: every channel

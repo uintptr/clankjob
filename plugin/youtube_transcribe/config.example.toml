@@ -1,0 +1,6 @@
+# Optional. Copy to config.toml (git-ignored) to pass environment variables to the tools.
+# Values are references, resolved by the server at load time.
+
+[env]
+# YouTube blocks many cloud and VPN addresses; a residential proxy gets around it.
+# YT_PROXY_URL = { env = "YT_PROXY_URL" }

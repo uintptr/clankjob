@@ -80,6 +80,7 @@ clankjob is young. Milestone 1, the engine every case depends on, is done and te
 | Web UI: cases, timeline, inbox, prompts, light and dark themes      | Available |
 | Discord: get asked, answer from chat, get notified when done        | Available |
 | Python plugins (human channels so far)                              | Available |
+| Command plugins: any CLI script as a tool, e.g. YouTube transcripts | Available |
 | Email plugin (IMAP/SMTP)                                            | Planned   |
 | Approvals, Docker image                                             | Planned   |
 
@@ -203,6 +204,7 @@ crates/
   server/       REST API, configuration, process lifecycle (the `clankjob` binary)
 plugin/
   discord/      Discord human channel (Python, standard library only)
+  youtube_transcribe/  YouTube transcripts as tools, plus analysis guides
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/
   design.md     the full design

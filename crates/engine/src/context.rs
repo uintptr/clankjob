@@ -221,6 +221,7 @@ mod tests {
             tools: &[],
             instructions: &[],
             files: &[],
+            guides: &[],
             wake: None,
         };
         build_messages(events, &PromptSet::builtin(), &context, &|_| None).unwrap()
@@ -302,6 +303,7 @@ mod tests {
             tools: &[],
             instructions: &[],
             files: &[],
+            guides: &[],
             wake: None,
         };
         let loader = |id: &FileId| {

@@ -63,4 +63,5 @@ pub mod file;
 pub mod human;
 pub mod ids;
 pub mod llm;
+pub mod tool;
 pub mod wait;

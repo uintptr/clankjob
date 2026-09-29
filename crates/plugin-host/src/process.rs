@@ -25,7 +25,7 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Environment variables passed through to plugin processes. Everything else, server
 /// secrets included, is left out.
-const PASSED_ENV: &[&str] = &["PATH", "HOME", "TZ", "LANG", "LC_ALL", "SYSTEMROOT"];
+pub(crate) const PASSED_ENV: &[&str] = &["PATH", "HOME", "TZ", "LANG", "LC_ALL", "SYSTEMROOT"];
 
 /// A running plugin process. Dropping it kills the process.
 struct Running {

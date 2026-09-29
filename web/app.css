@@ -297,6 +297,30 @@ textarea {
     font-size: 13px;
 }
 
+.tool-list {
+    display: grid;
+    grid-template-columns: minmax(0, max-content) 1fr;
+    gap: 6px 16px;
+    margin: 10px 0 0;
+    font-size: 13.5px;
+}
+
+.tool-list dd {
+    margin: 0;
+    color: var(--ink2);
+}
+
+@media (max-width: 600px) {
+    .tool-list {
+        grid-template-columns: 1fr;
+        gap: 2px;
+    }
+
+    .tool-list dd {
+        margin-bottom: 8px;
+    }
+}
+
 .checks-list {
     margin: 8px 0 0;
     padding: 0;

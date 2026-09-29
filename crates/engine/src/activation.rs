@@ -12,17 +12,19 @@ use chrono::Utc;
 use clankjob_core::case::{Case, CaseState};
 use clankjob_core::event::{Event, EventBody, ToolResult};
 use clankjob_core::file::{CaseFile, FileKind};
-use clankjob_core::ids::{ActivationId, CaseId, HumanRequestId, WaitConditionId};
+use clankjob_core::ids::{ActivationId, CaseId, FileId, HumanRequestId, WaitConditionId};
 use clankjob_core::llm::{CompletionRequest, CompletionResponse, LlmError, LlmProvider, TokenUsage, ToolCall};
+use clankjob_core::tool::{Guide, ToolOutput};
 use clankjob_core::wait::{HUMAN_INPUT_KIND, WaitCondition, WaitConditionSpec, WaitStatus};
 use clankjob_storage::{self as storage, Connection, begin_write, commit};
 use serde_json::{Value, json};
 
 use crate::context::{build_messages, pending_tool_calls};
 use crate::files::{FileStore, chunk, find, views};
-use crate::prompts::{CASE_HEADER, CaseView, FILES, INSTRUCTIONS, PromptContext, PromptSet, SYSTEM};
+use crate::prompts::{CASE_HEADER, CaseView, FILES, GUIDES, INSTRUCTIONS, PromptContext, PromptSet, SYSTEM};
 use crate::tools::{
-    AskHumanArgs, CoreTool, DEFAULT_READ_CHARS, MAX_READ_CHARS, ReadFileArgs, add, core_tool_specs, schedule,
+    AskHumanArgs, CORE_TOOL_NAMES, CoreTool, DEFAULT_READ_CHARS, MAX_READ_CHARS, ReadFileArgs, add, core_tool_specs,
+    schedule,
 };
 use crate::transitions::{ClaimedCase, change_state, load_case};
 use crate::{Result, Shared, later};
@@ -137,10 +139,89 @@ fn ask_human(connection: &Connection, case: &Case, args: &AskHumanArgs) -> Resul
     ))
 }
 
-/// What the file tools need to know about the case.
+/// What the file and guide tools need to know.
 struct FileEnv<'a> {
     files: &'a [CaseFile],
     vision: bool,
+    guides: &'a [Guide],
+}
+
+/// `read_guide`: a plugin's instructions for a kind of task.
+fn read_guide(guides: &[Guide], wanted: &str) -> ToolExecution {
+    let wanted = wanted.trim();
+    let found = guides
+        .iter()
+        .find(|guide| guide.name == wanted)
+        .or_else(|| guides.iter().find(|guide| guide.name.eq_ignore_ascii_case(wanted)));
+    if let Some(guide) = found {
+        return ToolExecution::ok(json!({ "guide": guide.name, "plugin": guide.plugin, "content": guide.content }));
+    }
+    let names: Vec<&str> = guides.iter().map(|guide| guide.name.as_str()).collect();
+    ToolExecution::error(format!("no guide named `{wanted}`; available: {}", names.join(", ")))
+}
+
+/// A name for a tool's output file that no file of the case has yet.
+fn unique_name(files: &[CaseFile], wanted: &str) -> String {
+    if !files.iter().any(|file| file.name == wanted) {
+        return wanted.to_owned();
+    }
+    let (stem, extension) = wanted
+        .rsplit_once('.')
+        .map_or((wanted, ""), |(stem, extension)| (stem, extension));
+    (2_u32..10_000)
+        .map(|number| {
+            if extension.is_empty() {
+                format!("{stem} ({number})")
+            } else {
+                format!("{stem} ({number}).{extension}")
+            }
+        })
+        .find(|candidate| !files.iter().any(|file| &file.name == candidate))
+        .unwrap_or_else(|| wanted.to_owned())
+}
+
+/// Turn a plugin tool's output into a tool result, storing file output as a case file.
+///
+/// # Returns
+///
+/// The result, and the id of a file whose bytes were written, to remove if the
+/// transaction does not commit
+fn plugin_result(
+    connection: &Connection,
+    case: &Case,
+    store: &FileStore,
+    files: &[CaseFile],
+    output: std::result::Result<ToolOutput, String>,
+) -> Result<(ToolExecution, Option<FileId>)> {
+    let (name, content, summary) = match output {
+        Ok(ToolOutput::Json(value)) => return Ok((ToolExecution::ok(value), None)),
+        Err(message) => return Ok((ToolExecution::error(message), None)),
+        Ok(ToolOutput::File { name, content, summary }) => (name, content, summary),
+    };
+    let file = match crate::prepare_file(connection, &case.id, &unique_name(files, &name), &content) {
+        Ok(file) => file,
+        Err(crate::EngineError::InvalidFile(message)) => {
+            return Ok((
+                ToolExecution::error(format!("the output could not be stored: {message}")),
+                None,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    store.write(&file.id, &content)?;
+    if let Err(error) = storage::files::insert_file(connection, &file) {
+        store.remove(&file.id);
+        return Err(error.into());
+    }
+    let mut result = json!({
+        "stored_as": file.name,
+        "chars": file.text_chars,
+        "next": format!("Read it with `read_file` (file `{}`), in parts if it is long.", file.name),
+    });
+    if let (Some(object), Value::Object(extra)) = (result.as_object_mut(), summary) {
+        object.extend(extra);
+    }
+    Ok((ToolExecution::ok(result), Some(file.id)))
 }
 
 /// `read_file`: a chunk of a text file or PDF.
@@ -219,6 +300,7 @@ fn execute(connection: &Connection, case: &Case, call: &ToolCall, env: &FileEnv<
         }
         CoreTool::ReadFile(args) => read_file(env, &args),
         CoreTool::ViewImage(args) => view_image(env, &args.file),
+        CoreTool::ReadGuide(args) => read_guide(env.guides, &args.name),
     })
 }
 
@@ -230,13 +312,16 @@ fn build_request(
     events: &[Event],
     model: String,
     vision: bool,
-    store: &FileStore,
+    shared: &Shared,
 ) -> Result<CompletionRequest> {
+    let (store, plugins) = (&shared.files, &shared.plugin_tools);
     let notes = storage::notes::list_notes(connection, &case.id)?;
     let instructions = storage::instructions::list_instructions(connection, &case.id)?;
     let files = storage::files::list_files(connection, &case.id)?;
     let file_views = views(&files, vision);
-    let tools = core_tool_specs(!files.is_empty(), vision);
+    let guides = plugins.guides();
+    let mut tools = core_tool_specs(!files.is_empty(), vision, !guides.is_empty());
+    tools.extend(plugins.specs());
     let context = PromptContext {
         now: Utc::now().to_rfc3339(),
         case: CaseView {
@@ -251,6 +336,7 @@ fn build_request(
         tools: &tools,
         instructions: &instructions,
         files: &file_views,
+        guides: &guides,
         wake: None,
     };
     let mut sections = vec![prompts.render(SYSTEM, &context)?];
@@ -266,6 +352,9 @@ fn build_request(
     }
     if !files.is_empty() {
         sections.push(prompts.render(FILES, &context)?);
+    }
+    if !guides.is_empty() {
+        sections.push(prompts.render(GUIDES, &context)?);
     }
     let image =
         |id: &clankjob_core::ids::FileId| files.iter().find(|file| &file.id == id).and_then(|file| store.image(file));
@@ -331,6 +420,9 @@ impl Activation<'_> {
     /// run, in the same transaction, so they are not picked up as pending later.
     fn run_tools(&mut self, calls: &[ToolCall]) -> Result<Flow> {
         for (index, call) in calls.iter().enumerate() {
+            // A plugin tool may take a while (a download, a command), so it runs before the
+            // write transaction, which would otherwise block every other writer.
+            let plugin_output = self.run_plugin_tool(call);
             let now = Utc::now();
             let transaction = begin_write(self.connection)?;
             let case = load_case(&transaction, &self.case_id)?;
@@ -344,7 +436,17 @@ impl Activation<'_> {
                 .providers
                 .get(&case.llm)
                 .is_some_and(|provider| provider.supports_images());
-            let execution = execute(&transaction, &case, call, &FileEnv { files: &files, vision })?;
+            let guides = self.shared.plugin_tools.guides();
+            let (execution, written) = if let Some(output) = plugin_output {
+                plugin_result(&transaction, &case, &self.shared.files, &files, output)?
+            } else {
+                let env = FileEnv {
+                    files: &files,
+                    vision,
+                    guides: &guides,
+                };
+                (execute(&transaction, &case, call, &env)?, None)
+            };
             let result = ToolResult {
                 tool_call_id: call.id.clone(),
                 tool_name: call.name.clone(),
@@ -354,7 +456,12 @@ impl Activation<'_> {
             let body = EventBody::ToolResult(result);
             storage::events::append_event(&transaction, &case.id, Some(&self.id), &body, now)?;
             let Some(end_state) = execution.end_state else {
-                commit(transaction)?;
+                if let Err(error) = commit(transaction) {
+                    if let Some(file_id) = written {
+                        self.shared.files.remove(&file_id);
+                    }
+                    return Err(error.into());
+                }
                 continue;
             };
             for skipped in calls.iter().skip(index.saturating_add(1)) {
@@ -372,6 +479,26 @@ impl Activation<'_> {
             return Ok(Flow::Stop);
         }
         Ok(Flow::Continue)
+    }
+
+    /// Run a call if it names a plugin tool; `None` for core (or unknown) tools.
+    fn run_plugin_tool(&self, call: &ToolCall) -> Option<std::result::Result<ToolOutput, String>> {
+        if CORE_TOOL_NAMES.contains(&call.name.as_str()) {
+            return None;
+        }
+        let tool = self.shared.plugin_tools.get(&call.name)?;
+        let started = std::time::Instant::now();
+        let output = tool.run(&call.arguments);
+        let elapsed_ms = started.elapsed().as_millis();
+        match &output {
+            Ok(_) => {
+                tracing::info!(case_id = %self.case_id, tool = %call.name, plugin = tool.plugin(), elapsed_ms, "plugin tool ran");
+            }
+            Err(error) => {
+                tracing::warn!(case_id = %self.case_id, tool = %call.name, plugin = tool.plugin(), elapsed_ms, %error, "plugin tool failed");
+            }
+        }
+        Some(output)
     }
 
     /// Call the LLM, retrying retryable errors with exponential backoff.
@@ -489,7 +616,7 @@ impl Activation<'_> {
             &events,
             model,
             vision,
-            &self.shared.files,
+            self.shared,
         )?;
         let lease_until = later(Utc::now(), self.shared.settings.lease);
         storage::queue::renew_lease(self.connection, &case.id, lease_until)?;
@@ -615,6 +742,99 @@ mod tests {
             .into_iter()
             .map(|event| event.body)
             .collect()
+    }
+
+    /// A plugin tool that returns a transcript as a file, or JSON when asked for `info`.
+    struct FakeTranscript {
+        spec: clankjob_core::llm::ToolSpec,
+    }
+
+    impl clankjob_core::tool::PluginTool for FakeTranscript {
+        fn plugin(&self) -> &'static str {
+            "youtube"
+        }
+
+        fn spec(&self) -> &clankjob_core::llm::ToolSpec {
+            &self.spec
+        }
+
+        fn run(&self, arguments: &Value) -> std::result::Result<ToolOutput, String> {
+            match arguments.get("video").and_then(Value::as_str) {
+                Some("info") => Ok(ToolOutput::Json(json!({ "title": "Earnings call" }))),
+                Some(video) => Ok(ToolOutput::File {
+                    name: "transcript.md".to_owned(),
+                    content: format!("[00:00] Revenue grew 12% ({video})").into_bytes(),
+                    summary: json!({ "video": video }),
+                }),
+                None => Err("`video` is required".to_owned()),
+            }
+        }
+    }
+
+    #[test]
+    fn plugin_tools_store_long_output_as_files_and_guides_are_readable() {
+        // Arrange
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let provider = ScriptedProvider::new([
+            Ok(reply(&[
+                ("read_guide", json!({"name": "earnings-call"})),
+                ("youtube_transcript", json!({"video": "abc"})),
+                ("youtube_transcript", json!({"video": "abc"})),
+                ("youtube_transcript", json!({"video": "info"})),
+                ("youtube_transcript", json!({})),
+            ])),
+            Ok(reply(&[("read_file", json!({"file": "transcript (2).md"}))])),
+            Ok(reply(&[("complete", json!({"summary": "Revenue grew 12%."}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let spec = clankjob_core::llm::ToolSpec {
+            name: "youtube_transcript".to_owned(),
+            description: "Get a transcript.".to_owned(),
+            parameters: json!({"type": "object"}),
+        };
+        let clash = clankjob_core::llm::ToolSpec {
+            name: "sleep".to_owned(),
+            ..spec.clone()
+        };
+        let guide = Guide {
+            plugin: "youtube".to_owned(),
+            name: "earnings-call".to_owned(),
+            description: "Analysing an earnings call.".to_owned(),
+            content: "Cite timestamps.".to_owned(),
+        };
+        let refused = engine.plugin_tools().replace(
+            vec![Arc::new(FakeTranscript { spec }), Arc::new(FakeTranscript { spec: clash })],
+            vec![guide],
+        );
+        let case = create(&engine, &mut connection, Budgets::default());
+
+        // Act
+        let done = activate(&engine, &mut connection);
+
+        // Assert
+        assert_eq!(refused.len(), 1, "a plugin cannot take a core tool's name");
+        assert_eq!(done.state, CaseState::Completed);
+        let files = storage::files::list_files(&connection, &case.id).unwrap();
+        let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(names, ["transcript.md", "transcript (2).md"]);
+        let results: Vec<ToolResult> = events(&connection, &case)
+            .into_iter()
+            .filter_map(|body| match body {
+                EventBody::ToolResult(result) => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results[0].content["content"], "Cite timestamps.");
+        assert_eq!(results[1].content["stored_as"], "transcript.md");
+        assert_eq!(results[1].content["video"], "abc");
+        assert_eq!(results[3].content, json!({ "title": "Earnings call" }));
+        assert!(results[4].is_error);
+        assert!(results[5].content["text"].as_str().unwrap().contains("Revenue grew 12%"));
+        let first = &provider.requests.lock().unwrap()[0];
+        assert!(first.system.contains("`earnings-call` (youtube): Analysing an earnings call."));
+        let offered: Vec<&str> = first.tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert!(offered.contains(&"read_guide") && offered.contains(&"youtube_transcript"));
     }
 
     #[test]
