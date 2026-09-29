@@ -45,5 +45,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: python -m unittest -v
       - run: uvx ruff check .
-      # Errors fail the build; warnings are reported but allowed (agent/AGENT_python.md).
-      - run: uvx basedpyright --level error .
+      # Errors fail the build; warnings are reported but allowed (failOnWarnings: false in
+      # each directory's pyrightconfig.json; basedpyright otherwise fails on them in CI).
+      - run: uvx basedpyright .
