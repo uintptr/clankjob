@@ -1,0 +1,6 @@
+# Copy to config.toml (git-ignored) to turn the shell plugin on. Values are passed to
+# shell_tool.py as environment variables.
+
+[env]
+# The sandbox's exec service: the `sandbox` service of compose.yaml.
+SANDBOX_URL = "http://sandbox:8000"

@@ -695,6 +695,20 @@ plugin's manifest, its configuration and, for external plugins, its code:
     docs_tool.py
     test_docs_tool.py
     README.md
+  shell/                       command plugin: bash in the sandbox container (sandbox/sandboxd.py)
+    plugin.toml
+    config.example.toml
+    check_config.py
+    shell_tool.py
+    test_shell_tool.py
+    README.md
+  weather/                     command plugin: forecasts and past weather (Open-Meteo)
+    plugin.toml
+    config.example.toml
+    check_config.py
+    weather_tool.py
+    test_weather_tool.py
+    README.md
   youtube_transcribe/          command plugin: tools and guides (§9.9)
     plugin.toml
     check_config.py

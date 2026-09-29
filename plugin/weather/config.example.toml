@@ -1,0 +1,7 @@
+# Optional: the plugin works without a config.toml, on Open-Meteo's free servers
+# (non-commercial use, about 10 000 calls a day). Copy to config.toml (git-ignored) to
+# pass environment variables to the tools; values are references, resolved by the server.
+
+[env]
+# A commercial Open-Meteo key switches to its customer servers (customer-api.open-meteo.com).
+# OPEN_METEO_API_KEY = { env = "OPEN_METEO_API_KEY" }

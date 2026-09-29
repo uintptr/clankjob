@@ -1,0 +1,75 @@
+# clankjob plugin manifest (design section 9.9): weather forecasts and past weather.
+id = "weather"
+name = "Weather (Open-Meteo)"
+version = "0.1.0"
+runtime = "command"
+requires = ["python3"]
+
+[[tools]]
+name = "weather_forecast"
+description = """Current weather and the forecast for a place, day by day (up to 16 days), \
+optionally hour by hour (up to 3 days): conditions, temperatures, precipitation and its \
+probability, snow, wind and gusts, UV, sunrise and sunset, in the place's local time. Use it \
+to plan outdoor work or visits. Check the `location` it resolved: a note says when it guessed."""
+command = ["./weather_tool.py", "forecast", "--location={location}"]
+output = "json"
+timeout = "1m"
+
+[tools.options]
+days = ["--days={days}"]
+hourly = ["--hourly"]
+units = ["--units={units}"]
+
+[tools.args.location]
+description = """A place name, best narrowed by region or country in full ("Laval, Quebec", \
+"Paris, France"), or `latitude,longitude` ("45.51,-73.59")."""
+required = true
+
+[tools.args.days]
+type = "integer"
+description = "Days ahead, today included: 1 to 16 (default 3; at most 3 with `hourly`)."
+
+[tools.args.hourly]
+type = "boolean"
+description = "Also give the forecast hour by hour."
+
+[tools.args.units]
+description = "`metric` (°C, km/h, mm; the default) or `imperial` (°F, mph, inches)."
+enum = ["metric", "imperial"]
+
+[[tools]]
+name = "weather_history"
+description = """What the weather was at a place on past days, from 1940 to yesterday: \
+conditions, temperatures, rain, snow, precipitation hours, wind and gusts; hour by hour for up \
+to 7 days. Use it to check a claim about past weather (a storm, a frost, heavy rain on the \
+day of a leak). It is a reanalysis on a 9 to 25 km grid, not a station's readings: local \
+extremes such as a single gust or a hailstorm can be missed or smoothed out."""
+command = ["./weather_tool.py", "history", "--location={location}", "--start={start}"]
+output = "auto"
+file_name = "weather-{location}-{start}.json"
+timeout = "1m"
+
+[tools.options]
+end = ["--end={end}"]
+hourly = ["--hourly"]
+units = ["--units={units}"]
+
+[tools.args.location]
+description = """A place name, best narrowed by region or country in full ("Laval, Quebec", \
+"Paris, France"), or `latitude,longitude` ("45.51,-73.59")."""
+required = true
+
+[tools.args.start]
+description = "First day, `YYYY-MM-DD`."
+required = true
+
+[tools.args.end]
+description = "Last day, `YYYY-MM-DD` (default: `start`). At most 366 days, or 7 with `hourly`."
+
+[tools.args.hourly]
+type = "boolean"
+description = "Also give the weather hour by hour."
+
+[tools.args.units]
+description = "`metric` (°C, km/h, mm; the default) or `imperial` (°F, mph, inches)."
+enum = ["metric", "imperial"]

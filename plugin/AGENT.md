@@ -26,6 +26,8 @@ Current checks:
 | `email`              | IMAP login, folders listed and configured ones present, SMTP login                   |
 | `documents`          | the programs its tools drive, Tesseract languages, an OCR round trip                 |
 | `youtube_transcribe` | `uv` on PATH, the script runs, YouTube serves video details and caption tracks       |
+| `shell`              | sandbox reachable, runs commands, programs present, sees no secrets, internet        |
+| `weather`            | Open-Meteo reachable (key if set), a place lookup, a forecast, past weather          |
 
 ### The contract
 

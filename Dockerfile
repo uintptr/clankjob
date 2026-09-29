@@ -24,7 +24,7 @@ FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source="https://github.com/uintptr/clankjob" \
       org.opencontainers.image.description="clankjob: AI agents that know how to wait"
 
-# python3: the plugins (Discord, email and documents use the standard library only).
+# python3: the plugins (Discord, email, documents and weather use the standard library only).
 # uv: plugins whose scripts need dependencies (youtube_transcribe).
 # tini: PID 1 that reaps plugin processes and forwards signals to the server.
 RUN apt-get update \
@@ -47,6 +47,20 @@ RUN apt-get update \
     ffmpeg \
     jq unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# The agent's shell runs in the sandbox container, from this same image (plugin/shell,
+# sandbox/sandboxd.py): everything above, plus what a shell user expects.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+    bash-completion \
+    curl wget \
+    git \
+    sqlite3 \
+    ripgrep \
+    procps less \
+    xz-utils bzip2 zip \
+    && rm -rf /var/lib/apt/lists/*
+COPY sandbox/sandboxd.py /usr/local/lib/clankjob/sandboxd.py
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY --from=build /usr/local/bin/clankjob /usr/local/bin/clankjob
 
@@ -54,8 +68,8 @@ COPY --from=build /usr/local/bin/clankjob /usr/local/bin/clankjob
 # `user:` in compose.yaml (default 1000:1000).
 RUN groupadd --gid 1000 clankjob \
     && useradd --uid 1000 --gid 1000 --home-dir /home/clankjob --create-home --shell /usr/sbin/nologin clankjob \
-    && mkdir -p /config /plugins /prompts /data \
-    && chown clankjob:clankjob /data
+    && mkdir -p /config /plugins /prompts /data /work \
+    && chown clankjob:clankjob /data /work
 
 # Container paths override the ones in clankjob.toml, so the same file works for a local
 # `cargo run` and here (design §18.2).

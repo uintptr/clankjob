@@ -15,25 +15,54 @@
 #   EMAIL_PASSWORD=...
 
 services:
-  clankjob:
-    build: .
-    image: clankjob:latest
-    restart: unless-stopped
-    # Longer than shutdown_grace in clankjob.toml, so running LLM calls can finish.
-    stop_grace_period: 60s
-    # Must own ./data on the host (usually your user).
-    user: "${UID:-1000}:${GID:-1000}"
-    ports:
-      # Behind a reverse proxy (TLS, public_url), publish on localhost only.
-      - "127.0.0.1:8080:8080"
-    env_file:
-      - path: .env
-        required: false
-    volumes:
-      - ./clankjob.toml:/config/clankjob.toml:ro
-      - ./plugin:/plugins:ro
-      - ./data:/data
-      # Optional prompt overrides and profiles:
-      # - ./prompts:/prompts:ro
-      # Optional Docker secrets for `{ secret = "name" }` references:
-      # - ./secrets:/run/secrets:ro
+    clankjob:
+        build: .
+        image: clankjob:latest
+        restart: unless-stopped
+        # Resolve names (LLM API, mail servers, Discord…) with Cloudflare's DNS rather than
+        # the host's, which some Docker setups cannot reach from containers.
+        dns:
+            - 1.1.1.1
+        # Longer than shutdown_grace in clankjob.toml, so running LLM calls can finish.
+        stop_grace_period: 60s
+        # Must own ./data on the host (usually your user).
+        user: "${UID:-1000}:${GID:-1000}"
+        ports:
+            # Behind a reverse proxy (TLS, public_url), publish on localhost only.
+            - "127.0.0.1:8080:8080"
+        env_file:
+            - path: .env
+                required: false
+        volumes:
+            - ./clankjob.toml:/config/clankjob.toml:ro
+            - ./plugin:/plugins:ro
+            - ./data:/data
+    # Optional prompt overrides and profiles:
+    # - ./prompts:/prompts:ro
+    # Optional Docker secrets for `{ secret = "name" }` references:
+    # - ./secrets:/run/secrets:ro
+
+    # The agent's shell (plugin/shell): the same image running sandbox/sandboxd.py, with
+    # none of the server's secrets, data or settings. It runs whatever the agent asks, as
+    # the image's unprivileged user, with internet access; /work keeps its files. No
+    # ports: only the server reaches it, on this compose network.
+    sandbox:
+        build: .
+        image: clankjob:latest
+        restart: unless-stopped
+        dns:
+            - 1.1.1.1
+        entrypoint: ["/usr/bin/tini", "--", "python3", "/usr/local/lib/clankjob/sandboxd.py"]
+        environment:
+            HOME: /work
+            UV_CACHE_DIR: /work/.cache/uv
+        volumes:
+            - sandbox-work:/work
+        # Deliberately no env_file, no /data, /config, /plugins config or /run/secrets.
+        healthcheck:
+            test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+            interval: 30s
+            timeout: 5s
+
+volumes:
+    sandbox-work:

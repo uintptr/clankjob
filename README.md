@@ -208,6 +208,9 @@ plugin/
   youtube_transcribe/  YouTube transcripts as tools, plus analysis guides
   email/        send and read email, wait for replies (IMAP/SMTP, approvals)
   documents/    metadata, OCR and text of the case's files
+  weather/      forecasts and past weather for a place (Open-Meteo, no key)
+  shell/        a bash shell for the agent, run in the sandbox container
+sandbox/        the sandbox's exec service (sandboxd.py), for plugin/shell
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/
   design.md     the full design
