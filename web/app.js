@@ -104,6 +104,27 @@ const UNITS = [
     ["second", 1],
 ];
 
+function money(usd) {
+    if (usd === 0) return "$0";
+    if (usd < 0.0001) return "< $0.0001";
+    // Cheap models make most cases cost under a cent, so small amounts keep 4 decimals.
+    if (usd < 0.01) return `$${usd.toFixed(4)}`;
+    return `$${usd.toFixed(usd < 10 ? 2 : 0)}`;
+}
+
+/** "Cost ≈ $0.42" for a case's header, explained in its tooltip. */
+function costLabel(cost) {
+    if (!cost) return "";
+    if (cost.usd === null || cost.usd === undefined) {
+        return h("span", { title: cost.reason || "" }, "Cost ", h("b", { class: "muted" }, "unknown"));
+    }
+    const perMillion = (price) => `$${price}/M`;
+    const why =
+        `Estimate for ${cost.model}: ${cost.input_tokens.toLocaleString()} input tokens × ${perMillion(cost.input_price)} + ` +
+        `${cost.output_tokens.toLocaleString()} output tokens × ${perMillion(cost.output_price)}, at today's prices. Cached-token discounts are not counted.`;
+    return h("span", { title: why }, "Cost ", h("b", {}, `≈ ${money(cost.usd)}`));
+}
+
 function relative(iso) {
     if (!iso) return "never";
     const seconds = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
@@ -932,7 +953,7 @@ function caseDetail(pane, id) {
         if (window.confirm("Cancel this case? It stops and cannot be reopened.")) await act("cancel", "Case cancelled.")();
     };
 
-    function renderHead(item) {
+    function renderHead(item, cost) {
         const canWake = item.state === "sleeping" || item.state === "waiting_for_human";
         head.replaceChildren(
             h(
@@ -954,6 +975,7 @@ function caseDetail(pane, id) {
                 h("span", {}, "Owner ", h("b", {}, item.owner || "not set")),
                 h("span", {}, "Profile ", h("b", {}, item.profile || "none")),
                 h("span", {}, "Model ", h("b", {}, item.model ? `${item.llm} / ${item.model}` : item.llm)),
+                costLabel(cost),
                 h("span", {}, "Asks via ", h("b", {}, ["web", ...(item.human_channels || [])].join(", "))),
                 h("span", {}, "Created ", h("b", {}, timeEl(item.created_at))),
                 h("span", {}, "Updated ", h("b", {}, timeEl(item.updated_at))),
@@ -1175,7 +1197,7 @@ function caseDetail(pane, id) {
             return;
         }
         const item = detail.case;
-        renderHead(item);
+        renderHead(item, detail.cost);
         renderQuestions(detail.open_human_requests);
         renderOutcome(item);
         renderComposer(item);

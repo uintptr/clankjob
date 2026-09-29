@@ -300,6 +300,7 @@ fn get_case(state: &AppState, id: &CaseId) -> Handled {
         "open_human_requests": human_requests,
         "instructions": instructions,
         "files": files,
+        "cost": crate::catalog::cost_estimate(&case.usage, state.catalog.model(&case.llm, case.model.as_deref())),
     })))
 }
 
@@ -952,8 +953,11 @@ mod tests {
         let body = json!({"title": "t", "goal": "g", "human_channels": ["discord_joe"]});
         let (unknown, error) = api.call("POST", "/api/v1/cases", Some(body));
         let (created, case) = api.call("POST", "/api/v1/cases", Some(json!({"title": "t", "goal": "g"})));
+        let (_, detail) = api.call("GET", &format!("/api/v1/cases/{}", case["id"].as_str().unwrap()), None);
 
         // Assert
+        assert_eq!(detail["cost"]["usd"], Value::Null, "the test catalog has no prices");
+        assert_eq!(detail["cost"]["model"], "big-model");
         assert_eq!((listed, channels), (200, json!({ "channels": [] })));
         assert_eq!(unknown, 400);
         assert_eq!(error["error"]["message"], "unknown human channel `discord_joe`");

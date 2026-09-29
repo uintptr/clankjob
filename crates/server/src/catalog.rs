@@ -9,8 +9,10 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use clankjob_core::case::Usage;
 use clankjob_core::llm::{LlmProvider, ModelInfo};
 use serde::Serialize;
+use serde_json::{Value, json};
 
 /// A configured LLM a case can be started with, as returned by `GET /llms`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -70,6 +72,24 @@ impl Catalog {
         }
     }
 
+    /// What is known about the model a case uses: its own `model`, or the LLM's default.
+    ///
+    /// # Returns
+    ///
+    /// The model id and its catalog entry (prices, context size) when the provider
+    /// listed it; `None` for an LLM that is not configured
+    #[must_use]
+    pub fn model(&self, llm: &str, model: Option<&str>) -> Option<(String, Option<ModelInfo>)> {
+        let configured = self.llms.iter().find(|candidate| candidate.name == llm)?;
+        let id = model.unwrap_or(&configured.model).to_owned();
+        let discovered = self.discovered.read().unwrap_or_else(PoisonError::into_inner);
+        let info = discovered
+            .get(llm)
+            .and_then(|models| models.iter().find(|candidate| candidate.id == id))
+            .cloned();
+        Some((id, info))
+    }
+
     /// Every configured LLM with the models to offer for it.
     #[must_use]
     pub fn choices(&self) -> Vec<LlmChoice> {
@@ -105,6 +125,37 @@ impl Catalog {
             })
             .collect()
     }
+}
+
+/// Estimated cost of a case so far, in US dollars, for `GET /cases/{id}`.
+///
+/// Tokens used times the model's current prices per million tokens. Cached-token
+/// discounts and price changes during the case are not accounted for, hence "estimate".
+#[must_use]
+pub fn cost_estimate(usage: &Usage, model: Option<(String, Option<ModelInfo>)>) -> Value {
+    let Some((id, info)) = model else {
+        return json!({ "usd": null, "reason": "the case's LLM is not configured" });
+    };
+    let prices = info.and_then(|info| Some((info.input_price?, info.output_price?)));
+    let Some((input_price, output_price)) = prices else {
+        return json!({
+            "usd": null,
+            "model": id,
+            "reason": "no price known for this model (only providers that list prices, such as OpenRouter, give one)",
+        });
+    };
+    // Token counts stay far below 2^53, where f64 starts losing whole numbers.
+    #[expect(clippy::cast_precision_loss, reason = "token counts are far below 2^53")]
+    let (input, output) = (usage.input_tokens as f64, usage.output_tokens as f64);
+    let usd = (input * input_price + output * output_price) / 1_000_000.0;
+    json!({
+        "usd": usd,
+        "model": id,
+        "input_price": input_price,
+        "output_price": output_price,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+    })
 }
 
 /// Refresh the catalog now and then every `interval`, on a background thread.
@@ -166,6 +217,36 @@ mod tests {
 
     fn ids(choice: &LlmChoice) -> Vec<&str> {
         choice.models.iter().map(|model| model.id.as_str()).collect()
+    }
+
+    #[test]
+    fn cost_is_tokens_times_the_case_models_prices() {
+        // Arrange
+        let listing = Arc::new(Listing(Mutex::new(Ok(vec![ModelInfo {
+            output_price: Some(1.6),
+            ..priced("b/default", 0.4)
+        }]))));
+        let catalog = catalog(Some(listing));
+        catalog.refresh();
+        let usage = Usage {
+            activations: 1,
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+        };
+
+        // Act
+        let priced_cost = cost_estimate(&usage, catalog.model("default", None));
+        let unpriced = cost_estimate(&usage, catalog.model("default", Some("c/pinned")));
+        let unknown_llm = cost_estimate(&usage, catalog.model("other", None));
+
+        // Assert
+        assert!((priced_cost["usd"].as_f64().unwrap() - 1.2).abs() < 1e-9);
+        assert_eq!(priced_cost["model"], "b/default");
+        assert_eq!(
+            (unpriced["usd"].clone(), unpriced["model"].clone()),
+            (Value::Null, json!("c/pinned"))
+        );
+        assert!(unknown_llm["reason"].as_str().unwrap().contains("not configured"));
     }
 
     #[test]

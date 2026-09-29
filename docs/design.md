@@ -541,6 +541,8 @@ pub struct CompletionResponse {
   `models` suggestions, then the discovered ones. The catalog is never fetched from a
   request thread, and a failed refresh keeps the previous list.
 - **Vision.** `vision = true` on an LLM enables `view_image` for its cases (§7.5).
+- **Cost estimate.** The catalog's prices also give each case an estimated cost so far
+  (§14.1), shown in the case header.
 - Planned: tool-name sanitizing for providers that forbid `.` (needed for namespaced
   plugin tools, §9.6), and other native adapters behind the same trait.
 
@@ -1287,7 +1289,7 @@ time.
 | -------- | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `GET`    | `/cases?state=&cursor=&limit=`        | List cases, newest first. `next_cursor` is set when there may be more. `limit` 1–1000, default 50. |
 | `POST`   | `/cases`                              | Create a case (body below). `201` with the case.                                                   |
-| `GET`    | `/cases/{id}`                         | The case, its notes, active wait conditions, open questions, instructions, and files (metadata).   |
+| `GET`    | `/cases/{id}`                         | The case, notes, active waits, open questions, instructions, files (metadata), and `cost`.         |
 | `GET`    | `/cases/{id}/events?after=&limit=`    | Event timeline; poll with `after` = the last `seq` seen.                                           |
 | `POST`   | `/cases/{id}/messages`                | `{ "text" }`. Answers the open question if there is one; otherwise wakes (or reopens) the case.    |
 | `POST`   | `/cases/{id}/wake`                    | Wake a sleeping or waiting case now.                                                               |
@@ -1320,6 +1322,11 @@ POST /api/v1/cases
 `[budgets]`; `model` defaults to the LLM's default model; `human_channels` defaults to
 `default_human_channels` (§10.4), and an unknown channel is a `400`. Response `201`: the case,
 `{ "id": "01J9…", "state": "pending", "usage": {…}, … }`.
+
+`cost` estimates what the case has cost so far: its input and output tokens times its
+model's current prices from the model catalog (§8), as `{ usd, model, input_price, output_price, input_tokens, output_tokens }`. Cached-token discounts and price changes
+during the case are not counted. When no price is known (an LLM whose provider lists no
+prices, or a model it does not list), `usd` is `null` with a `reason`.
 
 Planned: `PATCH /cases/{id}` (title, owner, budgets, channels), and `plugin_instances` on
 cases.
@@ -1426,7 +1433,9 @@ the same origin as the API. Everything the server sends is inserted as text, nev
     box, the result or failure reason, the goal, the **instructions** (write, upload, edit,
     remove), the **files** (add, preview text, view images), what the case is waiting
     for, budget use, notes, the **timeline** (answers from a chat channel say which), and a
-    message box. The details line shows where the case asks ("web, discord_joe").
+    message box. The details line shows where the case asks ("web, discord_joe") and the
+    estimated cost so far ("Cost ≈ $0.0027", the calculation in its tooltip; "unknown"
+    when the model has no known price).
 - **New case**: title, goal, owner, profile, LLM, model (with the catalog's suggestions,
   prices and context size), instructions, the chat channels to also ask on (when any are
   loaded, pre-ticked from the default), and budgets.
