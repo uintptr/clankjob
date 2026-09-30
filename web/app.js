@@ -681,7 +681,7 @@ function casesView(view, initialId) {
         document.body.dataset.view = id ? "detail" : "list";
         pane.replaceChildren();
         if (id) {
-            stopDetail = caseDetail(pane, id);
+            stopDetail = caseDetail(pane, id, () => list.refresh().catch(report));
             pane.focus({ preventScroll: true });
         } else {
             pane.append(
@@ -1005,7 +1005,8 @@ function fileRow(caseId, file) {
     );
 }
 
-function caseDetail(pane, id) {
+/** `onRenamed` lets the case list show a new title without waiting for its next refresh. */
+function caseDetail(pane, id, onRenamed) {
     const path = `/cases/${encodeURIComponent(id)}`;
     const head = h("div", { class: "dhead" });
     const questionSlot = h("div");
@@ -1062,6 +1063,8 @@ function caseDetail(pane, id) {
     let instructionsKey = null;
     let instructionsNow = [];
     let editing = false;
+    // While the title is being edited, the periodic refresh leaves the header alone.
+    let renaming = false;
     let stop = null;
 
     const act = (action, message) => async () => {
@@ -1077,7 +1080,46 @@ function caseDetail(pane, id) {
         if (window.confirm("Cancel this case? It stops and cannot be reopened.")) await act("cancel", "Case cancelled.")();
     };
 
+    /** Swap the title for an input: Enter or leaving it saves, Escape cancels. */
+    function startRename(heading, item) {
+        if (renaming) return;
+        renaming = true;
+        const input = h("input", { class: "rename", maxlength: 200, "aria-label": "Case title" });
+        input.value = item.title;
+        let finished = false;
+        const finish = async (save) => {
+            if (finished) return;
+            finished = true;
+            const title = input.value.trim();
+            try {
+                if (save && title && title !== item.title) {
+                    await api(path, { method: "PATCH", body: { title } });
+                    toast("Case renamed.");
+                    onRenamed?.();
+                }
+            } catch (error) {
+                report(error);
+            } finally {
+                renaming = false;
+                refresh().catch(report);
+            }
+        };
+        input.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                finish(true);
+            } else if (event.key === "Escape") {
+                finish(false);
+            }
+        });
+        input.addEventListener("blur", () => finish(true));
+        heading.replaceChildren(input);
+        input.focus();
+        input.select();
+    }
+
     function renderHead(item, cost) {
+        if (renaming) return;
         // A draft starts with the owner's first message, not with a bare wake-up.
         const canWake = (item.state === "sleeping" || item.state === "waiting_for_human") && !isDraft(item);
         head.replaceChildren(
@@ -1093,7 +1135,7 @@ function caseDetail(pane, id) {
                     !TERMINAL.has(item.state) && h("button", { class: "btn sm quiet warn", type: "button", onclick: cancel }, "Cancel case"),
                 ),
             ),
-            h("h1", {}, item.title),
+            h("h1", { class: "renamable", title: "Double-click to rename", ondblclick: (event) => startRename(event.currentTarget, item) }, item.title),
             h(
                 "div",
                 { class: "meta" },

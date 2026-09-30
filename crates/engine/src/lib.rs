@@ -603,6 +603,15 @@ impl Engine {
     pub fn cancel_case(&self, connection: &mut Connection, case_id: &CaseId) -> Result<()> {
         transitions::cancel_case(connection, case_id, Utc::now())
     }
+
+    /// Give a case a new title; see [`transitions::rename_case`].
+    ///
+    /// # Errors
+    ///
+    /// See [`transitions::rename_case`].
+    pub fn rename_case(&self, connection: &mut Connection, case_id: &CaseId, title: &str) -> Result<Case> {
+        transitions::rename_case(connection, case_id, title, Utc::now())
+    }
 }
 
 /// Check a new file against the size and per-case limits and inspect its content

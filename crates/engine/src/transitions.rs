@@ -357,6 +357,20 @@ pub fn wake_case(connection: &mut Connection, case_id: &CaseId, now: DateTime<Ut
     Ok(())
 }
 
+/// Give a case a new title. The agent sees it in its next system prompt; nothing wakes.
+///
+/// # Errors
+///
+/// Returns [`EngineError::CaseNotFound`] or [`EngineError::Storage`].
+pub fn rename_case(connection: &mut Connection, case_id: &CaseId, title: &str, now: DateTime<Utc>) -> Result<Case> {
+    let transaction = begin_write(connection)?;
+    load_case(&transaction, case_id)?;
+    storage::cases::update_title(&transaction, case_id, title, now)?;
+    let case = load_case(&transaction, case_id)?;
+    commit(transaction)?;
+    Ok(case)
+}
+
 /// Cancel a case. A running activation stops at its next step.
 ///
 /// # Errors

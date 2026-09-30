@@ -1267,8 +1267,11 @@ model's current prices from the model catalog (§8), as `{ usd, model, input_pri
 during the case are not counted. When no price is known (an LLM whose provider lists no
 prices, or a model it does not list), `usd` is `null` with a `reason`.
 
-Planned: `PATCH /cases/{id}` (title, owner, budgets, channels), and `plugin_instances` on
-cases.
+`PATCH /cases/{id}` with `{ "title": "…" }` renames a case (1 to 200 characters, trimmed)
+and returns it like `GET`; nothing wakes, and the agent sees the new title in its next
+system prompt. The web client renames on a double-click on the case's title.
+
+Planned: `PATCH` for owner, budgets and channels, and `plugin_instances` on cases.
 
 ### 14.2 Human requests (built)
 

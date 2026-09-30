@@ -159,6 +159,19 @@ pub fn update_state(connection: &Connection, id: &CaseId, state: CaseState, now:
     Ok(())
 }
 
+/// Change a case's title.
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if the update fails.
+pub fn update_title(connection: &Connection, id: &CaseId, title: &str, now: DateTime<Utc>) -> Result<()> {
+    connection.execute(
+        "UPDATE cases SET title = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id.as_str(), title, to_millis(now)],
+    )?;
+    Ok(())
+}
+
 /// Replace a case's usage counters.
 ///
 /// # Errors

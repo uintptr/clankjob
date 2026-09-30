@@ -446,6 +446,30 @@ fn wake_case(state: &AppState, id: &CaseId) -> Handled {
     Ok(Response::json(&json!({ "status": "accepted" })).with_status_code(202))
 }
 
+/// Body of `PATCH /cases/{id}`: what to change.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateCaseBody {
+    title: Option<String>,
+}
+
+/// Longest case title, in characters.
+const MAX_TITLE_CHARS: usize = 200;
+
+fn update_case(state: &AppState, request: &Request, id: &CaseId) -> Handled {
+    let body: UpdateCaseBody = json_body(request)?;
+    let Some(title) = body.title.as_deref().map(str::trim) else {
+        return Err(AppError::BadRequest("nothing to change: give a `title`".to_owned()));
+    };
+    if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "`title` must be 1 to {MAX_TITLE_CHARS} characters"
+        )));
+    }
+    state.engine.rename_case(&mut state.connect()?, id, title)?;
+    get_case(state, id)
+}
+
 fn cancel_case(state: &AppState, id: &CaseId) -> Handled {
     let mut connection = state.connect()?;
     state.engine.cancel_case(&mut connection, id)?;
@@ -637,6 +661,7 @@ fn route(state: &AppState, request: &Request) -> Handled {
         (GET) (/api/v1/cases) => { list_cases(state, request) },
         (POST) (/api/v1/cases) => { create_case(state, request) },
         (GET) (/api/v1/cases/{id: String}) => { get_case(state, &CaseId::from_string(id)) },
+        (PATCH) (/api/v1/cases/{id: String}) => { update_case(state, request, &CaseId::from_string(id)) },
         (POST) (/api/v1/cases/{id: String}/instructions) => {
             change_instruction(state, Some(request), &CaseId::from_string(id), None)
         },
@@ -903,6 +928,23 @@ mod tests {
             (case["state"].as_str(), case["goal"].as_str()),
             (Some("waiting_for_human"), Some(""))
         );
+    }
+
+    #[test]
+    fn a_case_can_be_renamed_and_bad_titles_are_refused() {
+        let api = TestApi::new();
+        let id = api.create_case();
+        let path = format!("/api/v1/cases/{id}");
+
+        let (status, detail) = api.call("PATCH", &path, Some(json!({"title": "  Panel quote, Laval  "})));
+        let empty = api.call("PATCH", &path, Some(json!({"title": " "}))).0;
+        let long = api.call("PATCH", &path, Some(json!({"title": "x".repeat(201)}))).0;
+        let nothing = api.call("PATCH", &path, Some(json!({}))).0;
+        let unknown = api.call("PATCH", "/api/v1/cases/nope", Some(json!({"title": "t"}))).0;
+
+        assert_eq!(status, 200);
+        assert_eq!(detail["case"]["title"], "Panel quote, Laval");
+        assert_eq!((empty, long, nothing, unknown), (400, 400, 400, 404));
     }
 
     #[test]
