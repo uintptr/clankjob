@@ -97,8 +97,9 @@ impl PluginManager {
         }));
         let channels = registry.channels();
         let names: Vec<String> = channels.keys().cloned().collect();
+        // Omitted: the web client only; the owner turns a channel on per case.
         let default = match &self.default_channels {
-            None => names.clone(),
+            None => Vec::new(),
             Some(wanted) => wanted
                 .iter()
                 .filter(|name| {

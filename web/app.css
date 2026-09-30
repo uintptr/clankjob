@@ -1535,6 +1535,28 @@ details.more > summary:hover {
     color: var(--ink);
 }
 
+details.case-settings {
+    margin-top: 22px;
+}
+
+details.case-settings > summary .muted {
+    overflow: hidden;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.notifications {
+    display: grid;
+    gap: 6px;
+}
+
+details.case-settings > .sec:first-of-type {
+    margin-top: 8px;
+}
+
 details.more > .three {
     margin-top: 8px;
 }

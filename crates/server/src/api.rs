@@ -466,6 +466,9 @@ struct UpdateCaseBody {
     /// Absent: keep the model; `null` or blank: the LLM's default; a string: that model.
     #[serde(default, deserialize_with = "model_change")]
     model: ModelChange,
+    /// The chat channels it asks and notifies on; `[]` for the web client only.
+    #[serde(default)]
+    human_channels: Option<Vec<String>>,
 }
 
 /// `model` in `PATCH /cases/{id}`, when it is present (absent is `Keep`, by default).
@@ -485,11 +488,22 @@ const MAX_MODEL_CHARS: usize = 200;
 fn update_case(state: &AppState, request: &Request, id: &CaseId) -> Handled {
     let body: UpdateCaseBody = json_body(request)?;
     let model_given = body.model != ModelChange::Keep;
-    if body.title.is_none() && body.approvals.is_none() && body.llm.is_none() && !model_given {
+    if body.title.is_none()
+        && body.approvals.is_none()
+        && body.llm.is_none()
+        && !model_given
+        && body.human_channels.is_none()
+    {
         return Err(AppError::BadRequest(
-            "nothing to change: give a `title`, `approvals`, `llm` or `model`".to_owned(),
+            "nothing to change: give a `title`, `approvals`, `llm`, `model` or `human_channels`".to_owned(),
         ));
     }
+    // Checked before anything changes, like the LLM below.
+    let channels = body
+        .human_channels
+        .as_deref()
+        .map(|channels| state.engine.channels().resolve(Some(channels)))
+        .transpose()?;
     let title = body.title.as_deref().map(str::trim);
     if title.is_some_and(|title| title.is_empty() || title.chars().count() > MAX_TITLE_CHARS) {
         return Err(AppError::BadRequest(format!(
@@ -511,6 +525,9 @@ fn update_case(state: &AppState, request: &Request, id: &CaseId) -> Handled {
     // First: an unknown LLM is refused before anything else changes.
     if llm.is_some() || model_given {
         state.engine.set_model(&mut connection, id, llm, &body.model)?;
+    }
+    if let Some(channels) = channels {
+        state.engine.set_human_channels(&mut connection, id, &channels)?;
     }
     if let Some(title) = title {
         state.engine.rename_case(&mut connection, id, title)?;
@@ -1091,6 +1108,8 @@ mod tests {
         let unknown_llm = change(json!({"llm": "nope", "title": "renamed"})).0;
         let empty_llm = change(json!({"llm": " "})).0;
         let long_model = change(json!({"model": "m".repeat(201)})).0;
+        let unknown_channel = change(json!({"human_channels": ["discord_joe"], "title": "renamed"})).0;
+        let (web_only, web) = change(json!({"human_channels": []}));
         let (_, after) = api.call("GET", &path, None);
 
         assert_eq!(status, 200);
@@ -1109,7 +1128,11 @@ mod tests {
             llm_model(&both),
             (Some("default".to_owned()), Some("d/four".to_owned()))
         );
-        assert_eq!((unknown_llm, empty_llm, long_model), (400, 400, 400));
+        assert_eq!(
+            (unknown_llm, empty_llm, long_model, unknown_channel),
+            (400, 400, 400, 400)
+        );
+        assert_eq!((web_only, web["case"]["human_channels"].clone()), (200, json!([])));
         assert_eq!(after["case"]["title"], "t", "a refused change changes nothing else");
         assert_eq!(
             llm_model(&after),

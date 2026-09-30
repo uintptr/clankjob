@@ -7,6 +7,8 @@
 
 const TOKEN_KEY = "clankjob.token";
 const THEME_KEY = "clankjob.theme";
+// Whether a case page's Settings section is open, remembered across cases.
+const CASE_SETTINGS_KEY = "clankjob.caseSettings";
 const THEMES = ["auto", "light", "dark"];
 
 const STATE_LABELS = {
@@ -1098,6 +1100,28 @@ function caseDetail(pane, id, onRenamed) {
     const modelSlot = h("div");
     let modelKey = null;
     let llmChoices = null;
+    // Chat channels the case asks and notifies on, as checkboxes; redrawn only when they
+    // change. The loaded channels (GET /channels) are fetched once.
+    const channelsSlot = h("div");
+    let channelsKey = null;
+    let loadedChannels = null;
+    // Instructions, files, approvals, notifications and the model, folded under Settings.
+    // Only a click on it is remembered; a draft (waiting for its first message) opens it,
+    // since that is where its files and instructions go, without changing what is
+    // remembered.
+    const settingsFacts = h("span", { class: "muted" });
+    const settings = h(
+        "details",
+        { class: "more case-settings" },
+        h("summary", { onclick: () => writeStorage(CASE_SETTINGS_KEY, settings.open ? null : "open") }, "Settings", settingsFacts),
+        instructionsSection,
+        filesSection,
+        approvalsSlot,
+        channelsSlot,
+        modelSlot,
+    );
+    settings.open = readStorage(CASE_SETTINGS_KEY) === "open";
+    let draftOpened = false;
     const thread = h("div", { class: "card thread" });
     const render = timelineRenderer(thread);
     const hint = h("small", { class: "why" });
@@ -1332,6 +1356,64 @@ function caseDetail(pane, id, onRenamed) {
         modelSlot.replaceChildren(section("Model", "which model the agent runs on", form));
     }
 
+    function renderSettings(item, detail) {
+        const count = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
+        const facts = [count(detail.instructions.length, "instruction"), count(detail.files.length, "file")];
+        if (item.approvals !== "default") facts.push(`approvals: ${item.approvals}`);
+        if (item.human_channels.length) facts.push(`asks on ${item.human_channels.join(", ")}`);
+        // The LLM's default model id, once the Model section has loaded the choices.
+        facts.push(item.model || llmChoices?.llms.find((llm) => llm.name === item.llm)?.model || "default model");
+        settingsFacts.textContent = facts.join(" · ");
+        if (isDraft(item) && !draftOpened) {
+            draftOpened = true;
+            settings.open = true;
+        }
+    }
+
+    async function renderChannels(item) {
+        const cancelled = item.state === "cancelled";
+        const key = [...item.human_channels, cancelled].join("\n");
+        if (key === channelsKey) return;
+        channelsKey = key;
+        if (!loadedChannels) {
+            try {
+                loadedChannels = (await api("/channels")).channels;
+            } catch (error) {
+                report(error);
+                loadedChannels = [];
+            }
+        }
+        // A channel the case uses stays listed even if its plugin is not loaded right now.
+        const names = [...loadedChannels.map((channel) => channel.name), ...item.human_channels.filter((name) => !loadedChannels.some((channel) => channel.name === name))];
+        const pluginOf = (name) => loadedChannels.find((channel) => channel.name === name)?.plugin || "not loaded";
+        const boxes = names.map((name) =>
+            h("input", {
+                type: "checkbox",
+                value: name,
+                checked: item.human_channels.includes(name),
+                disabled: cancelled,
+                onchange: async () => {
+                    const human_channels = boxes.filter((box) => box.checked).map((box) => box.value);
+                    try {
+                        await api(path, { method: "PATCH", body: { human_channels } });
+                        toast(human_channels.length ? `This case now asks on ${human_channels.join(", ")} too.` : "This case now asks in the web inbox only.");
+                    } catch (error) {
+                        report(error);
+                    }
+                    channelsKey = null;
+                    refresh().catch(report);
+                },
+            }),
+        );
+        const body = names.length
+            ? [
+                  h("div", { class: "checks" }, names.map((name, index) => h("label", { class: "check" }, boxes[index], h("span", { class: "mono" }, name), h("span", { class: "muted" }, pluginOf(name))))),
+                  h("small", { class: "why" }, "Questions and the done or failed notification also go to the ticked channels, from the next one on. They always show up in the inbox here; the first answer wins."),
+              ]
+            : [h("small", { class: "why" }, "No chat channel is loaded, so questions come to the inbox here. Set up the Discord plugin to also get them there.")];
+        channelsSlot.replaceChildren(section("Notifications", "where this case asks you and says it is done", h("div", { class: "card box notifications" }, ...body)));
+    }
+
     function renderStatus(detail) {
         const item = detail.case;
         const usage = item.usage;
@@ -1530,6 +1612,8 @@ function caseDetail(pane, id, onRenamed) {
         goalSlot.replaceChildren(item.goal ? section("Goal", null, h("div", { class: "card md" }, item.goal)) : "");
         renderFiles(item, detail.files);
         renderInstructions(item, detail.instructions);
+        renderSettings(item, detail);
+        renderChannels(item).catch(report);
         const page = await api(`${path}/events?after=${lastSeq}&limit=1000`);
         for (const event of page.events) {
             render(event);
@@ -1546,10 +1630,7 @@ function caseDetail(pane, id, onRenamed) {
             questionSlot,
             outcomeSlot,
             goalSlot,
-            instructionsSection,
-            filesSection,
-            approvalsSlot,
-            modelSlot,
+            settings,
             statusSlot,
             section("Timeline", "oldest first", thread),
             section("Message", null, composer),

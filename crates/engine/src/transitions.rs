@@ -434,6 +434,27 @@ pub fn set_model(
     Ok(case)
 }
 
+/// Change the chat channels a case asks and notifies on (the web client is always one).
+/// Only the owner calls this, with names the caller checked; it applies to the next
+/// question or notification, while questions already open stay where they were posted.
+///
+/// # Errors
+///
+/// Returns [`EngineError::CaseNotFound`] or [`EngineError::Storage`].
+pub fn set_human_channels(
+    connection: &mut Connection,
+    case_id: &CaseId,
+    channels: &[String],
+    now: DateTime<Utc>,
+) -> Result<Case> {
+    let transaction = begin_write(connection)?;
+    load_case(&transaction, case_id)?;
+    storage::cases::update_human_channels(&transaction, case_id, channels, now)?;
+    let case = load_case(&transaction, case_id)?;
+    commit(transaction)?;
+    Ok(case)
+}
+
 /// Give a case a new title. The agent sees it in its next system prompt; nothing wakes.
 ///
 /// # Errors

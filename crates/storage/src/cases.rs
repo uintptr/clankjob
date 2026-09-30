@@ -231,6 +231,24 @@ pub fn update_model(
     Ok(())
 }
 
+/// Change the chat channels a case asks and notifies on.
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if the update fails.
+pub fn update_human_channels(
+    connection: &Connection,
+    id: &CaseId,
+    channels: &[String],
+    now: DateTime<Utc>,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE cases SET human_channels = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id.as_str(), serde_json::to_string(channels)?, to_millis(now)],
+    )?;
+    Ok(())
+}
+
 /// Change a case's title.
 ///
 /// # Errors

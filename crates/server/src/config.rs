@@ -200,8 +200,8 @@ pub struct Config {
     /// Directory with one sub-directory per plugin (design §9.3).
     #[serde(default)]
     pub plugins_dir: Option<PathBuf>,
-    /// Channels questions go to for cases that don't choose; omitted means every
-    /// configured channel.
+    /// Channels questions and notifications go to for cases that don't choose; omitted
+    /// means none (the web client only), and the owner turns one on per case.
     #[serde(default)]
     pub default_human_channels: Option<Vec<String>>,
     /// Worker threads running activations.

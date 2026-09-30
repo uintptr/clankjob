@@ -132,6 +132,21 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual((frozenset({"1", "2"}), "http://clankjob:8080", 20.0, ""),
                          (settings.allowed_users, settings.server_url, settings.poll_seconds, settings.server_token))
         self.assertEqual(5.0, Settings.from_env({**self.ENV, "DISCORD_INTAKE_POLL": "1"}).poll_seconds)
+        self.assertIsNone(settings.human_channels)
+        self.assertEqual(("discord_joe", "discord_bob"), Settings.from_env(
+            {**self.ENV, "DISCORD_INTAKE_HUMAN_CHANNELS": " discord_joe, discord_bob "}).human_channels)
+
+    def test_cases_ask_on_the_configured_channels(self) -> None:
+        sent: list[Json] = []
+
+        def server(method: str, url: str, headers: dict[str, str], body: bytes | None) -> tuple[int, bytes]:
+            sent.append(json.loads(body or b"{}"))
+            return 201, json.dumps({"id": "case1"}).encode()
+
+        client = Server("http://clankjob:8080", "", server)
+        _ = client.create_case("t", "g", None)
+        _ = client.create_case("t", "g", None, ("discord_joe",))
+        self.assertEqual([None, ["discord_joe"]], [body.get("human_channels") for body in sent])
 
     def test_bad_settings_are_named(self) -> None:
         for env, error in (({**self.ENV, "DISCORD_INTAKE_TOKEN": ""}, "DISCORD_INTAKE_TOKEN is not set"),

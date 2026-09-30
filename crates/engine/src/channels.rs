@@ -825,6 +825,32 @@ mod tests {
     }
 
     #[test]
+    fn the_owner_turns_a_cases_channels_on_and_off() {
+        // Arrange: a case on the web client only
+        let test_db = TestDb::new();
+        let channel: Arc<dyn HumanChannel> = FakeChannel::new();
+        let engine = engine_with_channels(&test_db, ScriptedProvider::new([]), channel);
+        let mut connection = test_db.connect();
+        let case = engine.create_case(&mut connection, &new_case(Some(Vec::new()))).unwrap();
+
+        // Act
+        let on = engine
+            .set_human_channels(
+                &mut connection,
+                &case.id,
+                &["discord_joe".to_owned(), "discord_joe".to_owned()],
+            )
+            .unwrap();
+        let unknown = engine.set_human_channels(&mut connection, &case.id, &["slack".to_owned()]);
+        let off = engine.set_human_channels(&mut connection, &case.id, &[]).unwrap();
+
+        // Assert
+        assert_eq!(on.human_channels, ["discord_joe"]);
+        assert!(matches!(unknown, Err(EngineError::UnknownChannel(name)) if name == "slack"));
+        assert!(off.human_channels.is_empty());
+    }
+
+    #[test]
     fn channels_can_be_swapped_and_activity_says_when_one_is_failing() {
         // Arrange
         let channels = Channels::new(BTreeMap::new(), Vec::new(), None);

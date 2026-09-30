@@ -62,8 +62,9 @@ Start the server with the token in its environment (`DISCORD_BOT_TOKEN`, or what
 `check_config.py` below and logs `channel ready`, or an error per problem (with the fix)
 and `channel loaded with problems`. The web UI's **Plugins** page shows the same, with
 a **Test now** button, and the server reloads the plugin by itself when you edit
-`config.toml`. A new token in the environment still needs a server restart. New cases send their questions to every loaded channel unless the
-New case form or `default_human_channels` says otherwise.
+`config.toml`. A new token in the environment still needs a server restart. New cases ask only in the web UI unless the New case form or
+`default_human_channels` in `clankjob.toml` turns the channel on; a running case's
+Settings (Notifications) turns it on or off too.
 
 **Check it on its own** at any time, without the server:
 

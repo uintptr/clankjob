@@ -19,9 +19,11 @@ It is a **standalone service**, not part of the server or of the Discord plugin:
   the web UI. The server knows nothing about it.
 - It shares no code or settings with the Discord plugin, which keeps posting the cases'
   questions. It can use its own bot, or the plugin's.
-- It does not choose where questions go: the server's `default_human_channels` does.
-  Set it to your Discord channel instance (e.g. `default_human_channels = ["discord_joe"]`
-  in `clankjob.toml`) so questions of Discord-started cases come back to Discord.
+- Where its cases ask questions and send notifications is `DISCORD_INTAKE_HUMAN_CHANNELS`,
+  the Discord plugin's channel instance (e.g. `discord_joe`), so cases started from
+  Discord come back to Discord. Unset, they follow the server's `default_human_channels`,
+  which is none (the web client only) unless you set it. A case's channels can be changed
+  later under Settings on its page.
 
 ## Setup
 
@@ -30,6 +32,7 @@ It is a **standalone service**, not part of the server or of the Discord plugin:
    and invite it to your server. In the channel it needs **View Channel**, **Read Message
    History** and **Send Messages**. No privileged intent is needed: Discord always shows
    a bot the text of messages that mention it.
+
 2. **Settings** in `.env` next to `compose.yaml` (Developer Mode on, right-click → Copy ID):
 
    ```sh
@@ -38,11 +41,13 @@ It is a **standalone service**, not part of the server or of the Discord plugin:
    DISCORD_INTAKE_CHANNEL_ID=123456789012345678
    DISCORD_INTAKE_ALLOWED_USERS=234567890123456789    # comma-separated user ids
    CLANKJOB_PUBLIC_URL=https://cj.example     # optional: links in the replies
+   DISCORD_INTAKE_HUMAN_CHANNELS=discord_joe  # optional: its cases ask on Discord
    ```
 
    It reuses `CLANKJOB_TOKEN` to call the server (not needed when the server runs with
    `CLANKJOB_REQUIRE_TOKEN=false`). The compose service passes it only these variables,
    never the rest of `.env`.
+
 3. **Start and check:**
 
    ```sh

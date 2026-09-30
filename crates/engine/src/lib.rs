@@ -658,6 +658,23 @@ impl Engine {
         transitions::set_model(connection, case_id, llm, model, Utc::now())
     }
 
+    /// Change the chat channels a case asks and notifies on; see
+    /// [`transitions::set_human_channels`]. An empty list means the web client only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::UnknownChannel`] for a channel that is not loaded,
+    /// otherwise see [`transitions::set_human_channels`].
+    pub fn set_human_channels(
+        &self,
+        connection: &mut Connection,
+        case_id: &CaseId,
+        channels: &[String],
+    ) -> Result<Case> {
+        let channels = self.shared.channels.resolve(Some(channels))?;
+        transitions::set_human_channels(connection, case_id, &channels, Utc::now())
+    }
+
     /// Give a case a new title; see [`transitions::rename_case`].
     ///
     /// # Errors

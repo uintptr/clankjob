@@ -18,6 +18,9 @@ Configuration, all from the environment:
     CLANKJOB_PUBLIC_URL           optional: base of the links posted back
     DISCORD_INTAKE_POLL           optional: seconds between polls (default 20, at least 5)
     DISCORD_INTAKE_STATE          optional: state file (default /state/discord_intake.json)
+    DISCORD_INTAKE_HUMAN_CHANNELS optional: chat channels its cases ask and notify on,
+                                  comma-separated (e.g. discord_joe); unset: the server's
+                                  default_human_channels, which is none unless set
 
     discord_intake.py             run until stopped
     discord_intake.py --once      one poll, then exit
@@ -84,6 +87,8 @@ class Settings:
     public_url: str
     poll_seconds: float
     state_path: Path
+    # None: the server's default.
+    human_channels: tuple[str, ...] | None = None
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "Settings":
@@ -105,9 +110,11 @@ class Settings:
             poll = max(MIN_POLL, float(env.get("DISCORD_INTAKE_POLL", "20") or "20"))
         except ValueError:
             raise IntakeError("DISCORD_INTAKE_POLL must be a number of seconds") from None
+        channels = env.get("DISCORD_INTAKE_HUMAN_CHANNELS", "").strip()
         return cls(need("DISCORD_INTAKE_TOKEN"), channel, users, server, env.get("CLANKJOB_TOKEN", "").strip(),
                    env.get("CLANKJOB_PUBLIC_URL", "").strip().rstrip("/"), poll,
-                   Path(env.get("DISCORD_INTAKE_STATE", "") or "/state/discord_intake.json"))
+                   Path(env.get("DISCORD_INTAKE_STATE", "") or "/state/discord_intake.json"),
+                   tuple(name.strip() for name in channels.split(",") if name.strip()) if channels else None)
 
 
 # ---------------------------------------------------------------- the two services
@@ -188,10 +195,13 @@ class Server:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
 
-    def create_case(self, title: str, goal: str, owner: str | None) -> Json:
+    def create_case(self, title: str, goal: str, owner: str | None,
+                    human_channels: tuple[str, ...] | None = None) -> Json:
         body: Json = {"title": title, "goal": goal}
         if owner:
             body["owner"] = owner
+        if human_channels is not None:
+            body["human_channels"] = list(human_channels)
         status, data = self.send("POST", f"{self.url}/api/v1/cases", self.headers(), json.dumps(body).encode())
         if 201 == status:
             case = json.loads(data)
@@ -299,7 +309,7 @@ class Intake:
                                "Tell me what to do after the mention, and I will start a case for it.")
             return 0
         try:
-            case = self.server.create_case(title, goal, author_name(message))
+            case = self.server.create_case(title, goal, author_name(message), self.settings.human_channels)
         except IntakeError as error:
             if error.retryable:
                 # The server is down or restarting: stop here, and this message is

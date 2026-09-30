@@ -1153,8 +1153,12 @@ Replying to a notification to send a case a plain message is future work.
 
 - Every case has an `owner` and a list of `human_channels`, set at creation (the New case
   form offers the loaded channels). If the list is omitted, `default_human_channels`
-  from the server config applies; if that is omitted too, every loaded channel. `[]`
-  means the web client only.
+  from the server config applies; if that is omitted too, none. `[]` means the web
+  client only, so chat channels are off unless the owner or the config turns them on.
+- The owner changes a case's channels at any time (`PATCH /cases/{id}`, the
+  Notifications checkboxes under the case's Settings). The change applies to the next
+  question, approval or notification; questions already open stay where they were posted
+  and are always answerable in the web inbox.
 - The web client is always a channel and can't be removed.
 - Each channel instance chooses which notifications it sends (`notify_on`). Questions are
   always delivered.
@@ -1183,7 +1187,7 @@ Starting cases from Discord is deliberately **not** part of it: the optional
 [`intake/discord`](../intake/discord/README.md) service polls a channel for messages that
 @mention its bot and creates cases through `POST /api/v1/cases`, like any API client. The
 server and the plugin know nothing about it; its cases' questions reach Discord through
-`default_human_channels`.
+its `DISCORD_INTAKE_HUMAN_CHANNELS` setting, or `default_human_channels` without it.
 
 ______________________________________________________________________
 
@@ -1308,6 +1312,10 @@ An unknown LLM is `400` and changes nothing else. The next LLM turn uses it, eve
 running activation; nothing wakes. Usage is counted per case, not per model, so the cost
 estimate prices the whole case at its current model.
 
+`{ "human_channels": ["discord_joe"] }` changes the chat channels the case asks and
+notifies on (`[]`: the web client only), from its next question or notification on
+(§10.4); an unknown channel is `400` and changes nothing else.
+
 `DELETE /cases/{id}` removes a case for good: its row and every row about it (timeline,
 activations, questions and their channel messages, wait conditions, notes, instructions,
 files), in one transaction, then its files' bytes. A running case is refused (`409`)
@@ -1429,16 +1437,19 @@ the same origin as the API. Everything the server sends is inserted as text, nev
   - The **rail** lists cases grouped by state, "Needs you" first, finished groups folded,
     with a filter box. Selecting a case keeps the rail, its filter and its scroll.
   - The **detail** pane shows the state chip and details, the open question with an answer
-    box, the result or failure reason, the goal, the **instructions** (write, upload, edit,
-    remove), the **files** (add, preview text, view images), the **approvals** setting,
-    the **model** (the LLM and a model id with the catalog's suggestions, applied from
-    the agent's next turn), what the case is waiting for, budget use, notes, the **timeline** (answers from a chat channel say which), and a
+    box, the result or failure reason, the goal, then **Settings**, folded by default: the
+    **instructions** (write, upload, edit, remove), the **files** (add, preview text, view
+    images), the **approvals** setting, **notifications** (a checkbox per loaded chat
+    channel, saved when ticked) and the **model** (the LLM and a model id with the
+    catalog's suggestions, applied from the agent's next turn). Its summary line counts
+    instructions and files and names the channels and the model; a click on it is
+    remembered across cases, and a draft case (no goal yet) opens it. Then what the case is waiting for, budget use, notes, the **timeline** (answers from a chat channel say which), and a
     message box. The details line shows where the case asks ("web, discord_joe") and the
     estimated cost so far ("Cost ≈ $0.0027", the calculation in its tooltip; "unknown"
     when the model has no known price).
 - **New case**: title, goal, owner, profile, LLM, model (with the catalog's suggestions,
   prices and context size), instructions, the chat channels to also ask on (when any are
-  loaded, pre-ticked from the default), and budgets.
+  loaded, pre-ticked from `default_human_channels`, so none by default), and budgets.
 - **Inbox**: every open question and approval across cases, answerable in place. An
   approval card shows what the call will do and its arguments (to, subject, body…), with
   **Edit** (each argument becomes an input), an optional comment, **Reject** and
@@ -1665,7 +1676,7 @@ data_dir = "/data"
 prompts_dir = "/prompts"                    # optional
 secrets_dir = "/run/secrets"                # the default
 plugins_dir = "/plugins"                    # optional; one directory per plugin (§9.3)
-default_human_channels = ["discord_joe"]    # optional; omitted = every loaded channel
+default_human_channels = ["discord_joe"]    # optional; omitted = none (web only)
 workers = 4                                 # activation threads
 shutdown_grace = "30s"
 default_llm = "default"

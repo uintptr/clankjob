@@ -41,8 +41,9 @@ data_dir = "./data"
 # replies.
 # plugins_dir = "./plugin"
 
-# Chat channels new cases send questions to, besides the web UI. Omitted: every channel
-# that loaded. The New case form lets you change it per case.
+# Chat channels new cases send questions and notifications to, besides the web UI.
+# Omitted: none (the web UI only). The New case form and a case's Settings turn one on
+# per case.
 # default_human_channels = ["discord_joe"]
 
 # Threads running activations. Each one can run one case at a time.
