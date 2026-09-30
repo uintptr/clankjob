@@ -258,17 +258,19 @@ so they are never picked up later.
 
 ### 5.1 Core tools (built)
 
-| Tool          | Arguments                                                 | Effect                                                                                                             |
-| ------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `sleep`       | `conditions: [WaitCondition]`, `reason`                   | Suspends the case until **any** condition fires or times out.                                                      |
-| `ask_human`   | `question`, `timeout?`, `also_wait_for?: [WaitCondition]` | Creates a question for the owner and suspends until it is answered, or an `also_wait_for` condition fires (§10.2). |
-| `complete`    | `summary`, `result?` (any JSON)                           | Finishes the case successfully.                                                                                    |
-| `fail`        | `reason`                                                  | Finishes the case as failed.                                                                                       |
-| `note_set`    | `key`, `value`                                            | Saves a durable note (§7.2).                                                                                       |
-| `note_delete` | `key`                                                     | Deletes a note.                                                                                                    |
-| `read_file`   | `file`, `offset?`, `max_chars?`                           | Reads a case file's text in chunks (§7.5). Offered only when the case has files.                                   |
-| `view_image`  | `file`                                                    | Shows an image file to the model (§7.5). Offered only when the case has files and the model has `vision = true`.   |
-| `read_guide`  | `name`                                                    | Returns a plugin guide: instructions for a kind of task (§9.9). Offered only when a plugin offers guides.          |
+| Tool           | Arguments                                                 | Effect                                                                                                             |
+| -------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `sleep`        | `conditions: [WaitCondition]`, `reason`                   | Suspends the case until **any** condition fires or times out.                                                      |
+| `ask_human`    | `question`, `timeout?`, `also_wait_for?: [WaitCondition]` | Creates a question for the owner and suspends until it is answered, or an `also_wait_for` condition fires (§10.2). |
+| `complete`     | `summary`, `result?` (any JSON)                           | Finishes the case successfully.                                                                                    |
+| `fail`         | `reason`                                                  | Finishes the case as failed.                                                                                       |
+| `note_set`     | `key`, `value`                                            | Saves a durable note (§7.2).                                                                                       |
+| `note_delete`  | `key`                                                     | Deletes a note.                                                                                                    |
+| `find_contact` | `query`                                                   | Looks the owner's contacts up by name, email or note, best match first (§9.7).                                     |
+| `save_contact` | `name`, `email?`, `phone?`, `note?`                       | Adds a contact, never trusted; an existing name or email is left unchanged (§9.7).                                 |
+| `read_file`    | `file`, `offset?`, `max_chars?`                           | Reads a case file's text in chunks (§7.5). Offered only when the case has files.                                   |
+| `view_image`   | `file`                                                    | Shows an image file to the model (§7.5). Offered only when the case has files and the model has `vision = true`.   |
+| `read_guide`   | `name`                                                    | Returns a plugin guide: instructions for a kind of task (§9.9). Offered only when a plugin offers guides.          |
 
 Next to these, every case is offered the tools of every loaded command plugin (§9.9), e.g.
 `youtube_transcript`. A plugin tool cannot take a core tool's name.
@@ -854,6 +856,26 @@ says what a call does (`"Email {to}: {subject}"`, §9.9).
 A rejection is never run; the LLM is told, with the owner's comment, and decides what to
 do next.
 
+**When approval is skipped.** Only the owner can let a call skip approval, never the LLM
+or anything it reads:
+
+- **Per case,** `approvals` on the case (`POST /cases`, `PATCH /cases/{id}`, the New case
+  form's Advanced section and the case page): `default`, `always` (ask even for trusted
+  contacts) or `never` (every call runs at once).
+- **Trusted contacts.** The owner keeps contacts (`/contacts`, the Contacts page) and marks
+  some trusted. With `default`, a tool may declare `approval_check` in its manifest: a
+  command that reads `{ "args", "trusted": [addresses] }` and prints
+  `{ "required": bool, "reason" }`. The email plugin's check builds the email exactly as
+  sending would (a reply's recipients come from the original's Reply-To, From and, with
+  reply-all, To and Cc) and skips approval only when every recipient is trusted. A check
+  that fails or prints nonsense means asking.
+- A call that skipped approval runs at once; its result says why
+  (`"approval": "not needed: …"`), so the timeline shows it.
+
+The LLM finds addresses with `find_contact` and can add people with `save_contact`, but
+cannot edit a contact or trust one: if it could change a trusted contact's address, it
+could send anywhere without asking.
+
 ### 9.8 External plugin protocol
 
 External plugins run as **child processes** of the server and speak **JSON-RPC 2.0 over
@@ -1366,6 +1388,18 @@ the last two minutes, `503` otherwise, with
 - The same process serves the web client (§15).
 
 ______________________________________________________________________
+
+### 14.10 Contacts (built)
+
+| Method   | Path             | Description                                                                          |
+| -------- | ---------------- | ------------------------------------------------------------------------------------ |
+| `GET`    | `/contacts`      | `{ "contacts": [{ id, name, email, phone, note, trusted, added_by, … }] }`, by name. |
+| `POST`   | `/contacts`      | `{ name, email?, phone?, note?, trusted? }`, `201` with the contact.                 |
+| `PUT`    | `/contacts/{id}` | Replaces the contact's fields (the same body); `404` if unknown.                     |
+| `DELETE` | `/contacts/{id}` | `204`.                                                                               |
+
+Emails are stored lowercased; `added_by` is `owner` or `agent` (`save_contact`). Only
+these endpoints set `trusted`.
 
 ## 15. Web client (built)
 

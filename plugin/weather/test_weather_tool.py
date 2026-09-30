@@ -141,6 +141,22 @@ class HistoryTests(unittest.TestCase):
                 tool.history(api, "45.5,-73.6", start, end, hourly, "metric", self.TODAY)
 
 
+class LocationTests(unittest.TestCase):
+
+    def test_no_location_or_here_means_the_owners_default(self) -> None:
+        env = {"WEATHER_DEFAULT_LOCATION": "Laval, Quebec"}
+        for given in (None, "", " here ", "Home", "my location"):
+            self.assertEqual("Laval, Quebec", tool.resolve_location(given, env))
+        self.assertEqual("Paris, France", tool.resolve_location("Paris, France", env))
+        with self.assertRaisesRegex(ToolError, "ask the owner which city"):
+            tool.resolve_location(None, {})
+
+    def test_words_that_name_no_place_are_refused(self) -> None:
+        for vague in ("global", "World", "everywhere"):
+            with self.assertRaisesRegex(ToolError, "is not a place"):
+                tool.resolve_location(vague, {"WEATHER_DEFAULT_LOCATION": "Laval, Quebec"})
+
+
 class ApiTests(unittest.TestCase):
 
     def test_free_and_customer_servers(self) -> None:

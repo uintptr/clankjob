@@ -15,6 +15,7 @@ pub use rusqlite::{Connection, Transaction};
 pub mod activations;
 pub mod cases;
 pub mod channels;
+pub mod contacts;
 pub mod events;
 pub mod files;
 pub mod human;
@@ -28,6 +29,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_channels.sql"),
     include_str!("../migrations/0003_approvals_and_checks.sql"),
+    include_str!("../migrations/0004_contacts.sql"),
 ];
 
 /// How long a connection waits for a lock held by another connection before failing.
@@ -201,6 +203,7 @@ pub(crate) mod test_support {
             budgets: Budgets::default(),
             instructions: Vec::new(),
             human_channels: Some(vec!["discord_joe".to_owned()]),
+            approvals: clankjob_core::case::ApprovalPolicy::default(),
         };
         crate::cases::insert_case(connection, &id, &new_case, time(0)).unwrap();
         id

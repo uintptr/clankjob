@@ -1,7 +1,10 @@
-# Optional: the plugin works without a config.toml, on Open-Meteo's free servers
-# (non-commercial use, about 10 000 calls a day). Copy to config.toml (git-ignored) to
-# pass environment variables to the tools; values are references, resolved by the server.
+# Copy to config.toml (git-ignored) and set where you are. The plugin also works without
+# it, on Open-Meteo's free servers (non-commercial use, about 10 000 calls a day), but then
+# the agent must always name a place. Values are references, resolved by the server.
 
 [env]
+# Where the owner is: used when the agent gives no location (or says "here").
+WEATHER_DEFAULT_LOCATION = "Montreal, Quebec"
+
 # A commercial Open-Meteo key switches to its customer servers (customer-api.open-meteo.com).
 # OPEN_METEO_API_KEY = { env = "OPEN_METEO_API_KEY" }

@@ -37,6 +37,22 @@ impl CaseState {
     }
 }
 
+string_enum!(
+    /// Whether a case's tool calls that need approval (sending email) wait for the owner.
+    /// Only the owner sets it, through the API or the web UI; the LLM cannot.
+    #[derive(Default)]
+    ApprovalPolicy {
+        /// Ask, unless the tool's own check says the call is safe (e.g. an email to
+        /// trusted contacts only).
+        #[default]
+        Default => "default",
+        /// Never ask: every call runs at once, and says so in the timeline.
+        Never => "never",
+        /// Always ask, even for trusted contacts.
+        Always => "always",
+    }
+);
+
 /// Limits that protect against runaway loops and runaway cost (design §5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -101,6 +117,8 @@ pub struct NewCase {
     /// Channels its questions go to besides the web UI (design §10.4); `None` uses the
     /// server's default.
     pub human_channels: Option<Vec<String>>,
+    /// When calls that need approval wait for the owner.
+    pub approvals: ApprovalPolicy,
 }
 
 /// Instruction text to add to a case.
@@ -158,6 +176,8 @@ pub struct Case {
     pub outcome: Option<String>,
     /// Channels its questions and notifications go to besides the web UI.
     pub human_channels: Vec<String>,
+    /// When calls that need approval wait for the owner.
+    pub approvals: ApprovalPolicy,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// Last modification time.

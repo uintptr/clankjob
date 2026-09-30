@@ -4,11 +4,12 @@
 //! so request threads always return quickly.
 
 use chrono::Utc;
-use clankjob_core::case::{Budgets, CaseState, NewCase, NewInstruction};
+use clankjob_core::case::{ApprovalPolicy, Budgets, CaseState, NewCase, NewInstruction};
+use clankjob_core::contact::{ContactSource, NewContact};
 use clankjob_core::file::FileKind;
 use clankjob_core::human::Decision;
 use clankjob_core::human::HumanRequestStatus;
-use clankjob_core::ids::{CaseId, FileId, HumanRequestId, InstructionId};
+use clankjob_core::ids::{CaseId, ContactId, FileId, HumanRequestId, InstructionId};
 use clankjob_engine::{Engine, EngineError};
 use clankjob_plugin_host::{InstanceState, InstanceStatus};
 use clankjob_storage::cases::CaseFilter;
@@ -248,6 +249,10 @@ struct CreateCaseBody {
     /// Channels besides the web UI; omitted uses the server's default, `[]` means none.
     #[serde(default)]
     human_channels: Option<Vec<String>>,
+    /// When approval-gated calls wait for the owner (default: unless the tool finds
+    /// nothing to approve, e.g. an email to trusted contacts).
+    #[serde(default)]
+    approvals: ApprovalPolicy,
 }
 
 /// An instruction in `POST /cases`, `POST` or `PUT /cases/{id}/instructions`.
@@ -282,6 +287,7 @@ fn create_case(state: &AppState, request: &Request) -> Handled {
         budgets: body.budgets.unwrap_or(state.defaults.budgets),
         instructions: body.instructions.into_iter().map(InstructionBody::into_new).collect(),
         human_channels: body.human_channels,
+        approvals: body.approvals,
     };
     let case = state.engine.create_case(&mut state.connect()?, &new_case)?;
     Ok(Response::json(&case).with_status_code(201))
@@ -450,7 +456,10 @@ fn wake_case(state: &AppState, id: &CaseId) -> Handled {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateCaseBody {
+    #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    approvals: Option<ApprovalPolicy>,
 }
 
 /// Longest case title, in characters.
@@ -458,16 +467,81 @@ const MAX_TITLE_CHARS: usize = 200;
 
 fn update_case(state: &AppState, request: &Request, id: &CaseId) -> Handled {
     let body: UpdateCaseBody = json_body(request)?;
-    let Some(title) = body.title.as_deref().map(str::trim) else {
-        return Err(AppError::BadRequest("nothing to change: give a `title`".to_owned()));
-    };
-    if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+    if body.title.is_none() && body.approvals.is_none() {
+        return Err(AppError::BadRequest(
+            "nothing to change: give a `title` or `approvals`".to_owned(),
+        ));
+    }
+    let title = body.title.as_deref().map(str::trim);
+    if title.is_some_and(|title| title.is_empty() || title.chars().count() > MAX_TITLE_CHARS) {
         return Err(AppError::BadRequest(format!(
             "`title` must be 1 to {MAX_TITLE_CHARS} characters"
         )));
     }
-    state.engine.rename_case(&mut state.connect()?, id, title)?;
+    let mut connection = state.connect()?;
+    if let Some(title) = title {
+        state.engine.rename_case(&mut connection, id, title)?;
+    }
+    if let Some(approvals) = body.approvals {
+        state.engine.set_approvals(&mut connection, id, approvals)?;
+    }
     get_case(state, id)
+}
+
+/// Body of `POST /contacts` and `PUT /contacts/{id}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContactBody {
+    name: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    phone: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    trusted: bool,
+}
+
+fn contact_body(request: &Request) -> Result<NewContact, AppError> {
+    let body: ContactBody = json_body(request)?;
+    clankjob_engine::contacts::clean(NewContact {
+        name: body.name,
+        email: body.email,
+        phone: body.phone,
+        note: body.note,
+        trusted: body.trusted,
+    })
+    .map_err(AppError::BadRequest)
+}
+
+fn list_contacts(state: &AppState) -> Handled {
+    let contacts = storage::contacts::list_contacts(&state.connect()?)?;
+    Ok(Response::json(&json!({ "contacts": contacts })))
+}
+
+fn add_contact(state: &AppState, request: &Request) -> Handled {
+    let contact = contact_body(request)?;
+    let stored = storage::contacts::insert_contact(&state.connect()?, &contact, ContactSource::Owner, Utc::now())?;
+    Ok(Response::json(&stored).with_status_code(201))
+}
+
+fn edit_contact(state: &AppState, request: &Request, id: &ContactId) -> Handled {
+    let contact = contact_body(request)?;
+    let connection = state.connect()?;
+    if !storage::contacts::update_contact(&connection, id, &contact, Utc::now())? {
+        return Err(AppError::NotFound(format!("contact `{id}` not found")));
+    }
+    let stored = storage::contacts::get_contact(&connection, id)?
+        .ok_or_else(|| AppError::NotFound(format!("contact `{id}` not found")))?;
+    Ok(Response::json(&stored))
+}
+
+fn delete_contact(state: &AppState, id: &ContactId) -> Handled {
+    if !storage::contacts::delete_contact(&state.connect()?, id)? {
+        return Err(AppError::NotFound(format!("contact `{id}` not found")));
+    }
+    Ok(Response::empty_204())
 }
 
 fn delete_case(state: &AppState, id: &CaseId) -> Handled {
@@ -688,6 +762,10 @@ fn route(state: &AppState, request: &Request) -> Handled {
         (POST) (/api/v1/cases/{id: String}/messages) => { post_message(state, request, &CaseId::from_string(id)) },
         (POST) (/api/v1/cases/{id: String}/wake) => { wake_case(state, &CaseId::from_string(id)) },
         (POST) (/api/v1/cases/{id: String}/cancel) => { cancel_case(state, &CaseId::from_string(id)) },
+        (GET) (/api/v1/contacts) => { list_contacts(state) },
+        (POST) (/api/v1/contacts) => { add_contact(state, request) },
+        (PUT) (/api/v1/contacts/{id: String}) => { edit_contact(state, request, &ContactId::from_string(id)) },
+        (DELETE) (/api/v1/contacts/{id: String}) => { delete_contact(state, &ContactId::from_string(id)) },
         (GET) (/api/v1/human-requests) => { list_human_requests(state, request) },
         (POST) (/api/v1/human-requests/{id: String}/answer) => {
             answer_human_request(state, request, &HumanRequestId::from_string(id))
@@ -951,6 +1029,80 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(detail["case"]["title"], "Panel quote, Laval");
         assert_eq!((empty, long, nothing, unknown), (400, 400, 400, 404));
+    }
+
+    #[test]
+    fn contacts_are_added_edited_listed_and_deleted_by_the_owner() {
+        let api = TestApi::new();
+
+        let (created, robin) = api.call(
+            "POST",
+            "/api/v1/contacts",
+            Some(json!({"name": " Robin ", "email": "Robin@Sparky.CA", "note": "electrician"})),
+        );
+        let id = robin["id"].as_str().unwrap().to_owned();
+        let (edited, trusted) = api.call(
+            "PUT",
+            &format!("/api/v1/contacts/{id}"),
+            Some(json!({"name": "Robin Tremblay", "email": "robin@sparky.ca", "trusted": true})),
+        );
+        let (_, list) = api.call("GET", "/api/v1/contacts", None);
+        let bad_email = api
+            .call("POST", "/api/v1/contacts", Some(json!({"name": "X", "email": "nope"})))
+            .0;
+        let no_name = api.call("POST", "/api/v1/contacts", Some(json!({"name": " "}))).0;
+        let deleted = api.call("DELETE", &format!("/api/v1/contacts/{id}"), None).0;
+        let gone = api.call("PUT", &format!("/api/v1/contacts/{id}"), Some(json!({"name": "R"}))).0;
+
+        assert_eq!(
+            (created, edited, bad_email, no_name, deleted, gone),
+            (201, 200, 400, 400, 204, 404)
+        );
+        assert_eq!(
+            (
+                robin["name"].as_str(),
+                robin["email"].as_str(),
+                robin["added_by"].as_str(),
+                robin["trusted"].as_bool()
+            ),
+            (Some("Robin"), Some("robin@sparky.ca"), Some("owner"), Some(false))
+        );
+        assert_eq!(
+            (trusted["name"].as_str(), trusted["trusted"].as_bool()),
+            (Some("Robin Tremblay"), Some(true))
+        );
+        assert_eq!(trusted["note"], Value::Null, "a replaced contact loses fields left out");
+        assert_eq!(list["contacts"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_cases_approvals_are_set_at_creation_and_changed_later() {
+        let api = TestApi::new();
+
+        let (_, case) = api.call(
+            "POST",
+            "/api/v1/cases",
+            Some(json!({"title": "t", "approvals": "never"})),
+        );
+        let id = case["id"].as_str().unwrap();
+        let (status, detail) = api.call(
+            "PATCH",
+            &format!("/api/v1/cases/{id}"),
+            Some(json!({"approvals": "always"})),
+        );
+        let unknown = api
+            .call(
+                "PATCH",
+                &format!("/api/v1/cases/{id}"),
+                Some(json!({"approvals": "sometimes"})),
+            )
+            .0;
+        let (_, default) = api.call("POST", "/api/v1/cases", Some(json!({"title": "u"})));
+
+        assert_eq!(case["approvals"], "never");
+        assert_eq!((status, detail["case"]["approvals"].as_str()), (200, Some("always")));
+        assert_eq!(unknown, 400);
+        assert_eq!(default["approvals"], "default");
     }
 
     #[test]

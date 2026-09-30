@@ -1,7 +1,7 @@
 //! The `cases` table.
 
 use chrono::{DateTime, Utc};
-use clankjob_core::case::{Case, CaseState, NewCase, Usage};
+use clankjob_core::case::{ApprovalPolicy, Case, CaseState, NewCase, Usage};
 use clankjob_core::ids::CaseId;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::Value;
@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::{Result, from_millis, parse_enum, to_millis};
 
 const COLUMNS: &str = "id, title, goal, owner, profile, llm, model, state, budgets, usage, result, outcome, \
-                       created_at, updated_at, human_channels";
+                       created_at, updated_at, human_channels, approvals";
 
 /// Filter for [`list_cases`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,6 +28,7 @@ fn case_from_row(row: &Row<'_>) -> Result<Case> {
     let usage: String = row.get(9)?;
     let result: Option<String> = row.get(10)?;
     let human_channels: String = row.get(14)?;
+    let approvals: String = row.get(15)?;
     Ok(Case {
         id: CaseId::from_string(row.get::<_, String>(0)?),
         title: row.get(1)?,
@@ -42,6 +43,7 @@ fn case_from_row(row: &Row<'_>) -> Result<Case> {
         result: result.as_deref().map(serde_json::from_str).transpose()?,
         outcome: row.get(11)?,
         human_channels: serde_json::from_str(&human_channels)?,
+        approvals: parse_enum(&approvals)?,
         created_at: from_millis(row.get(12)?)?,
         updated_at: from_millis(row.get(13)?)?,
     })
@@ -78,12 +80,13 @@ pub fn insert_case(connection: &Connection, id: &CaseId, new_case: &NewCase, now
         result: None,
         outcome: None,
         human_channels: new_case.human_channels.clone().unwrap_or_default(),
+        approvals: new_case.approvals,
         created_at: now,
         updated_at: now,
     };
     connection.execute(
         &format!(
-            "INSERT INTO cases ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?11, ?12)"
+            "INSERT INTO cases ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?11, ?12, ?13)"
         ),
         params![
             case.id.as_str(),
@@ -98,6 +101,7 @@ pub fn insert_case(connection: &Connection, id: &CaseId, new_case: &NewCase, now
             serde_json::to_string(&case.usage)?,
             to_millis(now),
             serde_json::to_string(&case.human_channels)?,
+            case.approvals.as_str(),
         ],
     )?;
     Ok(case)
@@ -188,6 +192,24 @@ pub fn delete_case(connection: &Connection, id: &CaseId) -> Result<bool> {
         connection.execute(&format!("DELETE FROM {table} WHERE case_id = ?1"), params![id.as_str()])?;
     }
     Ok(connection.execute("DELETE FROM cases WHERE id = ?1", params![id.as_str()])? > 0)
+}
+
+/// Change when a case's approval-gated calls wait for the owner.
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if the update fails.
+pub fn update_approvals(
+    connection: &Connection,
+    id: &CaseId,
+    approvals: ApprovalPolicy,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE cases SET approvals = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id.as_str(), approvals.as_str(), to_millis(now)],
+    )?;
+    Ok(())
 }
 
 /// Change a case's title.

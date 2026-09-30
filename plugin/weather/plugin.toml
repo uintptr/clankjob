@@ -11,19 +11,20 @@ description = """Current weather and the forecast for a place, day by day (up to
 optionally hour by hour (up to 3 days): conditions, temperatures, precipitation and its \
 probability, snow, wind and gusts, UV, sunrise and sunset, in the place's local time. Use it \
 to plan outdoor work or visits. Check the `location` it resolved: a note says when it guessed."""
-command = ["./weather_tool.py", "forecast", "--location={location}"]
+command = ["./weather_tool.py", "forecast"]
 output = "json"
 timeout = "1m"
 
 [tools.options]
+location = ["--location={location}"]
 days = ["--days={days}"]
 hourly = ["--hourly"]
 units = ["--units={units}"]
 
 [tools.args.location]
 description = """A place name, best narrowed by region or country in full ("Laval, Quebec", \
-"Paris, France"), or `latitude,longitude` ("45.51,-73.59")."""
-required = true
+"Paris, France"), or `latitude,longitude` ("45.51,-73.59"). Leave it out for the owner's own \
+location (the configured default); ask the owner rather than guessing a place."""
 
 [tools.args.days]
 type = "integer"
@@ -44,20 +45,21 @@ conditions, temperatures, rain, snow, precipitation hours, wind and gusts; hour 
 to 7 days. Use it to check a claim about past weather (a storm, a frost, heavy rain on the \
 day of a leak). It is a reanalysis on a 9 to 25 km grid, not a station's readings: local \
 extremes such as a single gust or a hailstorm can be missed or smoothed out."""
-command = ["./weather_tool.py", "history", "--location={location}", "--start={start}"]
+command = ["./weather_tool.py", "history", "--start={start}"]
 output = "auto"
-file_name = "weather-{location}-{start}.json"
+file_name = "weather-history-{start}.json"
 timeout = "1m"
 
 [tools.options]
+location = ["--location={location}"]
 end = ["--end={end}"]
 hourly = ["--hourly"]
 units = ["--units={units}"]
 
 [tools.args.location]
 description = """A place name, best narrowed by region or country in full ("Laval, Quebec", \
-"Paris, France"), or `latitude,longitude` ("45.51,-73.59")."""
-required = true
+"Paris, France"), or `latitude,longitude` ("45.51,-73.59"). Leave it out for the owner's own \
+location (the configured default); ask the owner rather than guessing a place."""
 
 [tools.args.start]
 description = "First day, `YYYY-MM-DD`."

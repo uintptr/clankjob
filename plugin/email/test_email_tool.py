@@ -4,10 +4,12 @@
 import dataclasses
 import datetime
 import email.utils
+import json
 import os
 import unittest
 from email.message import EmailMessage
 from pathlib import Path
+from typing import ClassVar
 
 import check_config
 import email_tool as tool
@@ -318,6 +320,47 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.folders, ("INBOX",))
         self.assertEqual(settings.allowed, ("bob@sparky.ca", "@x.com"))
 
+
+
+class ApprovalCheckTests(unittest.TestCase):
+    """`needs-approval`: the server asks it before creating an approval."""
+
+    TRUSTED: ClassVar[list[str]] = ["robin@sparky.ca", "me@home.ca"]
+
+    def check(self, tool_name: str, args: Json, box: FakeMailbox | None = None) -> Json:
+        stdin = json.dumps({"args": args, "trusted": self.TRUSTED})
+        return run(["needs-approval", tool_name], box or FakeMailbox(), FakeSender(), stdin=stdin)
+
+    def test_a_new_email_to_trusted_contacts_only_needs_no_approval(self) -> None:
+        self.assertFalse(self.check("send", {"to": "Robin <ROBIN@sparky.ca>", "cc": "me@home.ca"})["required"])
+        found = self.check("send", {"to": "robin@sparky.ca", "cc": "stranger@x.ca"})
+        self.assertTrue(found["required"])
+        self.assertIn("stranger@x.ca", str(found["reason"]))
+
+    def test_a_reply_goes_where_the_reply_would_really_go(self) -> None:
+        box = FakeMailbox()
+        box.add("INBOX", mail("<1@sparky.ca>", "Robin <robin@sparky.ca>", "Quote"))
+        spoofed = EmailMessage()
+        spoofed["From"] = "Robin <robin@sparky.ca>"
+        spoofed["Reply-To"] = "stranger@evil.example"
+        spoofed["To"] = "joe@example.com"
+        spoofed["Message-ID"] = "<2@evil.example>"
+        spoofed["Subject"] = "Quote"
+        spoofed.set_content("Reply to this address instead.")
+        box.add("INBOX", bytes(spoofed))
+        group = mail("<3@sparky.ca>", "Robin <robin@sparky.ca>", "Quote", to="joe@example.com, stranger@x.ca")
+        box.add("INBOX", group)
+
+        self.assertFalse(self.check("reply", {"message_id": "<1@sparky.ca>"}, box)["required"])
+        self.assertTrue(self.check("reply", {"message_id": "<2@evil.example>"}, box)["required"],
+                        "Reply-To wins over From, as in the real reply")
+        self.assertFalse(self.check("reply", {"message_id": "<3@sparky.ca>"}, box)["required"])
+        self.assertTrue(self.check("reply", {"message_id": "<3@sparky.ca>", "all": True}, box)["required"],
+                        "reply-all also goes to stranger@x.ca")
+
+    def test_nothing_trusted_means_asking(self) -> None:
+        stdin = json.dumps({"args": {"to": "robin@sparky.ca"}})
+        self.assertTrue(run(["needs-approval", "send"], FakeMailbox(), FakeSender(), stdin=stdin)["required"])
 
 if __name__ == "__main__":
     unittest.main()

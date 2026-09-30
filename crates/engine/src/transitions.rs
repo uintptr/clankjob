@@ -4,7 +4,7 @@
 //! between two states.
 
 use chrono::{DateTime, Utc};
-use clankjob_core::case::{Case, CaseState, Instruction, NewCase, NewInstruction};
+use clankjob_core::case::{ApprovalPolicy, Case, CaseState, Instruction, NewCase, NewInstruction};
 use clankjob_core::event::{EventBody, InstructionChange, WakeReason};
 use clankjob_core::file::CaseFile;
 use clankjob_core::human::{HumanRequest, HumanRequestKind, HumanRequestStatus};
@@ -385,6 +385,26 @@ pub fn delete_case(connection: &mut Connection, case_id: &CaseId) -> Result<Vec<
     Ok(files)
 }
 
+/// Change when a case's approval-gated calls wait for the owner. Only the owner calls
+/// this (API, web UI); it takes effect at the next such call, and nothing wakes.
+///
+/// # Errors
+///
+/// Returns [`EngineError::CaseNotFound`] or [`EngineError::Storage`].
+pub fn set_approvals(
+    connection: &mut Connection,
+    case_id: &CaseId,
+    approvals: ApprovalPolicy,
+    now: DateTime<Utc>,
+) -> Result<Case> {
+    let transaction = begin_write(connection)?;
+    load_case(&transaction, case_id)?;
+    storage::cases::update_approvals(&transaction, case_id, approvals, now)?;
+    let case = load_case(&transaction, case_id)?;
+    commit(transaction)?;
+    Ok(case)
+}
+
 /// Give a case a new title. The agent sees it in its next system prompt; nothing wakes.
 ///
 /// # Errors
@@ -533,6 +553,7 @@ mod tests {
             budgets: Budgets::default(),
             instructions: Vec::new(),
             human_channels: None,
+            approvals: clankjob_core::case::ApprovalPolicy::default(),
         }
     }
 

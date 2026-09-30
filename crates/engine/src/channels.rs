@@ -683,6 +683,7 @@ mod tests {
             budgets: Budgets::default(),
             instructions: Vec::new(),
             human_channels: channels,
+            approvals: clankjob_core::case::ApprovalPolicy::default(),
         }
     }
 

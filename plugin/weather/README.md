@@ -16,9 +16,15 @@ resolved to, lists other places of the same name, and adds a `location_note` whe
 region given matched none of them (abbreviations like `QC` or `TX` do not): the first
 place found is used, and the agent can ask again more precisely.
 
+Without a location (or with "here"), the tools use `WEATHER_DEFAULT_LOCATION` from
+`config.toml`, your own city. Words that name no place, such as "global" or "world", are
+refused rather than looked up: a geocoder finds a village of almost any name (a case once
+got the forecast of Global Village, India).
+
 ## Setup
 
-Nothing to configure. To use a commercial Open-Meteo key, copy `config.example.toml` to
+Set your city: copy `config.example.toml` to `config.toml` and set
+`WEATHER_DEFAULT_LOCATION`. Everything else is optional. To use a commercial Open-Meteo key, copy `config.example.toml` to
 `config.toml` and uncomment `OPEN_METEO_API_KEY`. Then check it:
 
 ```sh

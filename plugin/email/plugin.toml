@@ -11,13 +11,15 @@ requires_config = true
 
 [[tools]]
 name = "send_email"
-description = """Send a new email from the owner's mailbox. The owner approves every email \
-before it goes out (they may edit it). Returns its message_id: to wait for the answer, sleep \
-on `email_reply_received` with that message_id."""
+description = """Send a new email from the owner's mailbox. The owner approves it before it goes \
+out (they may edit it), unless every recipient is a trusted contact (see find_contact) or the owner \
+set this case to never ask; the result says when no approval was needed. Returns its message_id: \
+to wait for the answer, sleep on `email_reply_received` with that message_id."""
 command = ["./email_tool.py", "send", "{to}", "--subject={subject}", "--body={body}"]
 output = "json"
 requires_approval = true
 approval = "Email {to}: {subject}"
+approval_check = ["./email_tool.py", "needs-approval", "send"]
 timeout = "1m"
 
 [tools.options]
@@ -43,12 +45,14 @@ description = "Cc recipients, comma-separated."
 [[tools]]
 name = "reply_email"
 description = """Reply within a thread to a message (by its message_id), keeping the subject and \
-threading headers. The owner approves it first. Returns the reply's message_id: sleep on \
+threading headers. The owner approves it first, unless everyone it goes to is a trusted contact or \
+the owner set this case to never ask. Returns the reply's message_id: sleep on \
 `email_reply_received` with it to wait for the next answer."""
 command = ["./email_tool.py", "reply", "{message_id}", "--body={body}"]
 output = "json"
 requires_approval = true
 approval = "Reply to {message_id}"
+approval_check = ["./email_tool.py", "needs-approval", "reply"]
 timeout = "1m"
 
 [tools.options]

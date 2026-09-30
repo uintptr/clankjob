@@ -528,6 +528,11 @@ async function newCaseDialog() {
             h("div", { class: llms.llms.length > 1 ? "two" : "" }, llms.llms.length > 1 && field("LLM", llmSelect), h("label", { class: "field" }, h("span", {}, "Model"), modelInput, modelHint)),
             h("div", { class: "field" }, h("span", {}, "Instructions"), instructionInput, instructionHint, instructionList),
             channelField,
+            (() => {
+                const hint = h("small", { class: "why" }, approvalHint("default"));
+                const select = approvalSelect("default", { onchange: (event) => (hint.textContent = approvalHint(event.currentTarget.value)) });
+                return h("label", { class: "field" }, h("span", {}, "Approvals"), select, hint);
+            })(),
             suggestions,
             h(
                 "details",
@@ -558,6 +563,7 @@ async function newCaseDialog() {
         const body = { title: values.title, llm: llmSelect.value || undefined };
         if (goal) body.goal = goal;
         for (const key of ["owner", "profile", "model"]) if (values[key]) body[key] = values[key].trim();
+        if (values.approvals && values.approvals !== "default") body.approvals = values.approvals;
         const budgets = {};
         for (const key of ["max_activations", "max_turns_per_activation", "max_total_tokens"]) if (values[key]) budgets[key] = Number(values[key]);
         if (Object.keys(budgets).length) body.budgets = budgets;
@@ -576,6 +582,25 @@ async function newCaseDialog() {
 }
 
 // ---------------------------------------------------------------- the rail
+
+/** The case setting for tool calls that need approval (sending email). */
+const APPROVAL_CHOICES = [
+    ["default", "Ask, except for trusted contacts", "Emails to trusted contacts go out at once; anything else waits for your OK."],
+    ["always", "Always ask", "Every email waits for your OK, even to trusted contacts."],
+    ["never", "Never ask", "Emails go out at once, to anyone. Each one is still listed in the timeline."],
+];
+
+function approvalSelect(value, props = {}) {
+    return h(
+        "select",
+        { name: "approvals", ...props },
+        APPROVAL_CHOICES.map(([choice, label]) => h("option", { value: choice, selected: choice === value }, label)),
+    );
+}
+
+function approvalHint(value) {
+    return (APPROVAL_CHOICES.find(([choice]) => choice === value) || APPROVAL_CHOICES[0])[2];
+}
 
 const TRASH_ICON =
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v4.5M9.2 6.5v4.5"/></svg>';
@@ -1066,6 +1091,9 @@ function caseDetail(pane, id, onRenamed) {
     const filesSection = section("Files", "read by the agent only when it needs them", filesList);
     filesSection.querySelector(".sec-h").append(h("div", { class: "right" }, addButton, fileInput));
     const statusSlot = h("div");
+    // Redrawn only when the setting changes, so a refresh never closes the menu in use.
+    const approvalsSlot = h("div");
+    let approvalsKey = null;
     const thread = h("div", { class: "card thread" });
     const render = timelineRenderer(thread);
     const hint = h("small", { class: "why" });
@@ -1214,6 +1242,29 @@ function caseDetail(pane, id, onRenamed) {
                 h("div", { class: "grow" }, h("b", {}, ok ? "Done. " : "Failed. "), item.outcome || "No summary given.", item.result !== null && h("pre", { class: "raw" }, pretty(item.result))),
             ),
         );
+    }
+
+    function renderApprovals(item) {
+        if (item.approvals === approvalsKey) return;
+        approvalsKey = item.approvals;
+        const hint = h("small", { class: "why" }, approvalHint(item.approvals));
+        const select = approvalSelect(item.approvals, {
+            "aria-label": "Approvals for this case",
+            disabled: item.state === "cancelled",
+            onchange: async (event) => {
+                const approvals = event.currentTarget.value;
+                hint.textContent = approvalHint(approvals);
+                try {
+                    await api(path, { method: "PATCH", body: { approvals } });
+                    toast("Approvals updated for this case.");
+                } catch (error) {
+                    report(error);
+                }
+                approvalsKey = null;
+                refresh().catch(report);
+            },
+        });
+        approvalsSlot.replaceChildren(section("Approvals", "when this case's emails wait for you", h("div", { class: "card box approvals" }, select, hint)));
     }
 
     function renderStatus(detail) {
@@ -1409,6 +1460,7 @@ function caseDetail(pane, id, onRenamed) {
         renderOutcome(item);
         renderComposer(item);
         renderStatus(detail);
+        renderApprovals(item);
         goalSlot.replaceChildren(item.goal ? section("Goal", null, h("div", { class: "card md" }, item.goal)) : "");
         renderFiles(item, detail.files);
         renderInstructions(item, detail.instructions);
@@ -1430,6 +1482,7 @@ function caseDetail(pane, id, onRenamed) {
             goalSlot,
             instructionsSection,
             filesSection,
+            approvalsSlot,
             statusSlot,
             section("Timeline", "oldest first", thread),
             section("Message", null, composer),
@@ -1487,6 +1540,177 @@ function inboxView(view) {
     }
 
     return poll(refresh, 4000);
+}
+
+// ---------------------------------------------------------------- contacts
+
+/** The owner's contacts: the agent looks them up by name; emails to trusted ones need no approval. */
+function contactsView(view) {
+    const list = pageFrame(
+        view,
+        "Contacts",
+        "People your agents can look up by name (\u201cemail Robin\u201d). Emails to trusted contacts go out without asking you; everyone else still needs your approval.",
+    );
+    let contacts = [];
+    let editingId = null;
+    let key = null;
+    const listCard = h("div", { class: "contact-list" });
+
+    /** Name, email, phone, note and trusted, filled from `contact` (or empty to add one). */
+    function contactForm(contact, onDone) {
+        const input = (name, props) => h("input", { name, autocomplete: "off", ...props });
+        const form = h(
+            "form",
+            {
+                class: "card box contact-form",
+                onsubmit: async (event) => {
+                    event.preventDefault();
+                    const values = Object.fromEntries(new FormData(form));
+                    const body = { name: values.name, trusted: values.trusted === "on" };
+                    for (const field of ["email", "phone", "note"]) if (values[field].trim()) body[field] = values[field].trim();
+                    try {
+                        if (contact) await api(`/contacts/${encodeURIComponent(contact.id)}`, { method: "PUT", body });
+                        else {
+                            await api("/contacts", { method: "POST", body });
+                            form.reset();
+                        }
+                        toast(contact ? "Contact saved." : "Contact added.");
+                        onDone(true);
+                    } catch (error) {
+                        report(error);
+                    }
+                },
+            },
+            h(
+                "div",
+                { class: "two" },
+                field("Name", input("name", { required: true, placeholder: "Robin Tremblay", value: contact?.name })),
+                field("Email", input("email", { type: "email", placeholder: "robin@sparky.ca", value: contact?.email })),
+            ),
+            h(
+                "div",
+                { class: "two" },
+                field("Phone", input("phone", { placeholder: "514 555-0123", value: contact?.phone })),
+                field("Note", input("note", { placeholder: "Electrician, quoted the panel", value: contact?.note })),
+            ),
+            h(
+                "label",
+                { class: "check" },
+                h("input", { type: "checkbox", name: "trusted", checked: Boolean(contact?.trusted) }),
+                h("span", {}, "Trusted: emails to them go out without asking me"),
+            ),
+            h(
+                "div",
+                { class: "acts" },
+                h(
+                    "div",
+                    { class: "right" },
+                    contact && h("button", { type: "button", class: "btn quiet", onclick: () => onDone(false) }, "Cancel"),
+                    h("button", { type: "submit", class: "btn primary" }, contact ? "Save" : "Add contact"),
+                ),
+            ),
+        );
+        return form;
+    }
+
+    async function setTrusted(contact, trusted) {
+        const body = { name: contact.name, trusted };
+        for (const field of ["email", "phone", "note"]) if (contact[field]) body[field] = contact[field];
+        try {
+            await api(`/contacts/${encodeURIComponent(contact.id)}`, { method: "PUT", body });
+            toast(trusted ? `${contact.name} is trusted: emails to them go out without asking.` : `${contact.name} is no longer trusted.`);
+        } catch (error) {
+            report(error);
+        }
+        key = null;
+        await refresh();
+    }
+
+    async function remove(contact) {
+        if (!window.confirm(`Delete ${contact.name} from your contacts?`)) return;
+        try {
+            await api(`/contacts/${encodeURIComponent(contact.id)}`, { method: "DELETE" });
+            toast("Contact deleted.");
+        } catch (error) {
+            report(error);
+        }
+        key = null;
+        await refresh();
+    }
+
+    function row(contact) {
+        if (contact.id === editingId) {
+            return contactForm(contact, () => {
+                editingId = null;
+                key = null;
+                refresh().catch(report);
+            });
+        }
+        const trustedBox = h("input", {
+            type: "checkbox",
+            checked: contact.trusted,
+            "aria-label": `Trust ${contact.name}`,
+            onchange: (event) => setTrusted(contact, event.currentTarget.checked),
+        });
+        return h(
+            "div",
+            { class: "contact" },
+            h(
+                "div",
+                { class: "who" },
+                h("b", {}, contact.name),
+                contact.added_by === "agent" && h("span", { class: "tag new", title: "Added by an agent during a case" }, "added by agent"),
+                h("div", { class: "muted" }, [contact.email, contact.phone].filter(Boolean).join(" \u00b7 ") || "no email or phone"),
+                contact.note && h("div", { class: "note" }, contact.note),
+            ),
+            h("label", { class: "check trust" }, trustedBox, h("span", {}, "Trusted")),
+            h(
+                "div",
+                { class: "links" },
+                h(
+                    "button",
+                    {
+                        type: "button",
+                        class: "btn sm",
+                        onclick: () => {
+                            editingId = contact.id;
+                            key = null;
+                            render();
+                        },
+                    },
+                    "Edit",
+                ),
+                h("button", { type: "button", class: "btn sm quiet warn", onclick: () => remove(contact) }, "Delete"),
+            ),
+        );
+    }
+
+    function render() {
+        listCard.replaceChildren(
+            ...(contacts.length
+                ? contacts.map(row)
+                : [emptyCard("No contacts yet", "Add yourself first (name \u201cme\u201d, trusted), so \u201cemail me\u201d works without asking.")]),
+        );
+    }
+
+    async function refresh() {
+        // An edit in progress is never redrawn away.
+        if (editingId) return;
+        contacts = (await api("/contacts")).contacts;
+        const nextKey = contacts.map((contact) => `${contact.id}@${contact.updated_at}`).join(",");
+        if (nextKey === key) return;
+        key = nextKey;
+        render();
+    }
+
+    list.append(
+        section("Add a contact", null, contactForm(null, () => {
+            key = null;
+            refresh().catch(report);
+        })),
+        section("Your contacts", "trusted ones are emailed without asking", listCard),
+    );
+    return poll(refresh, 15000);
 }
 
 // ---------------------------------------------------------------- prompts
@@ -1808,6 +2032,9 @@ function route() {
             break;
         case "plugins":
             current = { section, dispose: pluginsView(view), select: null };
+            break;
+        case "contacts":
+            current = { section, dispose: contactsView(view), select: null };
             break;
         default:
             current = { section: null, dispose: null, select: null };

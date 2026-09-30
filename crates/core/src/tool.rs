@@ -61,6 +61,21 @@ pub trait PluginTool: Send + Sync {
         None
     }
 
+    /// For a tool that needs approval: whether this call can skip it after all, e.g. an
+    /// email whose recipients are all among `trusted` (the owner's trusted contacts'
+    /// addresses). Runs nothing with outside effects.
+    ///
+    /// # Returns
+    ///
+    /// `Some(reason)` when no approval is needed, `None` when it is
+    ///
+    /// # Errors
+    ///
+    /// Returns why the check failed; the caller then asks for approval.
+    fn approval_check(&self, _arguments: &Value, _trusted: &[String]) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     /// Check the arguments without running anything, e.g. before asking for approval.
     ///
     /// # Errors

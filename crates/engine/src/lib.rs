@@ -23,6 +23,7 @@ use clankjob_storage::{Connection, Db, StorageError};
 mod activation;
 pub mod channels;
 mod checks;
+pub mod contacts;
 pub mod context;
 pub mod files;
 pub mod plugin_tools;
@@ -621,6 +622,21 @@ impl Engine {
         }
         tracing::info!(case_id = %case_id, "case deleted");
         Ok(())
+    }
+
+    /// Change when a case's approval-gated calls wait for the owner; see
+    /// [`transitions::set_approvals`].
+    ///
+    /// # Errors
+    ///
+    /// See [`transitions::set_approvals`].
+    pub fn set_approvals(
+        &self,
+        connection: &mut Connection,
+        case_id: &CaseId,
+        approvals: clankjob_core::case::ApprovalPolicy,
+    ) -> Result<Case> {
+        transitions::set_approvals(connection, case_id, approvals, Utc::now())
     }
 
     /// Give a case a new title; see [`transitions::rename_case`].

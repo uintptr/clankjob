@@ -73,6 +73,7 @@ mod tests {
             budgets: Budgets::default(),
             instructions: Vec::new(),
             human_channels: None,
+            approvals: clankjob_core::case::ApprovalPolicy::default(),
         };
         let case = create_case(connection, &new_case, time(0)).unwrap();
         storage::queue::remove(connection, &case.id).unwrap();

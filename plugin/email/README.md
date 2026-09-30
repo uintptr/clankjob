@@ -4,15 +4,17 @@ Lets cases email people and wait for their answers. A case can ask a contractor 
 quote, sleep until the reply arrives (checking your mailbox after 1, 2, 5 and 10 minutes,
 then every 15, without using the LLM), read it, and follow up if it doesn't come.
 
-**You approve every email before it goes out**: the draft appears in the web inbox and on
-Discord (✅/❌); in the web UI you can also edit it first.
+**You approve emails before they go out**: the draft appears in the web inbox and on
+Discord (✅/❌); in the web UI you can also edit it first. Emails whose recipients are all
+**trusted contacts** (the Contacts page) go out without asking, and each case's
+**Approvals** setting can make it always or never ask ([design §9.7](../../docs/design.md)).
 
-| Tool          | What it does                                           | Approval |
-| ------------- | ------------------------------------------------------ | -------- |
-| `send_email`  | Sends a new email                                      | yes      |
-| `reply_email` | Replies within a thread (subject and threading kept)   | yes      |
-| `list_emails` | Lists recent emails: sender, subject, date, message_id | no       |
-| `read_email`  | Reads one email: headers, text, attachment names       | no       |
+| Tool          | What it does                                           | Approval                               |
+| ------------- | ------------------------------------------------------ | -------------------------------------- |
+| `send_email`  | Sends a new email                                      | yes, unless every recipient is trusted |
+| `reply_email` | Replies within a thread (subject and threading kept)   | yes, unless every recipient is trusted |
+| `list_emails` | Lists recent emails: sender, subject, date, message_id | no                                     |
+| `read_email`  | Reads one email: headers, text, attachment names       | no                                     |
 
 | Wait condition         | Fires when                                               |
 | ---------------------- | -------------------------------------------------------- |

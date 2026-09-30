@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::thread;
 
 use chrono::Utc;
-use clankjob_core::case::{Case, CaseState};
+use clankjob_core::case::{ApprovalPolicy, Case, CaseState};
 use clankjob_core::event::{Event, EventBody, ToolResult, WakeReason};
 use clankjob_core::file::{CaseFile, FileKind};
 use clankjob_core::human::Execution;
@@ -160,6 +160,8 @@ enum PluginCall {
     Core,
     Ran(std::result::Result<ToolOutput, String>),
     NeedsApproval(String),
+    /// A tool that normally needs approval ran without it, for this reason.
+    RanWithoutApproval(std::result::Result<ToolOutput, String>, String),
 }
 
 /// Open an approval for a plugin tool call and suspend the case until it is decided
@@ -359,6 +361,11 @@ fn execute(connection: &Connection, case: &Case, call: &ToolCall, env: &FileEnv<
             let existed = storage::notes::delete_note(connection, &case.id, &args.key)?;
             ToolExecution::ok(json!({ "deleted": existed }))
         }
+        CoreTool::FindContact(args) => ToolExecution::ok(crate::contacts::find(connection, &args)?),
+        CoreTool::SaveContact(args) => match crate::contacts::save(connection, &args, now)? {
+            Ok(content) => ToolExecution::ok(content),
+            Err(message) => ToolExecution::error(message),
+        },
         CoreTool::ReadFile(args) => read_file(env, &args),
         CoreTool::ViewImage(args) => view_image(env, &args.file),
         CoreTool::ReadGuide(args) => read_guide(env.guides, &args.name),
@@ -506,6 +513,15 @@ impl Activation<'_> {
             let guides = self.shared.plugin_tools.guides();
             let (execution, written) = match plugin_call {
                 PluginCall::Ran(output) => plugin_result(&transaction, &case, &self.shared.files, &files, output)?,
+                PluginCall::RanWithoutApproval(output, reason) => {
+                    let (mut execution, written) =
+                        plugin_result(&transaction, &case, &self.shared.files, &files, output)?;
+                    // Shown in the timeline and to the agent: why nobody was asked.
+                    if let Some(object) = execution.content.as_object_mut() {
+                        object.insert("approval".to_owned(), Value::String(format!("not needed: {reason}")));
+                    }
+                    (execution, written)
+                }
                 PluginCall::NeedsApproval(summary) => (request_approval(&transaction, &case, call, &summary)?, None),
                 PluginCall::Core => {
                     let env = FileEnv {
@@ -560,12 +576,49 @@ impl Activation<'_> {
             return PluginCall::Core;
         };
         if let Some(summary) = tool.approval_summary(&call.arguments) {
-            return match tool.validate(&call.arguments) {
-                Ok(()) => PluginCall::NeedsApproval(summary),
-                Err(error) => PluginCall::Ran(Err(error)),
+            if let Err(error) = tool.validate(&call.arguments) {
+                return PluginCall::Ran(Err(error));
+            }
+            return match self.approval_skipped(tool.as_ref(), call) {
+                None => PluginCall::NeedsApproval(summary),
+                Some(reason) => {
+                    tracing::info!(case_id = %self.case_id, tool = %call.name, %reason, "ran without approval");
+                    PluginCall::RanWithoutApproval(self.run_timed(tool.as_ref(), &call.name, &call.arguments), reason)
+                }
             };
         }
         PluginCall::Ran(self.run_timed(tool.as_ref(), &call.name, &call.arguments))
+    }
+
+    /// Why a call that normally needs approval can run without it, or `None` to ask.
+    /// Follows the case's setting, which only the owner changes; by default the tool's
+    /// own check decides (e.g. every recipient a trusted contact). Anything that fails
+    /// means asking.
+    fn approval_skipped(&self, tool: &dyn clankjob_core::tool::PluginTool, call: &ToolCall) -> Option<String> {
+        let policy = match storage::cases::get_case(self.connection, &self.case_id) {
+            Ok(Some(case)) => case.approvals,
+            _ => ApprovalPolicy::Always,
+        };
+        match policy {
+            ApprovalPolicy::Always => None,
+            ApprovalPolicy::Never => Some("this case is set to never ask for approval".to_owned()),
+            ApprovalPolicy::Default => {
+                let trusted = match storage::contacts::trusted_emails(self.connection) {
+                    Ok(trusted) => trusted,
+                    Err(error) => {
+                        tracing::warn!(case_id = %self.case_id, %error, "cannot read trusted contacts; asking");
+                        return None;
+                    }
+                };
+                match tool.approval_check(&call.arguments, &trusted) {
+                    Ok(reason) => reason,
+                    Err(error) => {
+                        tracing::warn!(case_id = %self.case_id, tool = %call.name, %error, "approval check failed; asking");
+                        None
+                    }
+                }
+            }
+        }
     }
 
     /// The case's files as plugin tools see them. A database error becomes a tool error.
@@ -880,6 +933,7 @@ mod tests {
             budgets,
             instructions: Vec::new(),
             human_channels: None,
+            approvals: clankjob_core::case::ApprovalPolicy::default(),
         };
         engine.create_case(connection, &new_case).unwrap()
     }
@@ -1020,6 +1074,18 @@ mod tests {
             arguments.get("to").map(drop).ok_or_else(|| "`to` is required".to_owned())
         }
 
+        /// Like the email plugin's: no approval when the recipient is trusted.
+        fn approval_check(&self, arguments: &Value, trusted: &[String]) -> std::result::Result<Option<String>, String> {
+            let to = arguments["to"].as_str().unwrap_or_default();
+            if to.contains("check-fails") {
+                return Err("the mail server is down".to_owned());
+            }
+            Ok(trusted
+                .iter()
+                .any(|address| address == to)
+                .then(|| format!("{to} is a trusted contact")))
+        }
+
         fn run(&self, arguments: &Value, _context: &ToolContext) -> std::result::Result<ToolOutput, String> {
             self.sent.lock().unwrap().push(arguments.clone());
             Ok(ToolOutput::Json(json!({ "message_id": "<1@x>" })))
@@ -1056,6 +1122,55 @@ mod tests {
             comment: Some("ok"),
             via: "web",
             responder: None,
+        }
+    }
+
+    #[test]
+    fn approvals_follow_the_case_setting_and_trusted_contacts() {
+        use clankjob_core::contact::{ContactSource, NewContact};
+
+        // (case setting, recipient, whether the owner is asked)
+        let scenarios = [
+            (ApprovalPolicy::Default, "robin@sparky.ca", false),
+            (ApprovalPolicy::Default, "stranger@x.ca", true),
+            (ApprovalPolicy::Default, "check-fails@x.ca", true),
+            (ApprovalPolicy::Always, "robin@sparky.ca", true),
+            (ApprovalPolicy::Never, "stranger@x.ca", false),
+        ];
+        for (policy, to, asked) in scenarios {
+            // Arrange
+            let test_db = TestDb::new();
+            let mut connection = test_db.connect();
+            let provider = ScriptedProvider::new([
+                Ok(reply(&[("send_email", json!({"to": to}))])),
+                Ok(reply(&[("complete", json!({"summary": "Done."}))])),
+            ]);
+            let engine = engine(&test_db, Arc::clone(&provider));
+            let tool = with_send_tool(&engine);
+            let robin = NewContact {
+                name: "Robin".to_owned(),
+                email: Some("robin@sparky.ca".to_owned()),
+                trusted: true,
+                ..NewContact::default()
+            };
+            storage::contacts::insert_contact(&connection, &robin, ContactSource::Owner, Utc::now()).unwrap();
+            let case = create(&engine, &mut connection, Budgets::default());
+            storage::cases::update_approvals(&connection, &case.id, policy, Utc::now()).unwrap();
+
+            // Act
+            let after = activate(&engine, &mut connection);
+
+            // Assert
+            let what = format!("{policy:?} to {to}");
+            let sent = tool.sent.lock().unwrap().len();
+            if asked {
+                assert_eq!((after.state, sent), (CaseState::WaitingForHuman, 0), "{what}");
+            } else {
+                assert_eq!((after.state, sent), (CaseState::Completed, 1), "{what}");
+                let noted = events(&connection, &case).iter().any(|body| matches!(body,
+                    EventBody::ToolResult(result) if result.content["approval"].as_str().is_some_and(|note| note.starts_with("not needed: "))));
+                assert!(noted, "{what}: the timeline says why nobody was asked");
+            }
         }
     }
 
@@ -1368,6 +1483,7 @@ mod tests {
             budgets: Budgets::default(),
             instructions,
             human_channels: None,
+            approvals: clankjob_core::case::ApprovalPolicy::default(),
         }
     }
 

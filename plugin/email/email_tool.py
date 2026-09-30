@@ -10,6 +10,8 @@ wait-condition check and reads the JSON it prints. Standard library only.
     read MESSAGE_ID                             headers, text body, attachment names
     check-reply    (stdin: {"params": {"message_id", "from"?}, "cursor"})
     check-new      (stdin: {"params": {"from"?, "subject_contains"?}, "cursor"})
+    needs-approval send|reply  (stdin: {"args": …, "trusted": [addresses]}): whether the
+                   email needs the owner's approval, i.e. not every recipient is trusted
 
 Settings come from the environment, set through `[env]` in config.toml:
 
@@ -419,6 +421,42 @@ def compose_reply(settings: Settings, original: Message, body: str, reply_all: b
     return message
 
 
+def recipients_of(message: EmailMessage) -> list[str]:
+    return [addr for _, addr in email.utils.getaddresses([str(message.get("To", "")), str(message.get("Cc", ""))])
+            if addr]
+
+
+def approval_needed(recipients: list[str], trusted: object) -> Json:
+    """The server's approval check (`approval_check` in plugin.toml): no approval when
+    every recipient is one of the owner's trusted contacts."""
+    known = {str(address).strip().lower() for address in trusted} if isinstance(trusted, list) else set()
+    strangers = [recipient for recipient in recipients if recipient.strip().lower() not in known]
+    if not recipients or strangers:
+        who = ", ".join(strangers) or "no recipient"
+        return {"required": True, "reason": f"not a trusted contact: {who}"}
+    return {"required": False, "reason": f"every recipient is a trusted contact: {', '.join(recipients)}"}
+
+
+def needs_approval(settings: Settings, mailbox: Callable[[], Mailbox], tool: str, request: Json) -> Json:
+    """Who the email would really go to, built exactly as `send` or `reply` would."""
+    args = request.get("args")
+    args = args if isinstance(args, dict) else {}
+    if "send" == tool:
+        cc = args.get("cc")
+        message = compose(settings, str(args.get("to", "")), "", "", str(cc) if cc else None)
+    else:
+        box = mailbox()
+        try:
+            folder, uid = find(box, settings, message_id(str(args.get("message_id", ""))))
+            # The whole message, as `reply` fetches it: the header-only fetch leaves out
+            # Reply-To, where a reply really goes.
+            original = parse(box.fetch(folder, uid, headers_only=False))
+        finally:
+            box.close()
+        message = compose_reply(settings, original, "", args.get("all") is True)
+    return approval_needed(recipients_of(message), request.get("trusted"))
+
+
 def list_messages(mailbox: Mailbox, settings: Settings, args: argparse.Namespace) -> Json:
     since = args.since or (datetime.datetime.now(datetime.UTC).date() - datetime.timedelta(days=7)).isoformat()
     try:
@@ -540,6 +578,7 @@ def build_parser() -> argparse.ArgumentParser:
     read_parser.add_argument("message_id")
     sub.add_parser("check-reply")
     sub.add_parser("check-new")
+    sub.add_parser("needs-approval").add_argument("tool", choices=["send", "reply"])
     return parser
 
 
@@ -547,6 +586,9 @@ def run(args: argparse.Namespace, settings: Settings, mailbox: Callable[[], Mail
         stdin: str) -> Json:
     if "send" == args.command:
         return send(settings, sender, mailbox, compose(settings, args.to, args.subject, args.body, args.cc))
+    if "needs-approval" == args.command:
+        request = json.loads(stdin or "{}")
+        return needs_approval(settings, mailbox, args.tool, request if isinstance(request, dict) else {})
     box = mailbox()
     try:
         if "reply" == args.command:
@@ -570,7 +612,7 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         settings = Settings.from_env(dict(os.environ))
-        stdin = sys.stdin.read() if args.command.startswith("check") else ""
+        stdin = sys.stdin.read() if args.command.startswith("check") or "needs-approval" == args.command else ""
         result = run(args, settings, lambda: ImapMailbox(settings), SmtpSender(settings), stdin)
     except ToolError as error:
         print(f"Error: {error}", file=sys.stderr)

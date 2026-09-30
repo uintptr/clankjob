@@ -11,7 +11,8 @@ OPEN_METEO_API_KEY (config.toml [env]) to use its commercial servers instead.
                                what the weather was, from 1940 to yesterday
 
 A location is a place name, optionally narrowed by region or country ("Laval, Quebec",
-"Paris, FR"), or coordinates ("45.51,-73.59").
+"Paris, FR"), or coordinates ("45.51,-73.59"). Without one (or "here"), the owner's
+WEATHER_DEFAULT_LOCATION is used; words that name no place ("global") are refused.
 """
 
 import argparse
@@ -141,6 +142,28 @@ def matches(result: Json, qualifiers: list[str]) -> bool:
               for key in ("admin1", "admin2", "admin3", "admin4", "country", "country_code")]
     return all(any(field and (field == wanted or field.startswith(wanted)) for field in fields)
                for wanted in (qualifier.casefold() for qualifier in qualifiers))
+
+
+# Words that name no place. "here" and "home" mean the owner's default location; the
+# others are refused rather than sent to the geocoder, which would find a village of that
+# name somewhere ("global" is Global Village, India).
+HERE_WORDS = {"here", "home", "local", "my location", "current location", "my area", "my city", "me"}
+NOT_PLACES = {"global", "world", "worldwide", "earth", "anywhere", "everywhere", "international", "planet"}
+
+
+def resolve_location(location: str | None, env: dict[str, str]) -> str:
+    """The place to use: the one given, or WEATHER_DEFAULT_LOCATION for none or "here"."""
+    given = (location or "").strip()
+    default = env.get("WEATHER_DEFAULT_LOCATION", "").strip()
+    if not given or given.lower() in HERE_WORDS:
+        if default:
+            return default
+        raise ToolError("no location was given and no default is configured (WEATHER_DEFAULT_LOCATION): "
+                        "ask the owner which city they mean")
+    if given.lower() in NOT_PLACES:
+        raise ToolError(f"{given!r} is not a place: give a city (\"Laval, Quebec\") or coordinates, or leave "
+                        "the location out for the owner's default" + (f" ({default})" if default else ""))
+    return given
 
 
 def locate(api: Api, location: str) -> tuple[Place, list[Json], str]:
@@ -294,7 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("forecast", "history"):
         command = sub.add_parser(name)
-        command.add_argument("--location", required=True)
+        command.add_argument("--location")
         command.add_argument("--hourly", action="store_true")
         command.add_argument("--units", choices=sorted(UNITS), default="metric")
     sub.choices["forecast"].add_argument("--days", type=int, default=3)
@@ -305,12 +328,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    api = Api.from_env(dict(os.environ))
+    env = dict(os.environ)
+    api = Api.from_env(env)
     try:
         if "forecast" == args.command:
-            result = forecast(api, args.location, args.days, args.hourly, args.units)
+            result = forecast(api, resolve_location(args.location, env), args.days, args.hourly, args.units)
         else:
-            result = history(api, args.location, args.start, args.end, args.hourly, args.units)
+            result = history(api, resolve_location(args.location, env), args.start, args.end, args.hourly, args.units)
     except ToolError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

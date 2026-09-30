@@ -21,6 +21,8 @@ use crate::process::PASSED_ENV;
 
 /// Default time a tool may run.
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
+/// Longest an `approval_check` may run: it only looks, e.g. up an email's recipients.
+const APPROVAL_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Most output read from a tool; the rest is cut off.
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// Output up to this many characters is returned inline by `output = "auto"`.
@@ -129,6 +131,12 @@ pub struct ToolManifest {
     /// e.g. `"Email {to}: {subject}"`.
     #[serde(default)]
     pub approval: Option<String>,
+    /// Program and arguments that decide whether a call needs approval after all, e.g.
+    /// an email whose recipients are all trusted contacts. It reads `{"args": …,
+    /// "trusted": ["address", …]}` on stdin and prints `{"required": bool, "reason": …}`.
+    /// Any failure means approval is required.
+    #[serde(default)]
+    pub approval_check: Vec<String>,
 }
 
 /// A value made safe for a file name: no URL scheme, only letters, digits, `.`, `-` and
@@ -157,6 +165,8 @@ pub struct CommandTool {
     spec: ToolSpec,
     manifest: ToolManifest,
     runner: Runner,
+    /// `approval_check`, when declared.
+    approval_check: Option<(Runner, Vec<String>)>,
     standalone: BTreeSet<String>,
 }
 
@@ -616,6 +626,28 @@ impl CommandTool {
             description: manifest.description.clone(),
             parameters: schema_of(&manifest.args),
         };
+        let approval_check = match manifest.approval_check.split_first() {
+            None => None,
+            Some(_) if !manifest.requires_approval => {
+                return Err(format!("{what}: `approval_check` needs `requires_approval = true`"));
+            }
+            Some((check_program, check_args)) => {
+                if manifest.approval_check.iter().any(|part| !placeholders(part).is_empty()) {
+                    return Err(format!(
+                        "{what}: the call reaches `approval_check` on stdin, not as `{{…}}`"
+                    ));
+                }
+                let check_program = locate(check_program, dir).map_err(|error| format!("{what}: {error}"))?;
+                let runner = Runner {
+                    name: format!("{name} approval check"),
+                    dir: dir.to_path_buf(),
+                    program: check_program,
+                    env: env.clone(),
+                    timeout: timeout.min(APPROVAL_CHECK_TIMEOUT),
+                };
+                Some((runner, check_args.to_vec()))
+            }
+        };
         Ok(Self {
             plugin: plugin.to_owned(),
             spec,
@@ -626,6 +658,7 @@ impl CommandTool {
                 env,
                 timeout,
             },
+            approval_check,
             standalone,
             manifest,
         })
@@ -648,6 +681,14 @@ impl CommandTool {
             .collect();
         fill(&template, &safe)
     }
+}
+
+/// What an `approval_check` command prints.
+#[derive(Debug, Deserialize)]
+struct ApprovalReport {
+    required: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 impl PluginTool for CommandTool {
@@ -675,6 +716,22 @@ impl PluginTool for CommandTool {
             None => format!("Run `{}`", self.spec.name),
         };
         Some(summary.chars().take(MAX_SUMMARY_CHARS).collect())
+    }
+
+    fn approval_check(&self, arguments: &Value, trusted: &[String]) -> Result<Option<String>, String> {
+        let Some((runner, argv)) = &self.approval_check else {
+            return Ok(None);
+        };
+        let input = json!({ "args": arguments, "trusted": trusted }).to_string();
+        let output = runner.run(argv, Some(input))?;
+        let report: ApprovalReport = serde_json::from_str(&output)
+            .map_err(|error| format!("`{}` printed an invalid report: {error}", runner.name))?;
+        Ok((!report.required).then(|| {
+            report
+                .reason
+                .filter(|reason| !reason.trim().is_empty())
+                .unwrap_or_else(|| "the plugin found nothing to approve".to_owned())
+        }))
     }
 
     fn validate(&self, arguments: &Value) -> Result<(), String> {
@@ -1044,6 +1101,64 @@ mod tests {
             dash.unwrap_err(),
             "`to` cannot start with `-`",
             "a whole-element value cannot be an option"
+        );
+    }
+
+    #[test]
+    fn an_approval_check_gets_the_call_and_trusted_addresses_and_may_skip_approval() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        script(dir.path(), "send.sh", "#!/bin/sh\necho sent\n");
+        script(
+            dir.path(),
+            "check.py",
+            "#!/usr/bin/env python3\nimport json, sys\nrequest = json.load(sys.stdin)\n\
+             if request['args']['to'] == 'broken':\n    print('not json')\n    sys.exit(0)\n\
+             trusted = request['args']['to'] in request['trusted']\n\
+             print(json.dumps({'required': not trusted, 'reason': request['args']['to'] + ' is trusted'}))\n",
+        );
+        let text = |check: &str| {
+            format!(
+                "name = \"send_email\"\ndescription = \"Send.\"\ncommand = [\"./send.sh\", \"{{to}}\"]\n\
+                 requires_approval = true\n{check}\n[args.to]\ndescription = \"To\"\nrequired = true\n"
+            )
+        };
+        let tool = CommandTool::new(
+            "email",
+            dir.path(),
+            manifest(&text("approval_check = [\"./check.py\", \"needs-approval\"]")),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let trusted = ["robin@sparky.ca".to_owned()];
+
+        // Act
+        let skip = tool.approval_check(&json!({"to": "robin@sparky.ca"}), &trusted);
+        let ask = tool.approval_check(&json!({"to": "stranger@x.ca"}), &trusted);
+        let broken = tool.approval_check(&json!({"to": "broken"}), &trusted);
+        let without = CommandTool::new("email", dir.path(), manifest(&text("")), BTreeMap::new()).unwrap();
+        let unchecked = CommandTool::new(
+            "email",
+            dir.path(),
+            manifest(&text("approval_check = [\"./check.py\"]").replace("requires_approval = true\n", "")),
+            BTreeMap::new(),
+        );
+
+        // Assert
+        assert_eq!(skip, Ok(Some("robin@sparky.ca is trusted".to_owned())));
+        assert_eq!(ask, Ok(None));
+        assert!(
+            broken.unwrap_err().contains("invalid report"),
+            "a broken check is an error, so the host asks"
+        );
+        assert_eq!(
+            without.approval_check(&json!({"to": "robin@sparky.ca"}), &trusted),
+            Ok(None)
+        );
+        assert!(
+            unchecked
+                .err()
+                .is_some_and(|error| error.contains("needs `requires_approval = true`"))
         );
     }
 

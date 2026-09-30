@@ -1057,6 +1057,7 @@ pre.raw {
 .field input,
 .field select,
 .field textarea,
+.approvals select,
 .signin input {
     display: block;
     width: 100%;
@@ -1119,6 +1120,7 @@ pre.raw {
     .box textarea,
     .field input,
     .field select,
+    .approvals select,
     .field textarea,
     .rail-tools input {
         font-size: 16px;
@@ -1679,4 +1681,84 @@ details.more > .fields {
         transition: none !important;
         animation: none !important;
     }
+}
+
+/* ---- contacts ------------------------------------------------------------ */
+
+.contact-list {
+    display: grid;
+    gap: 8px;
+}
+
+.contact {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 8px 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+}
+
+.contact .who {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 8px;
+    min-width: 0;
+}
+
+.contact .who > .muted,
+.contact .who > .note {
+    flex-basis: 100%;
+    overflow-wrap: anywhere;
+}
+
+.contact .note {
+    color: var(--ink2);
+    font-size: 13.5px;
+}
+
+.contact .links {
+    display: flex;
+    gap: 6px;
+}
+
+label.check {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.contact-form {
+    display: grid;
+    gap: 12px;
+}
+
+@media (max-width: 640px) {
+    .contact {
+        grid-template-columns: 1fr auto;
+    }
+
+    .contact .links {
+        grid-column: 1 / -1;
+    }
+}
+
+
+label.check input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+    accent-color: var(--accent);
+}
+
+.approvals {
+    display: grid;
+    gap: 6px;
+}
+
+.approvals select {
+    max-width: 360px;
 }

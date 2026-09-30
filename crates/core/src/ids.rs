@@ -73,6 +73,10 @@ ulid_id!(
     FileId
 );
 ulid_id!(
+    /// Identifies one of the owner's contacts.
+    ContactId
+);
+ulid_id!(
     /// Identifies an instruction of a case.
     InstructionId
 );

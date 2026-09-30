@@ -72,6 +72,32 @@ pub struct NoteDeleteArgs {
     pub key: String,
 }
 
+/// Arguments of `find_contact`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindContactArgs {
+    /// A name, part of one, an email address or a word of the note; empty lists everyone.
+    #[serde(default)]
+    pub query: String,
+}
+
+/// Arguments of `save_contact`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveContactArgs {
+    /// Name.
+    pub name: String,
+    /// Email address.
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Phone number.
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// Who they are, how they relate to the case.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// Arguments of `read_file`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +136,8 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
     "fail",
     "note_set",
     "note_delete",
+    "find_contact",
+    "save_contact",
     "read_file",
     "view_image",
     "read_guide",
@@ -135,6 +163,10 @@ pub enum CoreTool {
     NoteSet(NoteSetArgs),
     /// Delete a note.
     NoteDelete(NoteDeleteArgs),
+    /// Look up the owner's contacts.
+    FindContact(FindContactArgs),
+    /// Add a contact (never trusted).
+    SaveContact(SaveContactArgs),
     /// Read the text of a file in parts.
     ReadFile(ReadFileArgs),
     /// Show an image file to the model.
@@ -165,6 +197,8 @@ impl CoreTool {
             "fail" => parse_args(call).map(Self::Fail),
             "note_set" => parse_args(call).map(Self::NoteSet),
             "note_delete" => parse_args(call).map(Self::NoteDelete),
+            "find_contact" => parse_args(call).map(Self::FindContact),
+            "save_contact" => parse_args(call).map(Self::SaveContact),
             "read_file" => parse_args(call).map(Self::ReadFile),
             "view_image" => parse_args(call).map(Self::ViewImage),
             "read_guide" => parse_args(call).map(Self::ReadGuide),
@@ -329,6 +363,39 @@ pub fn describe_plugin_conditions(specs: &mut [ToolSpec], plugins: &PluginTools)
     );
 }
 
+/// `find_contact` and `save_contact`, offered to every case.
+fn contact_tool_specs() -> Vec<ToolSpec> {
+    vec![
+        spec(
+            "find_contact",
+            "Look someone up in the owner's contacts by name (or part of it), email or a word of their note, \
+             e.g. before emailing \"Robin\". Use the address it returns; never guess one. If several match, or \
+             none, ask the owner. Emails to contacts marked trusted need no approval.",
+            json!({
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Name, email or keyword; empty lists everyone."}},
+                "required": ["query"]
+            }),
+        ),
+        spec(
+            "save_contact",
+            "Add someone to the owner's contacts, e.g. a contractor met during this case, so later cases can find \
+             them. Only adds: an existing contact with that name or email is left as it is. Contacts you add are \
+             never trusted; only the owner can trust someone.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "note": {"type": "string", "description": "Who they are, e.g. \"electrician, quoted the panel upgrade\"."}
+                },
+                "required": ["name"]
+            }),
+        ),
+    ]
+}
+
 /// Specs of the core tools, shown to the LLM.
 ///
 /// # Arguments
@@ -421,6 +488,7 @@ pub fn core_tool_specs(has_files: bool, vision: bool, has_guides: bool) -> Vec<T
             }),
         ),
     ];
+    specs.extend(contact_tool_specs());
     if has_files {
         specs.extend(file_tool_specs(vision));
     }
@@ -580,10 +648,19 @@ mod tests {
 
         assert_eq!(
             names(false, true),
-            ["sleep", "ask_human", "complete", "fail", "note_set", "note_delete"]
+            [
+                "sleep",
+                "ask_human",
+                "complete",
+                "fail",
+                "note_set",
+                "note_delete",
+                "find_contact",
+                "save_contact"
+            ]
         );
         assert_eq!(names(true, false).last().map(String::as_str), Some("read_file"));
-        assert_eq!(names(true, true)[6..], ["read_file", "view_image"]);
+        assert_eq!(names(true, true)[8..], ["read_file", "view_image"]);
         let every: Vec<String> = core_tool_specs(true, true, true).into_iter().map(|spec| spec.name).collect();
         assert_eq!(every, CORE_TOOL_NAMES);
         assert!(matches!(
