@@ -1607,7 +1607,7 @@ details.more > .three {
     margin-top: 8px;
 }
 
-details.more > .fields {
+details.more > .advanced {
     display: grid;
     gap: 14px;
     margin-top: 8px;

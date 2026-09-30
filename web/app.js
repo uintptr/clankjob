@@ -511,7 +511,7 @@ async function newCaseDialog() {
                 h("summary", {}, "Advanced"),
                 h(
                     "div",
-                    { class: "fields" },
+                    { class: "advanced" },
             field(
                 "Goal",
                 h("textarea", {
