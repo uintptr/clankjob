@@ -73,6 +73,11 @@ function field(label, control, why) {
     return h("label", { class: "field" }, h("span", {}, label), control, why && h("small", { class: "why" }, why));
 }
 
+/** A case created with only a title that has not run yet: it waits for the owner's first message. */
+function isDraft(item) {
+    return !item.goal && item.state === "waiting_for_human" && item.usage.activations === 0;
+}
+
 function chip(state) {
     return h("span", { class: `chip ${state}` }, h("i"), STATE_LABELS[state] || state);
 }
@@ -493,16 +498,26 @@ async function newCaseDialog() {
         h(
             "div",
             { class: "body" },
-            field("Title", input("title", { required: true, placeholder: "Electrician quote" })),
+            field(
+                "Title",
+                input("title", { required: true, placeholder: "Electrician quote", autofocus: true }),
+                "That is all it takes: the case waits until you send it a message, with files and instructions if you like. Or write the goal under Advanced to start right away.",
+            ),
+            h(
+                "details",
+                { class: "more" },
+                h("summary", {}, "Advanced"),
+                h(
+                    "div",
+                    { class: "fields" },
             field(
                 "Goal",
                 h("textarea", {
                     name: "goal",
-                    required: true,
                     rows: 5,
                     placeholder: "Get a quote from bob@sparky.ca for a 50A EV charger circuit. Follow up once if he doesn't answer within 2 days.",
                 }),
-                "Plain language. Say what done looks like and when to give up.",
+                "Plain language. Say what done looks like and when to give up. With a goal, the agent starts as soon as the case is created.",
             ),
             h(
                 "div",
@@ -526,18 +541,22 @@ async function newCaseDialog() {
                     field("Max tokens", number("max_total_tokens", "2000000")),
                 ),
             ),
+                ),
+            ),
         ),
         h(
             "footer",
             {},
-            h("div", { class: "acts" }, h("div", { class: "right" }, h("button", { type: "button", class: "btn quiet", onclick: close }, "Cancel"), h("button", { type: "submit", class: "btn primary" }, "Start case"))),
+            h("div", { class: "acts" }, h("div", { class: "right" }, h("button", { type: "button", class: "btn quiet", onclick: close }, "Cancel"), h("button", { type: "submit", class: "btn primary" }, "Create case"))),
         ),
     );
 
     async function submit(event) {
         event.preventDefault();
         const values = Object.fromEntries(new FormData(form));
-        const body = { title: values.title, goal: values.goal, llm: llmSelect.value || undefined };
+        const goal = values.goal.trim();
+        const body = { title: values.title, llm: llmSelect.value || undefined };
+        if (goal) body.goal = goal;
         for (const key of ["owner", "profile", "model"]) if (values[key]) body[key] = values[key].trim();
         const budgets = {};
         for (const key of ["max_activations", "max_turns_per_activation", "max_total_tokens"]) if (values[key]) budgets[key] = Number(values[key]);
@@ -546,7 +565,7 @@ async function newCaseDialog() {
         if (channels.length) body.human_channels = channelBoxes.filter((box) => box.checked).map((box) => box.value);
         const created = await api("/cases", { method: "POST", body });
         close();
-        toast("Case started. The agent is on it.");
+        toast(goal ? "Case started. The agent is on it." : "Case created. Send it a message to start it.");
         location.hash = `#/cases/${encodeURIComponent(created.id)}`;
     }
 
@@ -1059,7 +1078,8 @@ function caseDetail(pane, id) {
     };
 
     function renderHead(item, cost) {
-        const canWake = item.state === "sleeping" || item.state === "waiting_for_human";
+        // A draft starts with the owner's first message, not with a bare wake-up.
+        const canWake = (item.state === "sleeping" || item.state === "waiting_for_human") && !isDraft(item);
         head.replaceChildren(
             h(
                 "div",
@@ -1157,13 +1177,13 @@ function caseDetail(pane, id) {
         writeButton.disabled = cancelled;
         uploadButton.disabled = cancelled;
         instructionsNow = instructions;
-        const key = instructions.map((instruction) => `${instruction.id}@${instruction.updated_at}`).join(",");
+        const key = `${isDraft(item)}|${instructions.map((instruction) => `${instruction.id}@${instruction.updated_at}`).join(",")}`;
         if (editing || key === instructionsKey) return;
         instructionsKey = key;
         instructionsList.replaceChildren(
             ...(instructions.length
                 ? instructions.map((instruction) => instructionRow(instruction, cancelled))
-                : [h("div", { class: "md muted" }, "No instructions. Write or upload guidance the agent should always follow; editing one wakes the agent.")]),
+                : [h("div", { class: "md muted" }, isDraft(item) ? "No instructions. Write or upload guidance the agent should always follow; it reads them once your first message starts the case." : "No instructions. Write or upload guidance the agent should always follow; editing one wakes the agent.")]),
         );
     }
 
@@ -1245,13 +1265,13 @@ function caseDetail(pane, id) {
     // Redrawn only when the set of files changes, so an expanded file stays open.
     function renderFiles(item, files) {
         addButton.disabled = item.state === "cancelled";
-        const key = files.map((file) => file.id).join(",");
+        const key = `${isDraft(item)}|${files.map((file) => file.id).join(",")}`;
         if (key === filesKey) return;
         filesKey = key;
         filesList.replaceChildren(
             ...(files.length
                 ? files.map((file) => fileRow(id, file))
-                : [h("div", { class: "md muted" }, "No files yet. Add a quote, a contract, a photo from a contractor: the agent wakes up to read it.")]),
+                : [h("div", { class: "md muted" }, isDraft(item) ? "No files yet. Add a quote, a contract, a photo from a contractor: the agent sees them once your first message starts the case." : "No files yet. Add a quote, a contract, a photo from a contractor: the agent wakes up to read it.")]),
         );
     }
 
@@ -1282,8 +1302,12 @@ function caseDetail(pane, id) {
         const cancelled = item.state === "cancelled";
         messageBox.disabled = cancelled;
         sendButton.disabled = cancelled;
-        hint.textContent =
-            {
+        const draft = isDraft(item);
+        messageBox.placeholder = draft ? "What should the agent do? Context, contacts, what done looks like…" : "New information, a change of plan…";
+        sendButton.textContent = draft ? "Start" : "Send message";
+        hint.textContent = draft
+            ? "The case waits for this first message. Add files and instructions first if you like: they do not start it."
+            : {
                 waiting_for_human: "This answers the agent's open question.",
                 completed: "Sending a message reopens the case.",
                 failed: "Sending a message reopens the case.",
@@ -1307,7 +1331,7 @@ function caseDetail(pane, id) {
         renderOutcome(item);
         renderComposer(item);
         renderStatus(detail);
-        goalSlot.replaceChildren(section("Goal", null, h("div", { class: "card md" }, item.goal)));
+        goalSlot.replaceChildren(item.goal ? section("Goal", null, h("div", { class: "card md" }, item.goal)) : "");
         renderFiles(item, detail.files);
         renderInstructions(item, detail.instructions);
         const page = await api(`${path}/events?after=${lastSeq}&limit=1000`);

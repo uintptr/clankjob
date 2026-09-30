@@ -1219,7 +1219,7 @@ every request without one: the server logs a warning at startup, `/healthz` repo
 | `GET`    | `/cases/{id}/files/{file_id}`         | A file's metadata and extracted text.                                                              |
 | `GET`    | `/cases/{id}/files/{file_id}/content` | The bytes: images inline, everything else as a download (§17.3).                                   |
 
-Create request (every field but `title` and `goal` is optional):
+Create request (every field but `title` is optional):
 
 ```json
 POST /api/v1/cases
@@ -1240,6 +1240,14 @@ POST /api/v1/cases
 `[budgets]`; `model` defaults to the LLM's default model; `human_channels` defaults to
 `default_human_channels` (§10.4), and an unknown channel is a `400`. Response `201`: the case,
 `{ "id": "01J9…", "state": "pending", "usage": {…}, … }`.
+
+**A case without a goal is a draft.** It is created `waiting_for_human` with no question and
+no activation queued, so nothing runs and no LLM is called. The owner's first message
+(`POST /cases/{id}/messages`) starts it, as a `human_message` wake; files and instructions
+added before that do not wake it. The system prompt then says the goal comes from the
+owner's messages. This is what the web client's New case form does when only a title is
+given; the goal, owner, profile, model, instructions, channels and budgets are under
+"Advanced".
 
 `cost` estimates what the case has cost so far: its input and output tokens times its
 model's current prices from the model catalog (§8), as `{ usd, model, input_price, output_price, input_tokens, output_tokens }`. Cached-token discounts and price changes

@@ -230,6 +230,8 @@ fn health(state: &AppState) -> Response {
 #[serde(deny_unknown_fields)]
 struct CreateCaseBody {
     title: String,
+    /// Without one, the case is a draft that starts with the owner's first message.
+    #[serde(default)]
     goal: String,
     #[serde(default)]
     owner: Option<String>,
@@ -267,8 +269,8 @@ impl InstructionBody {
 
 fn create_case(state: &AppState, request: &Request) -> Handled {
     let body: CreateCaseBody = json_body(request)?;
-    if body.title.trim().is_empty() || body.goal.trim().is_empty() {
-        return Err(AppError::BadRequest("`title` and `goal` must not be empty".to_owned()));
+    if body.title.trim().is_empty() {
+        return Err(AppError::BadRequest("`title` must not be empty".to_owned()));
     }
     let new_case = NewCase {
         title: body.title,
@@ -888,6 +890,19 @@ mod tests {
         assert_eq!(empty_status, 400);
         assert_eq!(error["error"]["code"], "bad_request");
         assert_eq!((unknown_llm, bad_state, bad_limit), (400, 400, 400));
+    }
+
+    #[test]
+    fn a_case_created_with_only_a_title_waits_for_the_owner() {
+        let api = TestApi::new();
+
+        let (status, case) = api.call("POST", "/api/v1/cases", Some(json!({"title": "Panel upgrade"})));
+
+        assert_eq!(status, 201);
+        assert_eq!(
+            (case["state"].as_str(), case["goal"].as_str()),
+            (Some("waiting_for_human"), Some(""))
+        );
     }
 
     #[test]

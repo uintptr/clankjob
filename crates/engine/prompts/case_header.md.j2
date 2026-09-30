@@ -8,7 +8,7 @@
 
 ## Goal
 
-{{ case.goal }}
+{{ case.goal if case.goal | trim else "The owner created this case with only its title. Their messages (and any instructions and files) say what to do; ask them if it is unclear." }}
 
 ## Notes
 

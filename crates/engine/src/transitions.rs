@@ -105,19 +105,33 @@ fn answer_open_request(
 
 /// Create a case and queue its first activation.
 ///
+/// A case without a goal is a draft: it waits for the owner (no LLM call) until their
+/// first message, which starts it; files and instructions added meanwhile do not.
+///
 /// # Errors
 ///
 /// Returns [`EngineError::Storage`] if the database fails.
 pub fn create_case(connection: &mut Connection, new_case: &NewCase, now: DateTime<Utc>) -> Result<Case> {
     let transaction = begin_write(connection)?;
-    let case = storage::cases::insert_case(&transaction, &CaseId::generate(), new_case, now)?;
+    let mut case = storage::cases::insert_case(&transaction, &CaseId::generate(), new_case, now)?;
     for instruction in &new_case.instructions {
         storage::instructions::insert_instruction(&transaction, &case.id, instruction, now)?;
     }
-    storage::events::append_event(&transaction, &case.id, None, &EventBody::Wake(WakeReason::Created), now)?;
-    storage::queue::enqueue(&transaction, &case.id, now)?;
+    if new_case.goal.trim().is_empty() {
+        change_state(&transaction, &case, CaseState::WaitingForHuman, None, now)?;
+        case = load_case(&transaction, &case.id)?;
+    } else {
+        storage::events::append_event(&transaction, &case.id, None, &EventBody::Wake(WakeReason::Created), now)?;
+        storage::queue::enqueue(&transaction, &case.id, now)?;
+    }
     commit(transaction)?;
     Ok(case)
+}
+
+/// Whether a case is a draft: created without a goal and never run, so it waits for the
+/// owner's first message rather than waking for files or instructions.
+fn is_draft(case: &Case) -> bool {
+    case.state == CaseState::WaitingForHuman && case.usage.activations == 0
 }
 
 /// Post a message from the owner to a case.
@@ -256,7 +270,9 @@ pub fn add_file(connection: &mut Connection, file: &CaseFile, now: DateTime<Utc>
         name: file.name.clone(),
         kind: file.kind,
     };
-    wake(&transaction, &case, reason, now)?;
+    if !is_draft(&case) {
+        wake(&transaction, &case, reason, now)?;
+    }
     commit(transaction)?;
     Ok(())
 }
@@ -314,7 +330,9 @@ pub fn change_instruction(
         }
         (None, None) => return Ok(None),
     };
-    wake(&transaction, &case, reason, now)?;
+    if !is_draft(&case) {
+        wake(&transaction, &case, reason, now)?;
+    }
     commit(transaction)?;
     Ok(stored)
 }
@@ -495,6 +513,36 @@ mod tests {
 
     fn state(connection: &Connection, id: &CaseId) -> CaseState {
         load_case(connection, id).unwrap().state
+    }
+
+    #[test]
+    fn a_case_without_a_goal_waits_for_the_first_message_not_for_instructions() {
+        // Arrange
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let draft = NewCase {
+            goal: " ".to_owned(),
+            ..new_case()
+        };
+
+        // Act
+        let case = create_case(&mut connection, &draft, time(0)).unwrap();
+        let instruction = NewInstruction {
+            name: "context.md".to_owned(),
+            content: "The panel is in the garage.".to_owned(),
+        };
+        change_instruction(&mut connection, &case.id, None, Some(&instruction), time(1)).unwrap();
+        let before_message = claim_next(&mut connection, time(2), time(60)).unwrap();
+        post_message(&mut connection, &case.id, "Get a quote for a 50A circuit.", time(3)).unwrap();
+        let claimed = claim_next(&mut connection, time(4), time(60)).unwrap();
+
+        // Assert
+        assert_eq!(case.state, CaseState::WaitingForHuman);
+        assert!(
+            before_message.is_none(),
+            "neither creating nor an instruction starts a draft"
+        );
+        assert_eq!(claimed.unwrap().case.id, case.id);
     }
 
     #[test]

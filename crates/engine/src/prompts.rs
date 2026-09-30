@@ -534,6 +534,20 @@ mod tests {
     }
 
     #[test]
+    fn case_header_explains_a_case_without_a_goal() {
+        let (budgets, usage) = (Budgets::default(), Usage::default());
+        let mut context = context(&budgets, &usage);
+        let set = PromptSet::builtin();
+
+        let with_goal = set.render(CASE_HEADER, &context).unwrap();
+        context.case.goal = "";
+        let without = set.render(CASE_HEADER, &context).unwrap();
+
+        assert!(with_goal.contains("Get a quote"));
+        assert!(without.contains("created this case with only its title"), "{without}");
+    }
+
+    #[test]
     fn missing_directory_gives_builtins_without_errors() {
         let set = PromptSet::load("/nonexistent/prompts", None);
 
