@@ -1149,6 +1149,12 @@ The Discord plugin is documented with the plugin, in
 how it talks to Discord, its setup checks, and what is planned. It is a human channel
 (§10.3) running as a JSON-RPC process plugin (§9.8).
 
+Starting cases from Discord is deliberately **not** part of it: the optional
+[`intake/discord`](../intake/discord/README.md) service polls a channel for messages that
+@mention its bot and creates cases through `POST /api/v1/cases`, like any API client. The
+server and the plugin know nothing about it; its cases' questions reach Discord through
+`default_human_channels`.
+
 ______________________________________________________________________
 
 ## 13. End-to-end walkthrough (target)

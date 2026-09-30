@@ -77,6 +77,8 @@ RUN apt-get update \
     && for program in nmap tcpdump arp-scan mtr-packet; do setcap cap_net_raw+eip "$(command -v "$program")"; done \
     && rm -rf /var/lib/apt/lists/*
 COPY sandbox/sandboxd.py /usr/local/lib/clankjob/sandboxd.py
+# Optional services next to the server, each started by its own compose service.
+COPY intake/discord/discord_intake.py /usr/local/lib/clankjob/discord_intake.py
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY --from=build /usr/local/bin/clankjob /usr/local/bin/clankjob
 
@@ -84,8 +86,8 @@ COPY --from=build /usr/local/bin/clankjob /usr/local/bin/clankjob
 # `user:` in compose.yaml (default 1000:1000).
 RUN groupadd --gid 1000 clankjob \
     && useradd --uid 1000 --gid 1000 --home-dir /home/clankjob --create-home --shell /usr/sbin/nologin clankjob \
-    && mkdir -p /config /plugins /prompts /data /work \
-    && chown clankjob:clankjob /data /work
+    && mkdir -p /config /plugins /prompts /data /work /state \
+    && chown clankjob:clankjob /data /work /state
 
 # Container paths override the ones in clankjob.toml, so the same file works for a local
 # `cargo run` and here (design §18.2).

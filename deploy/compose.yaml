@@ -60,5 +60,30 @@ services:
       interval: 30s
       timeout: 5s
 
+  # Optional: start cases from Discord (intake/discord). A message that @mentions its bot,
+  # from an allowed user, becomes a case. It only talks to the server's REST API; the
+  # Discord plugin keeps handling questions. Off unless COMPOSE_PROFILES=discord-intake
+  # is in .env, with the DISCORD_INTAKE_* settings below.
+  discord-intake:
+    image: ghcr.io/uintptr/clankjob:latest
+    profiles: ["discord-intake"]
+    restart: unless-stopped
+    dns:
+      - 1.1.1.1
+    entrypoint: ["/usr/bin/tini", "--", "python3", "/usr/local/lib/clankjob/discord_intake.py"]
+    # Only its own settings, not the whole .env: it never sees the LLM or email secrets.
+    environment:
+      CLANKJOB_URL: http://clankjob:8080
+      CLANKJOB_TOKEN: ${CLANKJOB_TOKEN:-}
+      CLANKJOB_PUBLIC_URL: ${CLANKJOB_PUBLIC_URL:-}
+      DISCORD_INTAKE_TOKEN: ${DISCORD_INTAKE_TOKEN:-}
+      DISCORD_INTAKE_CHANNEL_ID: ${DISCORD_INTAKE_CHANNEL_ID:-}
+      DISCORD_INTAKE_ALLOWED_USERS: ${DISCORD_INTAKE_ALLOWED_USERS:-}
+    volumes:
+      - intake-state:/state
+    healthcheck:
+      disable: true
+
 volumes:
   sandbox-work:
+  intake-state:

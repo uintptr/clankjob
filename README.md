@@ -216,6 +216,8 @@ plugin/
   shell/        a bash shell for the agent, run in the sandbox container
   web/          web search (Google), pages as text, waits for page and feed changes
 sandbox/        the sandbox's exec service (sandboxd.py), for plugin/shell
+intake/
+  discord/      optional service: @mention the bot on Discord to start a case (REST API only)
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/
   design.md     the full design

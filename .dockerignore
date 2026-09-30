@@ -7,6 +7,7 @@
 !web/
 !plugin/
 !sandbox/sandboxd.py
+!intake/discord/discord_intake.py
 web/example.html
 plugin/*/config.toml
 # Secrets kept next to a plugin (e.g. plugin/discord/token) would end up in the image.
