@@ -60,6 +60,22 @@ RUN apt-get update \
     procps less \
     xz-utils bzip2 zip \
     && rm -rf /var/lib/apt/lists/*
+
+# Network tools for the sandbox. The ones that need raw sockets get CAP_NET_RAW as a file
+# capability, so they work for the unprivileged user (NMAP_PRIVILEGED=1 in compose lets
+# nmap use it). Only NET_RAW: Docker's default set lacks NET_ADMIN, and a binary asking
+# for a capability outside that set cannot run at all.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+    iputils-ping traceroute mtr-tiny \
+    dnsutils whois \
+    netcat-openbsd ncat socat telnet \
+    nmap arp-scan tcpdump \
+    iproute2 iperf3 \
+    openssl openssh-client \
+    libcap2-bin \
+    && for program in nmap tcpdump arp-scan mtr-packet; do setcap cap_net_raw+eip "$(command -v "$program")"; done \
+    && rm -rf /var/lib/apt/lists/*
 COPY sandbox/sandboxd.py /usr/local/lib/clankjob/sandboxd.py
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY --from=build /usr/local/bin/clankjob /usr/local/bin/clankjob

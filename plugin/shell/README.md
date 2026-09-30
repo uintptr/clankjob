@@ -1,7 +1,7 @@
 # Shell plugin (sandbox)
 
 Gives the agent a shell: `run_command` runs a bash command in the **sandbox**, a container
-from the clankjob image with every program installed (curl, git, jq, Python and `uv`,
+from the clankjob image with every program installed (curl, ping, dig, nc, nmap, tcpdump, mtr, git, jq, Python and `uv`,
 pandoc, Poppler, Tesseract, ImageMagick, FFmpeg, ExifTool, SQLite, ripgrep…) and internet
 access, but none of the server's secrets, data or settings. The agent can fetch pages,
 call APIs, clone repositories, convert files and write scripts, without being able to

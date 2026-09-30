@@ -10,7 +10,7 @@ requires_config = true
 [[tools]]
 name = "run_command"
 description = """Run a bash command in your sandbox: a Debian machine with internet access and \
-the usual tools (curl, wget, git, jq, python3, uv, pandoc, poppler, tesseract, imagemagick, \
+the usual tools (curl, wget, ping, dig, nc, nmap, tcpdump, mtr, git, jq, python3, uv, pandoc, poppler, tesseract, imagemagick, \
 ffmpeg, exiftool, sqlite3…). It starts in /work, which keeps its files between calls and is \
 shared by every case. Pass `file` to copy one of the case's files to /work/case-files/ first. \
 Returns the exit code, stdout and stderr; long output is saved as a case file. The sandbox has \

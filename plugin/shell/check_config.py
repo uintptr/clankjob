@@ -21,7 +21,7 @@ import tomllib
 from shell_tool import ToolError, call, sandbox_url
 
 HERE = Path(__file__).resolve().parent
-PROGRAMS = ("bash", "curl", "wget", "git", "jq", "python3", "uv", "sqlite3", "pandoc", "pdftotext", "tesseract",
+PROGRAMS = ("bash", "curl", "wget", "ping", "dig", "nc", "nmap", "tcpdump", "git", "jq", "python3", "uv", "sqlite3", "pandoc", "pdftotext", "tesseract",
             "convert", "ffmpeg", "exiftool")
 # One line per finding; empty when the sandbox sees nothing of the server.
 LEAKS = r"""

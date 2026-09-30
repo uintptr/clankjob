@@ -32,7 +32,7 @@ services:
             - "127.0.0.1:8080:8080"
         env_file:
             - path: .env
-                required: false
+              required: false
         volumes:
             - ./clankjob.toml:/config/clankjob.toml:ro
             - ./plugin:/plugins:ro
@@ -56,6 +56,8 @@ services:
         environment:
             HOME: /work
             UV_CACHE_DIR: /work/.cache/uv
+            # nmap: use the raw sockets its file capability allows (SYN scans, OS detection).
+            NMAP_PRIVILEGED: "1"
         volumes:
             - sandbox-work:/work
         # Deliberately no env_file, no /data, /config, /plugins config or /run/secrets.
