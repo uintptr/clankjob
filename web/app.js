@@ -7,8 +7,6 @@
 
 const TOKEN_KEY = "clankjob.token";
 const THEME_KEY = "clankjob.theme";
-// Whether a case page's Settings section is open, remembered across cases.
-const CASE_SETTINGS_KEY = "clankjob.caseSettings";
 const THEMES = ["auto", "light", "dark"];
 
 const STATE_LABELS = {
@@ -1105,23 +1103,19 @@ function caseDetail(pane, id, onRenamed) {
     const channelsSlot = h("div");
     let channelsKey = null;
     let loadedChannels = null;
-    // Instructions, files, approvals, notifications and the model, folded under Settings.
-    // Only a click on it is remembered; a draft (waiting for its first message) opens it,
-    // since that is where its files and instructions go, without changing what is
-    // remembered.
+    // Instructions, files, approvals, notifications and the model, folded under Settings,
+    // which starts closed.
     const settingsFacts = h("span", { class: "muted" });
     const settings = h(
         "details",
         { class: "more case-settings" },
-        h("summary", { onclick: () => writeStorage(CASE_SETTINGS_KEY, settings.open ? null : "open") }, "Settings", settingsFacts),
+        h("summary", {}, "Settings", settingsFacts),
         instructionsSection,
         filesSection,
         approvalsSlot,
         channelsSlot,
         modelSlot,
     );
-    settings.open = readStorage(CASE_SETTINGS_KEY) === "open";
-    let draftOpened = false;
     const thread = h("div", { class: "card thread" });
     const render = timelineRenderer(thread);
     const hint = h("small", { class: "why" });
@@ -1364,10 +1358,6 @@ function caseDetail(pane, id, onRenamed) {
         // The LLM's default model id, once the Model section has loaded the choices.
         facts.push(item.model || llmChoices?.llms.find((llm) => llm.name === item.llm)?.model || "default model");
         settingsFacts.textContent = facts.join(" · ");
-        if (isDraft(item) && !draftOpened) {
-            draftOpened = true;
-            settings.open = true;
-        }
     }
 
     async function renderChannels(item) {
