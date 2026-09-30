@@ -51,6 +51,8 @@ TIMEOUT = 30
 MIN_POLL = 5
 MAX_TITLE = 80
 MAX_REPLY = 1900
+UNREADABLE_REPLY = ("I cannot read this message. Mention me directly (the entry marked APP in the list), "
+                    + "or turn on Message Content Intent for this bot.")
 # Discord waits shorter than this are slept through; longer ones end the poll.
 MAX_RATE_LIMIT_WAIT = 10.0
 
@@ -158,6 +160,22 @@ class Discord:
         messages = [message for message in found if isinstance(message, dict)] if isinstance(found, list) else []
         return sorted(messages, key=lambda message: int(str(message.get("id", "0"))))
 
+    def bot_role(self, channel_id: str, bot_id: str) -> str | None:
+        """The role Discord made for the bot in the channel's server. The mention list
+        offers it under the bot's own name, so a mention of it counts as one of the bot."""
+        channel = self.call("GET", f"/channels/{channel_id}")
+        guild = channel.get("guild_id") if isinstance(channel, dict) else None
+        if not guild:
+            return None
+        roles = self.call("GET", f"/guilds/{guild}/roles")
+        for role in roles if isinstance(roles, list) else []:
+            if not isinstance(role, dict):
+                continue
+            tags = role.get("tags")
+            if isinstance(tags, dict) and bot_id == str(tags.get("bot_id", "")):
+                return str(role.get("id"))
+        return None
+
     def reply(self, channel_id: str, message_id: str, content: str) -> None:
         self.call("POST", f"/channels/{channel_id}/messages", {
             "content": content[:MAX_REPLY],
@@ -226,15 +244,22 @@ class Server:
 # ---------------------------------------------------------------- messages to cases
 
 
-def mentions(message: Json, bot_id: str) -> bool:
+def mentions(message: Json, bot_id: str, role_id: str | None = None) -> bool:
+    """Whether the message mentions the bot, or the bot's role (see Discord.bot_role)."""
     users = message.get("mentions")
-    return isinstance(users, list) and any(isinstance(user, dict) and bot_id == user.get("id") for user in users)
+    if isinstance(users, list) and any(isinstance(user, dict) and bot_id == user.get("id") for user in users):
+        return True
+    roles = message.get("mention_roles")
+    return role_id is not None and isinstance(roles, list) and role_id in roles
 
 
-def request_of(message: Json, bot_id: str) -> tuple[str, str]:
+def request_of(message: Json, bot_id: str, role_id: str | None = None) -> tuple[str, str]:
     """The case a message asks for: its title (first line) and goal (the whole text,
     with attachment links), without the bot's mention."""
-    text = re.sub(rf"<@!?{bot_id}>", "", str(message.get("content", ""))).strip()
+    text = re.sub(rf"<@!?{bot_id}>", "", str(message.get("content", "")))
+    if role_id:
+        text = text.replace(f"<@&{role_id}>", "")
+    text = text.strip()
     raw = message.get("attachments")
     attachments = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
     if attachments:
@@ -259,6 +284,7 @@ class Intake:
     discord: Discord
     server: Server
     bot_id: str = ""
+    bot_role: str | None = None
 
     def load_cursor(self) -> str | None:
         try:
@@ -281,7 +307,14 @@ class Intake:
     def poll(self) -> int:
         """Handle the new messages; returns how many cases were started."""
         if not self.bot_id:
-            self.bot_id = str(self.discord.me().get("id", ""))
+            bot_id = str(self.discord.me().get("id", ""))
+            try:
+                self.bot_role = self.discord.bot_role(self.settings.channel_id, bot_id)
+            except IntakeError as error:
+                if error.retryable:
+                    raise
+                log(f"cannot find the bot's role ({error}): only mentions of the bot itself count")
+            self.bot_id = bot_id
         after = self.load_cursor()
         messages = self.discord.messages_after(self.settings.channel_id, after)
         if after is None:
@@ -297,13 +330,25 @@ class Intake:
 
     def handle(self, message: Json) -> int:
         author = message.get("author")
-        author_id = str(author.get("id", "")) if isinstance(author, dict) else ""
-        wanted = (isinstance(author, dict) and not author.get("bot") and author_id in self.settings.allowed_users
-                  and mentions(message, self.bot_id))
-        if not wanted:
+        if not isinstance(author, dict) or author.get("bot"):
             return 0
+        author_id = str(author.get("id", ""))
         message_id = str(message["id"])
-        title, goal = request_of(message, self.bot_id)
+        allowed = author_id in self.settings.allowed_users
+        if not mentions(message, self.bot_id, self.bot_role):
+            # Say why a message that looks meant for the bot starts nothing.
+            if allowed and message.get("mention_roles"):
+                log(f"ignored message {message_id}: it mentions a role, not the bot")
+            return 0
+        if not allowed:
+            log(f"ignored message {message_id}: author {author_id} is not in DISCORD_INTAKE_ALLOWED_USERS")
+            return 0
+        title, goal = request_of(message, self.bot_id, self.bot_role)
+        if not str(message.get("content", "")):
+            # Not even the mention: Discord hides the text from a bot without the Message
+            # Content intent, except when the bot itself (not its role) is mentioned.
+            self.discord.reply(self.settings.channel_id, message_id, UNREADABLE_REPLY)
+            return 0
         if not goal:
             self.discord.reply(self.settings.channel_id, message_id,
                                "Tell me what to do after the mention, and I will start a case for it.")
@@ -350,6 +395,10 @@ def check(settings: Settings, discord: Discord, server: Server) -> bool:
         name = channel.get("name") if isinstance(channel, dict) else None
         discord.messages_after(settings.channel_id, None)
         line(True, f"reads channel #{name} ({settings.channel_id})")
+        role = discord.bot_role(settings.channel_id, str(bot.get("id", "")))
+        print(f"  {'ok  ' if role else 'warn'} "
+              + (f"mentions of the bot's role ({role}) count too" if role
+                 else "no role found for the bot: only mentions of the bot itself count"))
     except IntakeError as error:
         line(False, "Discord", f"{error}\n         fix: the token, and View Channel + Read Message History for the bot")
     line(True, f"{len(settings.allowed_users)} allowed user(s): {', '.join(sorted(settings.allowed_users))}")

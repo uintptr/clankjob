@@ -5,6 +5,7 @@ Run: python3 -m unittest -v test_discord_intake.py"""
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import ClassVar
 
@@ -12,15 +13,18 @@ import discord_intake as intake
 from discord_intake import Discord, Intake, IntakeError, Json, Server, Settings
 
 BOT = "900"
+BOT_ROLE = "777"
 JOE = "234"
 CHANNEL = "555"
+GUILD = "111"
 
 
 def message(message_id: int, content: str, author: str = JOE, mention: bool = True, bot: bool = False,
-            attachments: list[Json] | None = None) -> Json:
+            attachments: list[Json] | None = None, roles: list[str] | None = None) -> Json:
     return {"id": str(message_id), "content": content,
             "author": {"id": author, "username": "joe", "global_name": "Joe", "bot": bot},
-            "mentions": [{"id": BOT}] if mention else [], "attachments": attachments or []}
+            "mentions": [{"id": BOT}] if mention else [], "mention_roles": roles or [],
+            "attachments": attachments or []}
 
 
 class Fakes:
@@ -31,12 +35,18 @@ class Fakes:
         self.replies: list[Json] = []
         self.cases: list[Json] = []
         self.server_status = 201
+        self.roles: list[Json] = [{"id": "1", "name": "@everyone"},
+                                  {"id": BOT_ROLE, "name": "clankbot", "managed": True, "tags": {"bot_id": BOT}}]
 
     def discord(self, method: str, url: str, headers: dict[str, str], body: bytes | None) -> tuple[int, bytes]:
         assert headers["Authorization"] == "Bot discord-token"
         path = url.removeprefix(intake.DISCORD_API)
         if "/users/@me" == path:
             return 200, json.dumps({"id": BOT, "username": "clankbot"}).encode()
+        if f"/channels/{CHANNEL}" == path:
+            return 200, json.dumps({"id": CHANNEL, "name": "general", "guild_id": GUILD}).encode()
+        if f"/guilds/{GUILD}/roles" == path:
+            return 200, json.dumps(self.roles).encode()
         if method == "POST":
             self.replies.append(json.loads(body or b"{}"))
             return 200, b"{}"
@@ -96,6 +106,52 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual([], fakes.cases)
         self.assertEqual(["Tell me what to do after the mention, and I will start a case for it."],
                          [reply["content"] for reply in fakes.replies])
+
+    def test_a_mention_of_the_bots_role_counts_as_one_of_the_bot(self) -> None:
+        fakes = Fakes()
+        bot = self.make(fakes)
+        bot.poll()
+        fakes.messages = [message(30, f"<@&{BOT_ROLE}> tell me a joke", mention=False, roles=[BOT_ROLE]),
+                          message(31, "<@&42> another role", mention=False, roles=["42"])]
+
+        with unittest.mock.patch.object(intake, "log") as log:
+            self.assertEqual(1, bot.poll())
+
+        self.assertEqual([{"id": "case1", "title": "tell me a joke", "goal": "tell me a joke", "owner": "Joe"}],
+                         fakes.cases)
+        log.assert_any_call("ignored message 31: it mentions a role, not the bot")
+
+    def test_a_role_mention_whose_text_discord_hides_is_explained(self) -> None:
+        fakes = Fakes()
+        bot = self.make(fakes)
+        bot.poll()
+        fakes.messages = [message(40, "", mention=False, roles=[BOT_ROLE])]
+
+        self.assertEqual(0, bot.poll())
+
+        self.assertEqual([], fakes.cases)
+        self.assertIn("Mention me directly", str(fakes.replies[-1]["content"]))
+
+    def test_without_a_role_for_the_bot_only_its_own_mentions_count(self) -> None:
+        fakes = Fakes()
+        fakes.roles = [{"id": "1", "name": "@everyone"}]
+        bot = self.make(fakes)
+        bot.poll()
+        fakes.messages = [message(50, "<@&777> hi", mention=False, roles=["777"]), message(51, f"<@{BOT}> hi")]
+
+        self.assertEqual(1, bot.poll())
+        self.assertEqual("hi", fakes.cases[0]["goal"])
+
+    def test_a_mention_from_someone_not_allowed_is_logged(self) -> None:
+        fakes = Fakes()
+        bot = self.make(fakes)
+        bot.poll()
+        fakes.messages = [message(60, f"<@{BOT}> hi", author="999")]
+
+        with unittest.mock.patch.object(intake, "log") as log:
+            self.assertEqual(0, bot.poll())
+
+        log.assert_called_once_with("ignored message 60: author 999 is not in DISCORD_INTAKE_ALLOWED_USERS")
 
     def test_a_refused_case_is_explained_and_a_server_outage_is_retried(self) -> None:
         fakes = Fakes()

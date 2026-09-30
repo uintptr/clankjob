@@ -58,6 +58,7 @@ It is a **standalone service**, not part of the server or of the Discord plugin:
    ```
      ok   Discord bot clankbot (900000000000000000)
      ok   reads channel #clankjob (123456789012345678)
+     ok   mentions of the bot's role (345678901234567890) count too
      ok   1 allowed user(s): 234567890123456789
      ok   clankjob server at http://clankjob:8080 accepts the token
      ok   links back: https://cj.example
@@ -80,6 +81,14 @@ public endpoint.
 - **Which messages.** Only top-level messages in the channel (replies in a question's
   thread are the plugin's), from `DISCORD_INTAKE_ALLOWED_USERS`, that @mention the bot,
   and not from bots. A mention with no text gets a reply asking what to do.
+- **The bot's role counts.** Discord gives a bot a role with its own name, and the
+  mention list offers both; picking the role is an easy mistake, so a mention of that role
+  (found at startup: the server's role tagged with the bot's id) counts as a mention of
+  the bot. Without the Message Content intent Discord may hide the text of such a message;
+  the bot then replies asking to mention it directly.
+- **Skipped messages are logged** when they look meant for the bot: a mention from
+  someone not allowed, or an allowed person's message that mentions a role but not the
+  bot.
 - **State.** The id of the last message handled is kept in
   `/state/discord_intake.json` (the `intake-state` volume). On its very first run it
   starts from the newest message, so the channel's history never starts cases.
