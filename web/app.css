@@ -28,6 +28,18 @@
     --off-soft: #eceef1;
     --on-human: #ffffff;
     --shadow: 0 1px 2px rgb(22 25 31 / 6%), 0 0 0 1px rgb(22 25 31 / 3%);
+    /* Syntax colours for code and JSON (web/rich.js). */
+    --tok-com: #6a737d;
+    --tok-str: #0a6b2e;
+    --tok-num: #9a4f00;
+    --tok-kw: #8a2c9e;
+    --tok-lit: #b0306a;
+    --tok-fn: #1f5f9e;
+    --tok-type: #0f6b6b;
+    --tok-key: #1a4f8a;
+    --tok-meta: #7a5c00;
+    --tok-add-bg: #e3f4e8;
+    --tok-del-bg: #fbe7e8;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, Inter, "Helvetica Neue", Arial, sans-serif;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     --bar-h: 52px;
@@ -61,6 +73,17 @@
         --off-soft: #232a33;
         --on-human: #1a0b0d;
         --shadow: 0 1px 2px rgb(0 0 0 / 50%), 0 0 0 1px rgb(255 255 255 / 4%);
+    --tok-com: #8b95a5;
+    --tok-str: #9fd49b;
+    --tok-num: #f2b36b;
+    --tok-kw: #d6a2f0;
+    --tok-lit: #f59ac0;
+    --tok-fn: #86baf0;
+    --tok-type: #72d2d0;
+    --tok-key: #9cc7f5;
+    --tok-meta: #e5c877;
+    --tok-add-bg: #16301f;
+    --tok-del-bg: #3a1a1e;
 
         color-scheme: dark;
     }
@@ -91,6 +114,17 @@
     --off-soft: #232a33;
     --on-human: #1a0b0d;
     --shadow: 0 1px 2px rgb(0 0 0 / 50%), 0 0 0 1px rgb(255 255 255 / 4%);
+    --tok-com: #8b95a5;
+    --tok-str: #9fd49b;
+    --tok-num: #f2b36b;
+    --tok-kw: #d6a2f0;
+    --tok-lit: #f59ac0;
+    --tok-fn: #86baf0;
+    --tok-type: #72d2d0;
+    --tok-key: #9cc7f5;
+    --tok-meta: #e5c877;
+    --tok-add-bg: #16301f;
+    --tok-del-bg: #3a1a1e;
 
     color-scheme: dark;
 }
@@ -392,7 +426,8 @@ textarea {
 
 .pulse {
     display: flex;
-    align-items: center;
+    /* The words share a baseline, whatever their font; the dot stays centred. */
+    align-items: baseline;
     gap: 8px;
     min-width: 0;
     color: var(--ink2);
@@ -412,6 +447,7 @@ textarea {
 
 .dot {
     flex: none;
+    align-self: center;
     width: 9px;
     height: 9px;
     border-radius: 50%;
@@ -1032,7 +1068,6 @@ pre.raw {
     padding: 6px 16px 2px;
     font-size: 15.5px;
     font-weight: 600;
-    white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
 
@@ -1295,7 +1330,8 @@ details.doc pre.raw {
 /* timeline: the case's conversation, oldest first */
 .thread .msg {
     display: grid;
-    grid-template-columns: 1fr;
+    /* minmax: a long code line scrolls in its block instead of widening the page. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 2px;
     padding: 10px 14px;
     border-top: 1px solid var(--line);
@@ -1381,9 +1417,13 @@ details.call > summary .tag {
     font-family: var(--sans);
 }
 
+details.call > pre.raw,
+details.call > .rich-switch {
+    border-top: 1px solid var(--line);
+}
+
 details.call pre.raw {
     max-height: 260px;
-    border-top: 1px solid var(--line);
 }
 
 /* ---- prompts ------------------------------------------------------------ */
@@ -1813,4 +1853,355 @@ label.check input[type="checkbox"] {
 .model input {
     flex: 1 1 240px;
     min-width: 0;
+}
+
+/* ---- rich text: markdown, code, JSON (web/rich.js) ----------------------- */
+
+.rich {
+    font-size: 14.5px;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+
+.rich > :first-child {
+    margin-top: 0;
+}
+
+.rich > :last-child {
+    margin-bottom: 0;
+}
+
+.rich p,
+.rich ul,
+.rich ol,
+.rich blockquote,
+.rich .table-wrap,
+.rich .codeblock {
+    margin: 0 0 10px;
+}
+
+.rich h1,
+.rich h2,
+.rich h3,
+.rich h4,
+.rich h5,
+.rich h6 {
+    margin: 16px 0 6px;
+    font-weight: 650;
+    line-height: 1.3;
+}
+
+.rich h1 {
+    font-size: 1.3em;
+}
+
+.rich h2 {
+    font-size: 1.18em;
+}
+
+.rich h3 {
+    font-size: 1.06em;
+}
+
+.rich h4,
+.rich h5,
+.rich h6 {
+    font-size: 1em;
+}
+
+.rich ul,
+.rich ol {
+    padding-left: 1.5em;
+}
+
+.rich li + li,
+.rich li > ul,
+.rich li > ol {
+    margin-top: 2px;
+}
+
+.rich li > p {
+    margin-bottom: 6px;
+}
+
+.rich li > ul,
+.rich li > ol {
+    margin-bottom: 0;
+}
+
+.rich li.task {
+    list-style: none;
+}
+
+.rich li.task > input {
+    margin: 0 6px 0 -1.3em;
+    vertical-align: -1px;
+}
+
+.rich blockquote {
+    padding: 2px 0 2px 12px;
+    border-left: 3px solid var(--line2);
+    color: var(--ink2);
+}
+
+.rich hr {
+    margin: 14px 0;
+    border: 0;
+    border-top: 1px solid var(--line);
+}
+
+.rich a {
+    overflow-wrap: anywhere;
+}
+
+.rich code,
+.fields .field-code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+}
+
+.rich :not(pre) > code {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--card2);
+    box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.rich table {
+    border-collapse: collapse;
+    font-size: 13.5px;
+}
+
+.rich th,
+.rich td {
+    padding: 5px 10px;
+    border: 1px solid var(--line);
+    text-align: left;
+    vertical-align: top;
+}
+
+.rich th {
+    background: var(--card2);
+    font-weight: 600;
+}
+
+.rich .align-center {
+    text-align: center;
+}
+
+.rich .align-right {
+    text-align: right;
+}
+
+.codeblock {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--card2);
+}
+
+.code-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 4px 2px 10px;
+    border-bottom: 1px solid var(--line);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11.5px;
+}
+
+.code-bar .copy {
+    padding: 2px 8px;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+}
+
+.code-bar .copy:hover {
+    background: var(--line);
+    color: var(--ink);
+}
+
+.codeblock pre.code {
+    max-height: 480px;
+    margin: 0;
+    padding: 10px 12px;
+    overflow: auto;
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre;
+}
+
+.codeblock pre.code code {
+    font-size: inherit;
+}
+
+/* A formatted view and its exact text, behind a small toggle in the corner. */
+.rich-switch {
+    position: relative;
+    min-width: 0;
+}
+
+.rich-toggle {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    z-index: 1;
+    padding: 1px 7px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    opacity: 0;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+
+.rich-switch:hover > .rich-toggle,
+.rich-toggle:focus-visible {
+    opacity: 1;
+}
+
+/* No hover on touch screens: the toggle takes its own row rather than covering text. */
+@media (hover: none) {
+    .rich-toggle {
+        position: static;
+        display: block;
+        margin: 0 0 4px auto;
+        opacity: 0.8;
+    }
+}
+
+details.call .rich,
+details.call .fields,
+.thread .msg > .rich-switch > pre.raw {
+    padding: 10px 14px;
+}
+
+.thread .msg > .rich-switch > pre.raw {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--card2);
+}
+
+.notice .rich-switch,
+.notice pre.raw {
+    margin-top: 4px;
+    color: var(--ink);
+}
+
+.ask .q .rich {
+    font-size: inherit;
+}
+
+/* An object with long text in it: key, then its value, one row each. */
+.fields {
+    display: grid;
+    grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+    gap: 6px 14px;
+    margin: 0;
+    font-size: 13px;
+}
+
+.fields dt {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+.fields dd {
+    min-width: 0;
+    margin: 0;
+}
+
+.fields dd > pre.raw {
+    max-height: 320px;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--card);
+}
+
+.fields .field-text,
+.fields .field-code {
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+    .fields {
+        grid-template-columns: 1fr;
+        gap: 2px;
+    }
+
+    .fields dd {
+        margin-bottom: 8px;
+    }
+}
+
+.tok-com {
+    color: var(--tok-com);
+    font-style: italic;
+}
+
+.tok-str {
+    color: var(--tok-str);
+}
+
+.tok-num {
+    color: var(--tok-num);
+}
+
+.tok-kw {
+    color: var(--tok-kw);
+}
+
+.tok-lit {
+    color: var(--tok-lit);
+}
+
+.tok-fn {
+    color: var(--tok-fn);
+}
+
+.tok-type {
+    color: var(--tok-type);
+}
+
+.tok-key,
+.tok-tag {
+    color: var(--tok-key);
+}
+
+.tok-attr,
+.tok-var {
+    color: var(--tok-num);
+}
+
+.tok-meta {
+    color: var(--tok-meta);
+}
+
+.tok-add {
+    display: inline-block;
+    min-width: 100%;
+    background: var(--tok-add-bg);
+}
+
+.tok-del {
+    display: inline-block;
+    min-width: 100%;
+    background: var(--tok-del-bg);
 }

@@ -1432,6 +1432,20 @@ A single-page app in `web/` (vanilla JavaScript, one stylesheet, system fonts, n
 framework, no build step, no CDN), compiled into the server binary and served from `/`,
 the same origin as the API. Everything the server sends is inserted as text, never HTML.
 
+- **Rich text** (`web/rich.js`): what the model writes (its messages, questions, approval
+  reasons, outcome) is rendered as markdown: headings, lists and task lists, emphasis,
+  code spans, fenced code, links (only `http(s)` and `mailto`, opened in a new tab;
+  images become links, since the page loads nothing from elsewhere), quotes and tables.
+  Tool results are shown by what they contain: JSON colour-coded, markdown rendered when
+  it looks like markdown, anything else (command output, email text) as is. An object
+  with long text in it is shown one field per row with its text unescaped; a lone text
+  field (a command plugin's `{"output": …}`) is shown as that text. Tool arguments are
+  never rendered as markdown: an email body is shown as it will be sent. Fenced code is
+  highlighted for about fifteen languages (JSON guessed when untagged) and has a copy
+  button; every rendered block has a **raw** toggle to the exact text. The renderer
+  builds DOM nodes from text, so the rule above holds; it skips text over 200 KB and
+  colouring over 100 KB.
+
 - **Sign in** with an API token, kept in the browser's local storage.
 - **Status bar**: engine health (scheduler tick), counts (need you / working / sleeping),
   navigation, **New case**, the theme toggle (auto / light / dark) and sign out.
@@ -1444,8 +1458,7 @@ the same origin as the API. Everything the server sends is inserted as text, nev
     images), the **approvals** setting, **notifications** (a checkbox per loaded chat
     channel, saved when ticked) and the **model** (the LLM and a model id with the
     catalog's suggestions, applied from the agent's next turn). Its summary line counts
-    instructions and files and names the channels and the model; a click on it is
-    remembered across cases, and a draft case (no goal yet) opens it. Then what the case is waiting for, budget use, notes, the **timeline** (answers from a chat channel say which), and a
+    instructions and files and names the channels and the model. Then what the case is waiting for, budget use, notes, the **timeline** (answers from a chat channel say which), and a
     message box. The details line shows where the case asks ("web, discord_joe") and the
     estimated cost so far ("Cost ≈ $0.0027", the calculation in its tooltip; "unknown"
     when the model has no known price).

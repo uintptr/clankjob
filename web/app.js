@@ -879,7 +879,7 @@ function approvalCard(request, caseLink, onAnswered) {
         "div",
         { class: "card ask approval" },
         h("div", { class: "who" }, caseLink ? [h("a", { href: `#/cases/${encodeURIComponent(request.case_id)}` }, caseLink), " · "] : "", h("b", {}, "wants your approval"), " · ", timeEl(request.created_at)),
-        h("div", { class: "q" }, request.question),
+        h("div", { class: "q" }, richMarkdown(request.question)),
         h("div", { class: "hint mono" }, request.tool),
         fields,
         h(
@@ -902,7 +902,7 @@ function questionCard(request, caseLink, onAnswered) {
         "div",
         { class: "card ask" },
         h("div", { class: "who" }, caseLink ? [h("a", { href: `#/cases/${encodeURIComponent(request.case_id)}` }, caseLink), " · asked "] : "The agent is asking · ", timeEl(request.created_at)),
-        h("div", { class: "q" }, request.question),
+        h("div", { class: "q" }, richMarkdown(request.question)),
         answerBox(request.id, onAnswered),
     );
 }
@@ -947,13 +947,13 @@ function timelineRenderer(thread) {
                     `You ${verb} ${reason.tool}${reason.via && reason.via !== "web" ? ` on ${reason.via}` : ""}`,
                     event,
                     reason.comment && txt(reason.comment),
-                    reason.edited_args && h("pre", { class: "raw" }, pretty(reason.edited_args)),
+                    reason.edited_args && richValue(reason.edited_args, { markdown: false }),
                 );
             }
             case "approved_call_finished":
-                return msg("", reason.is_error ? `${reason.tool} failed` : `${reason.tool} ran`, event, h("pre", { class: "raw" }, pretty(reason.result)));
+                return msg("", reason.is_error ? `${reason.tool} failed` : `${reason.tool} ran`, event, richValue(reason.result));
             case "condition_fired":
-                return msg("", "Woke up", event, txt(`The ${conditionName(reason.kind)} fired.`), reason.details.length > 0 && h("pre", { class: "raw" }, pretty(reason.details)));
+                return msg("", "Woke up", event, txt(`The ${conditionName(reason.kind)} fired.`), reason.details.length > 0 && richValue(reason.details));
             case "timed_out":
                 return msg("", "Woke up", event, txt(`Stopped waiting for ${conditionName(reason.kind)}.`));
             case "manual":
@@ -970,22 +970,22 @@ function timelineRenderer(thread) {
     function agent(event) {
         const message = event.payload;
         const callElements = message.tool_calls.map((call) => {
-            const details = h("details", { class: "call" }, h("summary", {}, call.name, h("span", { class: "muted" }, argsPreview(call))), h("pre", { class: "raw" }, pretty(call.arguments)));
+            const details = h("details", { class: "call" }, h("summary", {}, call.name, h("span", { class: "muted" }, argsPreview(call))), richValue(call.arguments, { markdown: false }));
             calls.set(call.id, details);
             return details;
         });
-        msg("agent", "Agent", event, message.text && txt(message.text), callElements);
+        msg("agent", "Agent", event, message.text && richMarkdown(message.text), callElements);
     }
 
     function result(event) {
         const toolResult = event.payload;
         const details = calls.get(toolResult.tool_call_id);
         if (!details) {
-            msg("bot", `${toolResult.tool_name} result`, event, h("pre", { class: "raw" }, pretty(toolResult.content)));
+            msg("bot", `${toolResult.tool_name} result`, event, richValue(toolResult.content));
             return;
         }
         details.querySelector("summary").append(h("span", { class: toolResult.is_error ? "tag bad" : "tag ok" }, toolResult.is_error ? "error" : "done"));
-        details.append(h("pre", { class: "raw" }, pretty(toolResult.content)));
+        details.append(richValue(toolResult.content));
     }
 
     return (event) => {
@@ -1263,7 +1263,7 @@ function caseDetail(pane, id, onRenamed) {
             h(
                 "div",
                 { class: ok ? "notice ok" : "notice bad" },
-                h("div", { class: "grow" }, h("b", {}, ok ? "Done. " : "Failed. "), item.outcome || "No summary given.", item.result !== null && h("pre", { class: "raw" }, pretty(item.result))),
+                h("div", { class: "grow" }, h("b", {}, ok ? "Done" : "Failed"), item.outcome ? richMarkdown(item.outcome) : h("p", {}, "No summary given."), item.result !== null && richValue(item.result)),
             ),
         );
     }
@@ -1460,7 +1460,7 @@ function caseDetail(pane, id, onRenamed) {
             "details",
             { class: "doc" },
             h("summary", {}, h("span", { class: "mono" }, instruction.name), h("span", { class: "muted num" }, `${compact(instruction.content.length)} chars · edited `, timeEl(instruction.updated_at))),
-            h("pre", { class: "raw" }, instruction.content),
+            richString(instruction.content, {}),
             !cancelled &&
                 h(
                     "div",

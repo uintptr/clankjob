@@ -6,6 +6,7 @@ use rouille::{Request, Response};
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_CSS: &str = include_str!("../../../web/app.css");
 const APP_JS: &str = include_str!("../../../web/app.js");
+const RICH_JS: &str = include_str!("../../../web/rich.js");
 const FAVICON_SVG: &str = include_str!("../../../web/favicon.svg");
 
 /// Everything the page uses comes from this server: no CDN, no web fonts, no inline
@@ -31,6 +32,7 @@ pub fn serve(request: &Request) -> Option<Response> {
         "/" | "/index.html" => ("text/html; charset=utf-8", INDEX_HTML),
         "/assets/app.css" => ("text/css; charset=utf-8", APP_CSS),
         "/assets/app.js" => ("text/javascript; charset=utf-8", APP_JS),
+        "/assets/rich.js" => ("text/javascript; charset=utf-8", RICH_JS),
         "/assets/favicon.svg" => ("image/svg+xml", FAVICON_SVG),
         _ => return None,
     };
@@ -58,6 +60,7 @@ mod tests {
             ("/", "text/html; charset=utf-8"),
             ("/assets/app.css", "text/css; charset=utf-8"),
             ("/assets/app.js", "text/javascript; charset=utf-8"),
+            ("/assets/rich.js", "text/javascript; charset=utf-8"),
             ("/assets/favicon.svg", "image/svg+xml"),
         ] {
             let response = get(url).unwrap();
