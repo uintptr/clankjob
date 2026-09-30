@@ -91,6 +91,11 @@ approved; it complements approvals, it does not replace them.
   ourselves with `all`), keeps `Re:` and sets `In-Reply-To` and `References`.
 - Mail is fetched with `BODY.PEEK`, so reading or checking never marks it as read.
 - Message-IDs are validated before they reach an IMAP search, and addresses before SMTP.
+- An email with template gaps left in its subject or body (`[Your Name]`, `<insert date>`,
+  `{name}`, `$XXX`, lorem ipsum) is refused before anything is sent, approved or not; the
+  error names them so the agent fills them in or asks the owner. Brackets count only with
+  a word such as *name*, *date* or *your* inside, so `[URGENT]`, `[sic]` and
+  `Bob <bob@sparky.ca>` go through.
 - Sending is protected by approvals and the at-most-once execution of [design §9.7](../../docs/design.md); a crash
   mid-send is reported as "outcome unknown", never sent again. Planned: attaching case
   files, and importing attachments of incoming mail as case files (marked third-party).

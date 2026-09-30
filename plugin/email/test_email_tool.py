@@ -146,6 +146,29 @@ class SendTests(unittest.TestCase):
         with self.assertRaises(ToolError):
             run(["send", "not an address", "--subject=S", "--body=B"], FakeMailbox(), FakeSender())
 
+    def test_an_email_with_placeholders_left_is_refused_and_names_them(self) -> None:
+        # Arrange
+        box, sender = FakeMailbox(), FakeSender()
+        _ = box.add("INBOX", mail("<b2@sparky.ca>", "Bob <bob@sparky.ca>", "Quote"))
+
+        # Act
+        with self.assertRaises(ToolError) as sent:
+            _ = run(["send", "bob@sparky.ca", "--subject=Quote for {address}",
+                     "--body=Hi Bob,\nCould you come on [date] for $XXX?\nThanks,\n<Your Name>"], box, sender)
+        with self.assertRaises(ToolError) as replied:
+            _ = run(["reply", "b2@sparky.ca", "--body=Lorem ipsum. Best, [Owner's name]"], box, sender)
+
+        # Assert
+        self.assertEqual(sender.sent, [])
+        self.assertIn("{address}, [date], XXX, <Your Name>", str(sent.exception))
+        self.assertIn("Lorem ipsum, [Owner's name]", str(replied.exception))
+
+    def test_ordinary_brackets_addresses_and_links_are_not_placeholders(self) -> None:
+        text = ("[URGENT] Bob <bob@sparky.ca> said [sic] it costs $120 (see [1]).\n"
+                + "Details: <https://sparky.ca/your-quote> {} Chapter XX. XXL shirt.")
+
+        self.assertEqual(tool.placeholders(text), [])
+
 
 class ReplyAndReadTests(unittest.TestCase):
 

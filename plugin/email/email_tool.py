@@ -55,6 +55,17 @@ MESSAGE_ID = re.compile(r"^<?([^<>\s\"\\]+@[^<>\s\"\\]+)>?$")
 HEADER_FIELDS = "FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES"
 # One line of an IMAP LIST response: (\\HasNoChildren) "/" "INBOX"
 LIST_LINE = re.compile(r'^\((?P<flags>[^)]*)\) (?P<delimiter>"[^"]*"|NIL) (?P<name>.+)$')
+# Words that make bracketed text a template gap to fill: `[Your Name]`, `<insert date>`.
+PLACEHOLDER_WORDS = re.compile(
+    r"\b(your|insert|name|first ?name|last ?name|date|time|address|phone|number|company|recipient|owner|email"
+    + r"|amount|price|placeholder|tbd|todo|fill|here)\b", re.IGNORECASE)
+PLACEHOLDERS = (
+    re.compile(r"\[[^\[\]\n]{1,60}\]"),              # [Your Name], [DATE], never [URGENT]
+    re.compile(r"<[^<>@\n]{1,60}>"),                   # <insert date>, never <bob@x.ca>
+    re.compile(r"\{\{?\s*[A-Za-z_][\w .-]{0,40}\}\}?"),  # {name}, {{ date }}
+    re.compile(r"(?<![A-Za-z])X{3,}(?![A-Za-z])|\bXX/XX\b"),  # $XXX, XX/XX/2026
+    re.compile(r"lorem ipsum", re.IGNORECASE),
+)
 
 
 class ToolError(Exception):
@@ -253,6 +264,27 @@ def addresses(value: str, what: str) -> list[str]:
     if not found or any("@" not in addr or addr.startswith("-") for addr in found):
         raise ToolError(f"{what}: {value!r} is not a list of email addresses")
     return found
+
+
+def placeholders(text: str) -> list[str]:
+    """Template gaps left in an email, e.g. `[Your Name]`, `{date}`, `$XXX`, in order."""
+    found: list[tuple[int, str]] = []
+    for pattern in PLACEHOLDERS:
+        for match in pattern.finditer(text):
+            gap = match.group(0)
+            bracketed = gap[0] in "[<"
+            if bracketed and ("://" in gap or not PLACEHOLDER_WORDS.search(gap)):
+                continue
+            found.append((match.start(), gap))
+    return list(dict.fromkeys(gap for _, gap in sorted(found)))
+
+
+def check_filled(*texts: str) -> None:
+    """Refuse an email that still has template gaps: nobody should receive `[Your Name]`."""
+    gaps = [gap for text in texts for gap in placeholders(text)]
+    if gaps:
+        raise ToolError(f"the email still has placeholders: {', '.join(dict.fromkeys(gaps))}. "
+                        + "Fill them in (ask the owner with `ask_human` for what you don't know), then send it again.")
 
 
 def check_allowed(settings: Settings, recipients: Iterable[str]) -> None:
@@ -585,10 +617,13 @@ def build_parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace, settings: Settings, mailbox: Callable[[], Mailbox], sender: Sender,
         stdin: str) -> Json:
     if "send" == args.command:
+        check_filled(args.subject, args.body)
         return send(settings, sender, mailbox, compose(settings, args.to, args.subject, args.body, args.cc))
     if "needs-approval" == args.command:
         request = json.loads(stdin or "{}")
         return needs_approval(settings, mailbox, args.tool, request if isinstance(request, dict) else {})
+    if "reply" == args.command:
+        check_filled(args.body)
     box = mailbox()
     try:
         if "reply" == args.command:
