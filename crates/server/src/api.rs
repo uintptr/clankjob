@@ -470,6 +470,11 @@ fn update_case(state: &AppState, request: &Request, id: &CaseId) -> Handled {
     get_case(state, id)
 }
 
+fn delete_case(state: &AppState, id: &CaseId) -> Handled {
+    state.engine.delete_case(&mut state.connect()?, id)?;
+    Ok(Response::empty_204())
+}
+
 fn cancel_case(state: &AppState, id: &CaseId) -> Handled {
     let mut connection = state.connect()?;
     state.engine.cancel_case(&mut connection, id)?;
@@ -662,6 +667,7 @@ fn route(state: &AppState, request: &Request) -> Handled {
         (POST) (/api/v1/cases) => { create_case(state, request) },
         (GET) (/api/v1/cases/{id: String}) => { get_case(state, &CaseId::from_string(id)) },
         (PATCH) (/api/v1/cases/{id: String}) => { update_case(state, request, &CaseId::from_string(id)) },
+        (DELETE) (/api/v1/cases/{id: String}) => { delete_case(state, &CaseId::from_string(id)) },
         (POST) (/api/v1/cases/{id: String}/instructions) => {
             change_instruction(state, Some(request), &CaseId::from_string(id), None)
         },
@@ -763,7 +769,7 @@ mod tests {
 
     struct TestApi {
         state: AppState,
-        _dir: TempDir,
+        dir: TempDir,
     }
 
     impl TestApi {
@@ -802,7 +808,7 @@ mod tests {
                 Arc::new(catalog),
                 plugins,
             );
-            Self { state, _dir: dir }
+            Self { state, dir }
         }
 
         fn without_token() -> Self {
@@ -1051,6 +1057,46 @@ mod tests {
         let mut text = String::new();
         reader.read_to_string(&mut text).unwrap();
         (response.status_code, serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    #[test]
+    fn a_deleted_case_is_gone_with_its_rows_and_files_but_a_running_one_is_kept() {
+        // Arrange
+        let api = TestApi::new();
+        let id = api.create_case();
+        let (_, file) = upload(&api, &format!("/api/v1/cases/{id}/files?name=quote.txt"), b"$450");
+        let bytes = api.dir.path().join("files").join(file["id"].as_str().unwrap());
+        api.call(
+            "POST",
+            &format!("/api/v1/cases/{id}/messages"),
+            Some(json!({"text": "hi"})),
+        );
+        let running = api.create_case();
+        let connection = api.state.connect().unwrap();
+        storage::cases::update_state(
+            &connection,
+            &CaseId::from_string(running.clone()),
+            CaseState::Running,
+            Utc::now(),
+        )
+        .unwrap();
+
+        // Act
+        let (deleted, _) = api.call("DELETE", &format!("/api/v1/cases/{id}"), None);
+        let (after, _) = api.call("GET", &format!("/api/v1/cases/{id}"), None);
+        let (again, _) = api.call("DELETE", &format!("/api/v1/cases/{id}"), None);
+        let (refused, _) = api.call("DELETE", &format!("/api/v1/cases/{running}"), None);
+
+        // Assert
+        assert_eq!((deleted, after, again, refused), (204, 404, 404, 409));
+        assert!(!bytes.exists(), "the file's bytes are removed too");
+        let events: i64 = connection
+            .query_row("SELECT COUNT(*) FROM events WHERE case_id = ?1", [id.as_str()], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(events, 0);
+        assert_eq!(api.call("GET", &format!("/api/v1/cases/{running}"), None).0, 200);
     }
 
     #[test]

@@ -1271,6 +1271,13 @@ prices, or a model it does not list), `usd` is `null` with a `reason`.
 and returns it like `GET`; nothing wakes, and the agent sees the new title in its next
 system prompt. The web client renames on a double-click on the case's title.
 
+`DELETE /cases/{id}` removes a case for good: its row and every row about it (timeline,
+activations, questions and their channel messages, wait conditions, notes, instructions,
+files), in one transaction, then its files' bytes. A running case is refused (`409`)
+until its activation ends; any other case can be deleted, which also stops a sleeping or
+waiting one. Messages already posted on a chat channel stay there. The web client deletes
+from the trash button of a row in the case list, after a confirmation.
+
 Planned: `PATCH` for owner, budgets and channels, and `plugin_instances` on cases.
 
 ### 14.2 Human requests (built)

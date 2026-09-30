@@ -604,6 +604,25 @@ impl Engine {
         transitions::cancel_case(connection, case_id, Utc::now())
     }
 
+    /// Delete a case and everything about it, its files' bytes included; see
+    /// [`transitions::delete_case`]. A file that cannot be removed is logged and left.
+    ///
+    /// # Errors
+    ///
+    /// See [`transitions::delete_case`].
+    pub fn delete_case(&self, connection: &mut Connection, case_id: &CaseId) -> Result<()> {
+        for file in transitions::delete_case(connection, case_id)? {
+            let path = self.shared.files.path(&file);
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(case_id = %case_id, path = %path.display(), %error, "cannot remove a deleted case's file");
+            }
+        }
+        tracing::info!(case_id = %case_id, "case deleted");
+        Ok(())
+    }
+
     /// Give a case a new title; see [`transitions::rename_case`].
     ///
     /// # Errors

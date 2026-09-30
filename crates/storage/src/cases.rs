@@ -159,6 +159,37 @@ pub fn update_state(connection: &Connection, id: &CaseId, state: CaseState, now:
     Ok(())
 }
 
+/// Tables holding a case's rows, children first: `channel_deliveries` refers to
+/// `human_requests`, and every table refers to `cases`, which goes last.
+const CASE_TABLES: &[&str] = &[
+    "channel_deliveries",
+    "events",
+    "activations",
+    "work_queue",
+    "wait_conditions",
+    "case_notes",
+    "human_requests",
+    "instructions",
+    "files",
+];
+
+/// Delete a case and every row about it. The bytes of its files are the caller's to
+/// remove, once the transaction commits.
+///
+/// # Returns
+///
+/// Whether the case existed
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if a delete fails.
+pub fn delete_case(connection: &Connection, id: &CaseId) -> Result<bool> {
+    for table in CASE_TABLES {
+        connection.execute(&format!("DELETE FROM {table} WHERE case_id = ?1"), params![id.as_str()])?;
+    }
+    Ok(connection.execute("DELETE FROM cases WHERE id = ?1", params![id.as_str()])? > 0)
+}
+
 /// Change a case's title.
 ///
 /// # Errors

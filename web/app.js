@@ -577,14 +577,36 @@ async function newCaseDialog() {
 
 // ---------------------------------------------------------------- the rail
 
-function railRow(item, selectedId) {
+const TRASH_ICON =
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v4.5M9.2 6.5v4.5"/></svg>';
+
+/** A small trash button for a case row; running cases cannot be deleted. */
+function trashButton(item, onDelete) {
+    if (item.state === "running") return null;
+    const button = h("button", {
+        class: "trash",
+        type: "button",
+        title: "Delete this case",
+        "aria-label": `Delete case ${item.title}`,
+        onclick: (event) => {
+            // The button sits in the row's link: don't open the case too.
+            event.preventDefault();
+            event.stopPropagation();
+            onDelete(item);
+        },
+    });
+    button.innerHTML = TRASH_ICON;
+    return button;
+}
+
+function railRow(item, selectedId, onDelete) {
     const tokens = item.usage.input_tokens + item.usage.output_tokens;
     return h(
         "a",
         { class: item.id === selectedId ? "row sel" : "row", href: `#/cases/${encodeURIComponent(item.id)}`, "aria-current": item.id === selectedId ? "true" : null },
         h("i", { class: `bar ${item.state}`, "aria-hidden": "true" }),
         h("span", { class: "t" }, item.title),
-        h("span", { class: "side" }, h("span", { class: "muted num" }, timeEl(item.updated_at))),
+        h("span", { class: "side" }, h("span", { class: "muted num" }, timeEl(item.updated_at)), trashButton(item, onDelete)),
         h(
             "span",
             { class: "m" },
@@ -645,10 +667,24 @@ function rail() {
                             h("span", { class: "n" }, String(rows.length)),
                         ),
                     ),
-                    h("div", { class: "rows" }, rows.map((item) => railRow(item, selectedId))),
+                    h("div", { class: "rows" }, rows.map((item) => railRow(item, selectedId, deleteCase))),
                 );
             }),
         );
+    }
+
+    async function deleteCase(item) {
+        const active = !TERMINAL.has(item.state);
+        const warning = active ? " It is still active: deleting it stops it." : "";
+        if (!window.confirm(`Delete "${item.title}"?${warning} Its timeline, files, notes and questions are removed for good.`)) return;
+        try {
+            await api(`/cases/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+            toast("Case deleted.");
+            if (item.id === selectedId) location.hash = "#/cases";
+            await refresh();
+        } catch (error) {
+            report(error);
+        }
     }
 
     async function refresh() {

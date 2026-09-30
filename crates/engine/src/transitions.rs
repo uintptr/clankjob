@@ -8,7 +8,7 @@ use clankjob_core::case::{Case, CaseState, Instruction, NewCase, NewInstruction}
 use clankjob_core::event::{EventBody, InstructionChange, WakeReason};
 use clankjob_core::file::CaseFile;
 use clankjob_core::human::{HumanRequest, HumanRequestKind, HumanRequestStatus};
-use clankjob_core::ids::{ActivationId, CaseId, HumanRequestId, InstructionId};
+use clankjob_core::ids::{ActivationId, CaseId, FileId, HumanRequestId, InstructionId};
 use clankjob_core::wait::{HUMAN_INPUT_KIND, WaitCondition, WaitStatus};
 use clankjob_storage::human::{Answer, Verdict};
 use clankjob_storage::{self as storage, Connection, begin_write, commit};
@@ -355,6 +355,34 @@ pub fn wake_case(connection: &mut Connection, case_id: &CaseId, now: DateTime<Ut
     wake(&transaction, &case, WakeReason::Manual, now)?;
     commit(transaction)?;
     Ok(())
+}
+
+/// Delete a case and everything about it, unless an activation is running it.
+///
+/// # Returns
+///
+/// The ids of its files, whose bytes the caller removes once this committed
+///
+/// # Errors
+///
+/// Returns [`EngineError::CaseNotFound`], [`EngineError::InvalidState`] while the case
+/// runs, or [`EngineError::Storage`].
+pub fn delete_case(connection: &mut Connection, case_id: &CaseId) -> Result<Vec<FileId>> {
+    let transaction = begin_write(connection)?;
+    let case = load_case(&transaction, case_id)?;
+    if case.state == CaseState::Running {
+        return Err(EngineError::InvalidState {
+            id: case.id,
+            state: case.state,
+        });
+    }
+    let files = storage::files::list_files(&transaction, case_id)?
+        .into_iter()
+        .map(|file| file.id)
+        .collect();
+    storage::cases::delete_case(&transaction, case_id)?;
+    commit(transaction)?;
+    Ok(files)
 }
 
 /// Give a case a new title. The agent sees it in its next system prompt; nothing wakes.

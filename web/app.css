@@ -581,6 +581,38 @@ h2.grp-hh {
     background: var(--accent-soft);
 }
 
+/* Shown on hover or keyboard focus; always faintly on touch screens, which have no hover. */
+.row .trash {
+    display: inline-grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    opacity: 0;
+}
+
+.row:hover .trash,
+.row:focus-within .trash {
+    opacity: 1;
+}
+
+.row .trash:hover,
+.row .trash:focus-visible {
+    background: var(--human-soft);
+    color: var(--human);
+}
+
+@media (hover: none) {
+    .row .trash {
+        opacity: 0.6;
+    }
+}
+
 .row:focus-visible {
     outline-offset: -2px;
 }
@@ -618,6 +650,13 @@ h2.grp-hh {
     flex-direction: column;
     align-items: flex-end;
     gap: 4px;
+}
+
+/* In the case list, the time and the delete button sit side by side. */
+.rail .row .side {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
 }
 
 /* State colours, shared by the rail bars and the chips. */
