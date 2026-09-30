@@ -43,7 +43,8 @@ description = """Comma-separated tags; emoji shortcodes become icons (`warning`,
 `white_check_mark`, `x`, `rotating_light`, `tada`)."""
 
 [tools.args.click]
-description = "An http(s) URL opened when the notification is tapped."
+description = """An http(s) URL opened when the notification is tapped. Leave it out to open \
+this case in clankjob."""
 
 [tools.args.markdown]
 type = "boolean"

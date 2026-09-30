@@ -4,9 +4,9 @@ Lets a case push a notification to your phone or desktop through [ntfy](https://
 "tell me when the filing is out", "notify me if the backup fails". Works with the public
 ntfy.sh or a self-hosted server, with or without login.
 
-| Tool        | What it does                                                                   |
-| ----------- | ------------------------------------------------------------------------------ |
-| `ntfy_send` | Publishes a message (title, priority, tags, click URL, Markdown) to your topic |
+| Tool        | What it does                                                                  |
+| ----------- | ----------------------------------------------------------------------------- |
+| `ntfy_send` | Publishes a message to your topic; tapping it opens the case (or a URL given) |
 
 The server, the topic and the credentials come from `config.toml`: the agent chooses what
 the notification says, never where it goes. It only informs. To get an answer, a case uses
@@ -50,6 +50,9 @@ library only, printing JSON.
 - **Limits.** The message is at most 4096 bytes (ntfy turns anything longer into an
   attachment, which not every server allows), the title 250 characters, 10 tags.
   `click` must be an http(s) URL. Everything is checked before a request is made.
+- **Link to the case.** Without a `click`, tapping the notification opens the case in
+  the web UI: the server gives command tools the case's link as `CLANKJOB_CASE_URL`
+  when its `public_url` is set. Without `public_url` there is no link.
 - **Authentication.** `NTFY_TOKEN` is sent as `Bearer`, a user name and password as
   `Basic`; setting both kinds is refused. The token and password are replaced by `***` in
   any error text.

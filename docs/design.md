@@ -1002,7 +1002,9 @@ file = "guides/earnings-call-analysis.md"
   leave the directory) or on `PATH`. It runs in the plugin directory with the same
   minimal environment as protocol plugins, plus the plugin's `config.toml` `[env]` table,
   whose values may be secret references (e.g. `YT_PROXY_URL = { env = "YT_PROXY_URL" }`).
-  stdin is closed; stdout and stderr are read up to 8 MB. On timeout the process is
+  A tool also gets its case: `CLANKJOB_CASE_ID`, and `CLANKJOB_CASE_URL` (the case's page
+  in the web UI, built from `public_url`, §10.4) when the server has a public URL, so a
+  message it sends can link back to the case. stdin is closed; stdout and stderr are read up to 8 MB. On timeout the process is
   killed. A non-zero exit is a tool error for the LLM, carrying the end of stderr.
 - **Case files.** An argument of `type = "file"` takes the name of one of the case's
   files (exact, then ignoring case; any other name is an error listing the case's files).

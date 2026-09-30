@@ -202,7 +202,7 @@ impl Channels {
     }
 
     /// Link to a case in the web UI, when the public URL is known.
-    fn case_url(&self, case_id: &CaseId) -> Option<String> {
+    pub(crate) fn case_url(&self, case_id: &CaseId) -> Option<String> {
         self.public_url
             .as_deref()
             .map(|url| format!("{}/#/cases/{case_id}", url.trim_end_matches('/')))

@@ -93,6 +93,13 @@ class NotificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ToolError, error):
                 tool.notification("alerts", *args, False)
 
+    def test_tapping_opens_the_case_unless_another_url_is_given(self) -> None:
+        env = {"CLANKJOB_CASE_URL": "https://cj.example.com/#/cases/01J9"}
+        self.assertEqual("https://cj.example.com/#/cases/01J9", tool.click_url(None, env))
+        self.assertEqual("https://cj.example.com/#/cases/01J9", tool.click_url(" ", env))
+        self.assertEqual("https://example.com/report", tool.click_url("https://example.com/report", env))
+        self.assertIsNone(tool.click_url(None, {}))
+
     def test_send_posts_to_the_root_and_reports_the_id(self) -> None:
         server = FakeServer("https://ntfy.example", "alerts",
                             replies={"/": {"id": "abc", "time": 1700000000, "event": "message", "topic": "alerts"}})

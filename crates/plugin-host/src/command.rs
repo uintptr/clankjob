@@ -503,6 +503,19 @@ fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
     }
 }
 
+/// What a command tool is told about its case: `CLANKJOB_CASE_ID`, and `CLANKJOB_CASE_URL`
+/// when the server has a `public_url` (e.g. for a link back to the case in a message).
+fn case_env(context: &ToolContext) -> Vec<(&'static str, &str)> {
+    let mut env = Vec::new();
+    if !context.case_id.is_empty() {
+        env.push(("CLANKJOB_CASE_ID", context.case_id.as_str()));
+    }
+    if let Some(url) = &context.case_url {
+        env.push(("CLANKJOB_CASE_URL", url.as_str()));
+    }
+    env
+}
+
 /// How to run a command.
 struct Runner {
     name: String,
@@ -514,7 +527,8 @@ struct Runner {
 
 impl Runner {
     /// Run the command and wait for it, within the timeout, feeding `stdin` if given.
-    fn run(&self, argv: &[String], stdin: Option<String>) -> Result<String, String> {
+    /// `case_env` adds variables about the case the call is for (`CLANKJOB_CASE_ID`…).
+    fn run(&self, argv: &[String], stdin: Option<String>, case_env: &[(&str, &str)]) -> Result<String, String> {
         let name = &self.name;
         let mut command = Command::new(&self.program);
         command
@@ -531,6 +545,7 @@ impl Runner {
             }
         }
         command.envs(&self.env);
+        command.envs(case_env.iter().copied());
         let mut child = spawn(&mut command).map_err(|error| format!("`{name}` could not start: {error}"))?;
         if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
             // Written from a thread so a child that does not read stdin cannot block us.
@@ -723,7 +738,7 @@ impl PluginTool for CommandTool {
             return Ok(None);
         };
         let input = json!({ "args": arguments, "trusted": trusted }).to_string();
-        let output = runner.run(argv, Some(input))?;
+        let output = runner.run(argv, Some(input), &[])?;
         let report: ApprovalReport = serde_json::from_str(&output)
             .map_err(|error| format!("`{}` printed an invalid report: {error}", runner.name))?;
         Ok((!report.required).then(|| {
@@ -743,9 +758,11 @@ impl PluginTool for CommandTool {
         let mut values = names.clone();
         // Kept alive until the command has finished; removes the links when dropped.
         let _links = link_files(&self.manifest.args, &mut values, context)?;
-        let output = self
-            .runner
-            .run(&argv_of(&self.manifest.command, &self.manifest.options, &values), None)?;
+        let output = self.runner.run(
+            &argv_of(&self.manifest.command, &self.manifest.options, &values),
+            None,
+            &case_env(context),
+        )?;
         let values = names;
         let chars = output.chars().count();
         let inline = match self.manifest.output {
@@ -898,7 +915,7 @@ impl PluginCondition for CommandCondition {
 
     fn check(&self, params: &Value, cursor: Option<&Value>) -> Result<CheckOutcome, String> {
         let input = json!({ "params": params, "cursor": cursor }).to_string();
-        let output = self.runner.run(&self.argv, Some(input))?;
+        let output = self.runner.run(&self.argv, Some(input), &[])?;
         let report: CheckReport = serde_json::from_str(&output)
             .map_err(|error| format!("`{}` printed an invalid report: {error}", self.name))?;
         match report.status.as_str() {
@@ -1224,6 +1241,7 @@ mod tests {
                 path: stored,
                 media_type: "application/pdf".to_owned(),
             }],
+            ..ToolContext::default()
         };
         let text = "name = \"show\"\ndescription = \"d\"\ncommand = [\"./show.sh\", \"{document}\"]\n\
                     [args.document]\ntype = \"file\"\ndescription = \"The document\"\nrequired = true\n";
@@ -1247,6 +1265,36 @@ mod tests {
                 .unwrap()
                 .contains("the name of one of the case's files")
         );
+    }
+
+    #[test]
+    fn a_command_tool_is_told_its_case_id_and_link() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        script(
+            dir.path(),
+            "case.sh",
+            "#!/bin/sh\necho \"${CLANKJOB_CASE_ID:-none} ${CLANKJOB_CASE_URL:-none}\"\n",
+        );
+        let text = "name = \"case\"\ndescription = \"d\"\ncommand = [\"./case.sh\"]\noutput = \"text\"\n";
+        let tool = CommandTool::new("probe", dir.path(), manifest(text), BTreeMap::new()).unwrap();
+        let context = ToolContext {
+            case_id: "01J9CASE".to_owned(),
+            case_url: Some("https://cj.example.com/#/cases/01J9CASE".to_owned()),
+            ..ToolContext::default()
+        };
+
+        // Act
+        let with_link = tool.run(&json!({}), &context).unwrap();
+        let without_case = tool.run(&json!({}), &ToolContext::default()).unwrap();
+
+        // Assert
+        let output = |result: ToolOutput| match result {
+            ToolOutput::Json(value) => value["output"].as_str().unwrap_or_default().to_owned(),
+            ToolOutput::File { .. } => unreachable!("expected inline output"),
+        };
+        assert_eq!(output(with_link), "01J9CASE https://cj.example.com/#/cases/01J9CASE\n");
+        assert_eq!(output(without_case), "none none\n");
     }
 
     #[test]

@@ -653,11 +653,14 @@ impl Activation<'_> {
         }
     }
 
-    /// The case's files as plugin tools see them. A database error becomes a tool error.
+    /// The case as plugin tools see it: its id, link and files. A database error becomes a
+    /// tool error.
     fn tool_context(&self) -> std::result::Result<ToolContext, String> {
         let files = storage::files::list_files(self.connection, &self.case_id)
             .map_err(|error| format!("cannot list the case's files: {error}"))?;
         Ok(ToolContext {
+            case_id: self.case_id.to_string(),
+            case_url: self.shared.channels.case_url(&self.case_id),
             files: files
                 .into_iter()
                 .map(|file| CaseFileRef {

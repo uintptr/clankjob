@@ -12,6 +12,8 @@ Environment:
     NTFY_TOPIC      the topic to publish to
     NTFY_TOKEN      an access token (tk_...), or
     NTFY_USERNAME and NTFY_PASSWORD for basic authentication; neither for an open server
+    CLANKJOB_CASE_URL  set by the server (when it has a public_url): tapping the
+                       notification opens the case, unless --click names another URL
 """
 
 import argparse
@@ -161,6 +163,13 @@ def notification(topic: str, message: str, title: str | None, priority: str | No
     return body
 
 
+def click_url(click: str | None, env: dict[str, str]) -> str | None:
+    """The URL opened on tap: the one given, or else the case's own page."""
+    if click and click.strip():
+        return click
+    return env.get("CLANKJOB_CASE_URL", "").strip() or None
+
+
 def send(server: Server, body: Json) -> Json:
     reply = server.request("/", body)
     result: Json = {"sent": True, "topic": server.topic}
@@ -188,9 +197,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        server = Server.from_env(dict(os.environ))
-        body = notification(server.topic, args.message, args.title, args.priority, args.tags, args.click,
-                            args.markdown)
+        env = dict(os.environ)
+        server = Server.from_env(env)
+        body = notification(server.topic, args.message, args.title, args.priority, args.tags,
+                            click_url(args.click, env), args.markdown)
         result = send(server, body)
     except ToolError as error:
         print(f"Error: {error}", file=sys.stderr)

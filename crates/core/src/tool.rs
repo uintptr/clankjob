@@ -42,6 +42,10 @@ pub struct CaseFileRef {
 /// What a plugin tool call can see of its case.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolContext {
+    /// The case's id; empty outside a case (e.g. in tests).
+    pub case_id: String,
+    /// Link to the case in the web UI, when the server's `public_url` is set.
+    pub case_url: Option<String>,
     /// The case's files, for arguments of type `file`.
     pub files: Vec<CaseFileRef>,
 }
