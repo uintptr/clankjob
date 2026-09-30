@@ -1,0 +1,15 @@
+# Optional. Copy to config.toml (git-ignored) to pass environment variables to the tools.
+# Values are references, resolved by the server at load time, or plain strings.
+
+[env]
+# FRED (macro_snapshot, fred_series, fred_search) needs a free API key:
+# https://fred.stlouisfed.org/docs/api/api_key.html
+# FRED_API_KEY = { env = "FRED_API_KEY" }
+
+# SEC EDGAR asks for a User-Agent naming who is calling and a contact address; generic
+# ones get rate-limited. Used by the sec_* tools and institutional_holdings_13f.
+# SEC_USER_AGENT = "Your Name you@example.com"
+
+# The 13F manager watchlist, as JSON (see scripts/13f.py). Default: 13f_filings/roster.json
+# in this directory if present, else the list built into the script.
+# FINSKILLS_13F_ROSTER = "/plugins/finance/13f_filings/roster.json"

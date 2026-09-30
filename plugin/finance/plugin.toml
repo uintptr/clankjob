@@ -1,0 +1,647 @@
+# clankjob plugin manifest (design section 9.9): market data, filings, macro and valuation tools.
+id = "finance"
+name = "Finance research"
+version = "0.1.0"
+runtime = "command"
+# Most scripts run through `uv run --script`, which installs their dependencies;
+# scripts/13f.py uses the standard library only.
+requires = ["uv", "python3"]
+
+# ---- market data (Yahoo Finance) --------------------------------------------------
+
+[[tools]]
+name = "stock_data"
+description = """Market data for one ticker from Yahoo Finance: quotes, company info, financial \
+statements, analyst estimates, holders, insiders, dividends, options and news. Tickers as on \
+Yahoo: `AAPL`, `SHOP.TO`, `BRK-B`, indices `^GSPC`, futures `GC=F`, crypto `BTC-USD`. Call it once \
+per dataset; the finance guides list which ones each kind of analysis needs. Figures are \
+Yahoo's and can be stale or wrong: say where a number comes from."""
+command = ["scripts/yf.py", "{ticker}", "{data}"]
+output = "auto"
+file_name = "{ticker}-{data}.md"
+# The first run installs the script's dependencies.
+timeout = "5m"
+
+[tools.options]
+freq = ["--freq={freq}"]
+period = ["--period={period}"]
+start = ["--start={start}"]
+end = ["--end={end}"]
+interval = ["--interval={interval}"]
+date = ["--date={date}"]
+count = ["--count={count}"]
+tab = ["--tab={tab}"]
+
+[tools.args.ticker]
+description = "Ticker symbol, e.g. `AAPL`, `SHOP.TO`, `^VIX`, `GC=F`."
+required = true
+
+[tools.args.data]
+description = """What to fetch. Price: `history`, `fast-info` (quote), `info` (profile, valuation, \
+margins, consensus). Statements: `income`, `balance`, `cashflow`, `earnings` (with `freq`). \
+Analysts: `recommendations`, `upgrades`, `price-targets`, `earnings-estimate`, `revenue-estimate`, \
+`earnings-dates`, `earnings-history`, `eps-trend`, `eps-revisions`, `growth-estimates`. Holders: \
+`major-holders`, `institutional`, `mutualfund`, `insider-purchases`, `insider-tx`, \
+`insider-roster`. Corporate actions: `dividends`, `splits`, `actions`, `capital-gains`, `shares`, \
+`shares-full`, `calendar`, `sec-filings`. Options: `option-dates`, `options`, `calls`, `puts` \
+(with `date`). Other: `news`, `sustainability`, `isin`, `history-meta`."""
+required = true
+enum = [
+    "history", "fast-info", "info",
+    "income", "balance", "cashflow", "earnings",
+    "recommendations", "upgrades", "price-targets", "earnings-estimate", "revenue-estimate",
+    "earnings-dates", "earnings-history", "eps-trend", "eps-revisions", "growth-estimates",
+    "sustainability",
+    "major-holders", "institutional", "mutualfund", "insider-purchases", "insider-tx", "insider-roster",
+    "dividends", "splits", "actions", "capital-gains", "shares", "shares-full", "calendar", "sec-filings",
+    "option-dates", "options", "calls", "puts",
+    "news", "isin", "history-meta",
+]
+
+[tools.args.freq]
+description = "Statement frequency for `income`, `balance`, `cashflow`, `earnings` (default `yearly`)."
+enum = ["yearly", "quarterly", "trailing"]
+
+[tools.args.period]
+description = "`history` lookback: `1d` `5d` `1mo` `3mo` `6mo` `1y` `2y` `5y` `10y` `ytd` `max`."
+
+[tools.args.start]
+description = "First day for `history` or `shares-full`, `YYYY-MM-DD`."
+
+[tools.args.end]
+description = "Last day for `history` or `shares-full`, `YYYY-MM-DD`."
+
+[tools.args.interval]
+description = "`history` bar size: `1d` (default), `1wk`, `1mo`; intraday `1m` to `1h` only for recent days."
+
+[tools.args.date]
+description = "Option expiry for `options`, `calls`, `puts`, `YYYY-MM-DD` (see `option-dates`)."
+
+[tools.args.count]
+type = "integer"
+description = "Number of items, e.g. news headlines or earnings dates."
+
+[tools.args.tab]
+description = "`news` tab (default `news`)."
+enum = ["news", "all", "press"]
+
+[[tools]]
+name = "stock_screen"
+description = """Screen stocks or funds on Yahoo Finance by conditions, e.g. \
+`peratio.lasttwelvemonths lt 15 intradaymarketcap gt 10000000000 region eq us`. Operators: `gt` \
+`lt` `gte` `lte` `eq`, `btwn LOW HIGH`, `is-in A B C`; quote values with spaces (`sector eq \
+'Consumer Cyclical'`). Percentages are whole numbers (15 = 15%). Equity fields: `region` (`us`, \
+`ca`, …), `sector`, `industry`, `exchange`, `intradaymarketcap`, `percentchange`, \
+`fiftytwowkpercentchange`, `avgdailyvol3m`, `beta`, `peratio.lasttwelvemonths`, `pegratio_5y`, \
+`pricebookratio.quarterly`, `lastclosetevebitda.lasttwelvemonths`, `dividendyield`, \
+`returnonequity.lasttwelvemonths`, `grossprofitmargin.lasttwelvemonths`, \
+`ebitdamargin.lasttwelvemonths`, `netincomemargin.lasttwelvemonths`, \
+`totalrevenues1yrgrowth.lasttwelvemonths`, `epsgrowth.lasttwelvemonths`, \
+`totaldebtequity.lasttwelvemonths`, `currentratio.lasttwelvemonths`, \
+`leveredfreecashflow.lasttwelvemonths`, `short_percentage_of_float.value`. For a ready-made \
+screen use stock_screen_preset."""
+command = ["scripts/screen.py", "{universe}", "--filter={filters}"]
+output = "auto"
+file_name = "screen-{universe}.md"
+timeout = "5m"
+
+[tools.options]
+count = ["--count={count}"]
+sort_by = ["--sort-by={sort_by}"]
+
+[tools.args.universe]
+description = "`equity` for stocks, `fund` for mutual funds and ETFs."
+required = true
+enum = ["equity", "fund"]
+
+[tools.args.filters]
+description = "Conditions `FIELD OP VALUE`, all of which must hold, e.g. `sector eq Technology peratio.lasttwelvemonths lt 25`."
+required = true
+
+[tools.args.count]
+type = "integer"
+description = "At most this many results (default 25)."
+
+[tools.args.sort_by]
+description = "Field to sort by, highest first, e.g. `percentchange`."
+
+[[tools]]
+name = "stock_screen_preset"
+description = """Run a ready-made stock screen on Yahoo Finance: `value` (low P/E and P/B, US large \
+caps), `growth`, `dividend`, `momentum`, `quality` (high ROE, low debt), `small-cap-value`, \
+`tech-growth`, `deep-value` (Graham-style, P/E < 15 and P/B < 1.5)."""
+command = ["scripts/screen.py", "preset", "{preset}"]
+output = "auto"
+file_name = "screen-{preset}.md"
+timeout = "5m"
+
+[tools.options]
+count = ["--count={count}"]
+sort_by = ["--sort-by={sort_by}"]
+
+[tools.args.preset]
+description = "Preset name."
+required = true
+enum = ["value", "growth", "dividend", "momentum", "quality", "small-cap-value", "tech-growth", "deep-value"]
+
+[tools.args.count]
+type = "integer"
+description = "At most this many results (default 25)."
+
+[tools.args.sort_by]
+description = "Field to sort by instead of the preset's."
+
+[[tools]]
+name = "sp500_pe"
+description = """Every S&P 500 company ranked by P/E (trailing, forward) with market cap and sector, \
+from Yahoo Finance. Slow: it downloads data for 500 tickers (a few minutes)."""
+command = ["scripts/sp500-pe.py"]
+output = "auto"
+file_name = "sp500-pe.md"
+timeout = "10m"
+
+[tools.options]
+count = ["--count={count}"]
+sort = ["--sort={sort}"]
+sector = ["--sector={sector}"]
+include_negative = ["--include-negative"]
+refresh = ["--refresh"]
+
+[tools.args.count]
+type = "integer"
+description = "Rows to show (default all)."
+
+[tools.args.sort]
+description = "Order (default `pe-asc`, cheapest first)."
+enum = ["pe-asc", "pe-desc", "forward-pe", "market-cap"]
+
+[tools.args.sector]
+description = "Only this Yahoo sector (part of its name matches), e.g. `Technology`, `Healthcare`, `Financial Services`, `Energy`."
+
+[tools.args.include_negative]
+type = "boolean"
+description = "Also list loss-making companies (negative P/E)."
+
+[tools.args.refresh]
+type = "boolean"
+description = "Download the constituent list from Wikipedia again (it is cached for 30 days)."
+
+# ---- SEC EDGAR -------------------------------------------------------------------
+
+[[tools]]
+name = "sec_filings"
+description = "List a company's recent SEC EDGAR filings (form, date, period, link), newest first."
+command = ["scripts/sec.py", "filings", "{ticker}"]
+output = "auto"
+file_name = "sec-{ticker}-filings.md"
+timeout = "3m"
+
+[tools.options]
+form = ["--type={form}"]
+count = ["--count={count}"]
+
+[tools.args.ticker]
+description = "US ticker, e.g. `TSLA`."
+required = true
+
+[tools.args.form]
+description = "Only this form type, e.g. `10-K`, `10-Q`, `8-K`, `DEF 14A`."
+
+[tools.args.count]
+type = "integer"
+description = "At most this many (default 20)."
+
+[[tools]]
+name = "sec_filing_text"
+description = """Download the text of a company's SEC filing (default: the latest 10-K), saved as a \
+case file: read it with `read_file`, in parts, and quote it rather than recalling it. Pass \
+`section` for one item only, e.g. `1A` (Risk Factors) or `7` (MD&A)."""
+command = ["scripts/sec.py", "fetch", "{ticker}"]
+output = "file"
+file_name = "sec-{ticker}.md"
+timeout = "3m"
+
+[tools.options]
+form = ["--type={form}"]
+index = ["--index={index}"]
+section = ["--section={section}"]
+chars = ["--chars={chars}"]
+
+[tools.args.ticker]
+description = "US ticker, e.g. `AAPL`."
+required = true
+
+[tools.args.form]
+description = "Form type (default `10-K`), e.g. `10-Q`, `8-K`."
+
+[tools.args.index]
+type = "integer"
+description = "Which filing of that type: 0 = latest (default), 1 = the one before, …"
+
+[tools.args.section]
+description = "Only this item, e.g. `1`, `1A`, `7`, `7A`, `8`."
+
+[tools.args.chars]
+type = "integer"
+description = "At most this many characters (default 80000)."
+
+[[tools]]
+name = "sec_xbrl_facts"
+description = """Reported figures from a company's SEC filings (XBRL), exactly as filed, e.g. \
+`Revenues`, `NetIncomeLoss`, `RevenueFromContractWithCustomerExcludingAssessedTax`. Pass \
+`list_concepts` first when you do not know the concept name."""
+command = ["scripts/sec.py", "facts", "{ticker}"]
+output = "auto"
+file_name = "sec-{ticker}-facts.md"
+timeout = "3m"
+
+[tools.options]
+concept = ["--concept={concept}"]
+list_concepts = ["--list-concepts"]
+count = ["--count={count}"]
+
+[tools.args.ticker]
+description = "US ticker, e.g. `NVDA`."
+required = true
+
+[tools.args.concept]
+description = "XBRL concept name (us-gaap), e.g. `Revenues`."
+
+[tools.args.list_concepts]
+type = "boolean"
+description = "List the concept names this company reports."
+
+[tools.args.count]
+type = "integer"
+description = "Number of observations (default 10)."
+
+[[tools]]
+name = "sec_full_text_search"
+description = "Search the text of every SEC EDGAR filing since 2001, e.g. which 10-Ks mention a phrase."
+command = ["scripts/sec.py", "search", "{query}"]
+output = "auto"
+file_name = "sec-search.md"
+timeout = "3m"
+
+[tools.options]
+form = ["--type={form}"]
+start = ["--start={start}"]
+end = ["--end={end}"]
+count = ["--count={count}"]
+
+[tools.args.query]
+description = "Search terms; quote a phrase, e.g. `\"going concern\"`."
+required = true
+
+[tools.args.form]
+description = "Only this form type, e.g. `10-K`, `8-K`."
+
+[tools.args.start]
+description = "Filed on or after, `YYYY-MM-DD`."
+
+[tools.args.end]
+description = "Filed on or before, `YYYY-MM-DD`."
+
+[tools.args.count]
+type = "integer"
+description = "At most this many (default 20)."
+
+[[tools]]
+name = "institutional_holdings_13f"
+description = """What institutional managers hold, from their 13F-HR filings on SEC EDGAR, as a \
+share of each manager's reported 13F assets. `report`: `roster` (the watchlist of managers and \
+their slugs), `filings` (one manager's 13F filings), `holdings` (one manager's positions for a \
+quarter), `deltas` (one manager's quarter-over-quarter changes), `history` (one manager's weights \
+over several quarters), `consensus` (holdings across managers: crowding, holder counts), \
+`crowding` (one security's holders over time, by `cusip` or `issuer`). 13F data is 45 days late \
+at best and shows US long positions only."""
+command = ["scripts/13f.py", "{report}"]
+output = "auto"
+file_name = "13f-{report}.md"
+timeout = "5m"
+
+[tools.options]
+fund = ["{fund}"]
+funds = ["--funds={funds}"]
+tier = ["--tier={tier}"]
+period = ["--period={period}"]
+index = ["--index={index}"]
+from = ["--from={from}"]
+to = ["--to={to}"]
+top = ["--top={top}"]
+quarters = ["--quarters={quarters}"]
+count = ["--count={count}"]
+cusip = ["--cusip={cusip}"]
+issuer = ["--issuer={issuer}"]
+compare = ["--compare"]
+include_holds = ["--include-holds"]
+include_options = ["--include-options"]
+
+[tools.args.report]
+description = "Which report (see above)."
+required = true
+enum = ["roster", "filings", "holdings", "deltas", "history", "consensus", "crowding"]
+
+[tools.args.fund]
+description = "The manager, for `filings`, `holdings`, `deltas`, `history`: a roster slug (e.g. `berkshire`) or a CIK."
+
+[tools.args.funds]
+description = "`consensus`, `crowding`: only these managers, comma-separated slugs or CIKs (default: the roster)."
+
+[tools.args.tier]
+description = "`roster`, `consensus`, `crowding`: only these roster tiers, comma-separated, e.g. `A,B`."
+
+[tools.args.period]
+description = "`holdings`, `consensus`: quarter end `YYYY-MM-DD` (default: the latest)."
+
+[tools.args.index]
+type = "integer"
+description = "`holdings`, `deltas`, `consensus`: quarters back from the latest (default 0)."
+
+[tools.args.from]
+description = "`deltas`: the earlier quarter end, `YYYY-MM-DD`."
+
+[tools.args.to]
+description = "`deltas`: the later quarter end, `YYYY-MM-DD` (default: the latest)."
+
+[tools.args.top]
+type = "integer"
+description = "Rows to show."
+
+[tools.args.quarters]
+type = "integer"
+description = "`history`, `crowding`: how many quarters back."
+
+[tools.args.count]
+type = "integer"
+description = "`filings`: at most this many (default 12)."
+
+[tools.args.cusip]
+description = "`crowding`: the security's CUSIP, e.g. `02079K107`."
+
+[tools.args.issuer]
+description = "`crowding`: part of the issuer's name, instead of a CUSIP."
+
+[tools.args.compare]
+type = "boolean"
+description = "`consensus`: also the change in holder count since the prior quarter."
+
+[tools.args.include_holds]
+type = "boolean"
+description = "`deltas`: also list unchanged positions."
+
+[tools.args.include_options]
+type = "boolean"
+description = "`history`: include option positions (reported at notional)."
+
+# ---- macro (FRED) -----------------------------------------------------------------
+
+[[tools]]
+name = "macro_snapshot"
+description = """Latest US macro indicators from FRED (St. Louis Fed), all or one group: `rates`, \
+`inflation`, `growth`, `labour`, `credit`, `housing`, `money`, `sentiment`. Needs a FRED API key \
+in the plugin's config."""
+command = ["scripts/fred.py", "snapshot"]
+output = "auto"
+file_name = "fred-snapshot.md"
+timeout = "3m"
+
+[tools.options]
+group = ["--group={group}"]
+
+[tools.args.group]
+description = "Only this group of indicators."
+enum = ["rates", "inflation", "growth", "labour", "credit", "housing", "money", "sentiment"]
+
+[[tools]]
+name = "fred_series"
+description = """Observations of FRED economic series by id, e.g. `FEDFUNDS`, `DGS10`, `CPIAUCSL`, \
+`UNRATE`, `T10Y2Y`. Find ids with fred_search."""
+command = ["scripts/fred.py", "series", "{series}"]
+output = "auto"
+file_name = "fred-series.md"
+timeout = "3m"
+
+[tools.options]
+count = ["--count={count}"]
+start = ["--start={start}"]
+end = ["--end={end}"]
+freq = ["--freq={freq}"]
+
+[tools.args.series]
+description = "One or more series ids, comma-separated."
+required = true
+
+[tools.args.count]
+type = "integer"
+description = "Latest observations per series (default 12)."
+
+[tools.args.start]
+description = "From this date, `YYYY-MM-DD`."
+
+[tools.args.end]
+description = "Up to this date, `YYYY-MM-DD`."
+
+[tools.args.freq]
+description = "Aggregate to: `d` `w` `bw` `m` `q` `sa` (semiannual) `a`."
+enum = ["d", "w", "bw", "m", "q", "sa", "a"]
+
+[[tools]]
+name = "fred_search"
+description = "Search FRED for economic data series by keyword; gives ids, titles, frequency and units."
+command = ["scripts/fred.py", "search", "{query}"]
+output = "auto"
+file_name = "fred-search.md"
+timeout = "3m"
+
+[tools.options]
+limit = ["--limit={limit}"]
+frequency = ["--filter-freq={frequency}"]
+
+[tools.args.query]
+description = "Search text, e.g. `canada unemployment`."
+required = true
+
+[tools.args.limit]
+type = "integer"
+description = "At most this many (default 20)."
+
+[tools.args.frequency]
+description = "Only series of this frequency."
+enum = ["Daily", "Weekly", "Monthly", "Quarterly", "Annual"]
+
+# ---- models -----------------------------------------------------------------------
+
+[[tools]]
+name = "dcf_model"
+description = """Discounted cash flow valuation: projected free cash flow, terminal value (Gordon \
+growth), enterprise and equity value, value per share and upside, and a WACC × terminal growth \
+sensitivity table. Money in millions of the reporting currency. Give `fcf` or `fcfs`; take the \
+inputs from the statements (stock_data), not from memory."""
+command = ["scripts/dcf.py"]
+output = "text"
+timeout = "3m"
+
+[tools.options]
+fcf = ["--fcf={fcf}"]
+fcfs = ["--fcfs={fcfs}"]
+growth = ["--growth={growth}"]
+stage2_growth = ["--stage2-growth={stage2_growth}"]
+wacc = ["--wacc={wacc}"]
+terminal = ["--terminal={terminal}"]
+years = ["--years={years}"]
+net_debt = ["--net-debt={net_debt}"]
+shares = ["--shares={shares}"]
+current_price = ["--current-price={current_price}"]
+ticker = ["--ticker={ticker}"]
+
+[tools.args.fcf]
+type = "number"
+description = "Base free cash flow, millions."
+
+[tools.args.fcfs]
+description = "Free cash flow history, oldest first, comma-separated millions, e.g. `100,120,145,160`; the last is the base."
+
+[tools.args.growth]
+type = "number"
+description = "FCF growth rate in %, years 1-5 (default 10)."
+
+[tools.args.stage2_growth]
+type = "number"
+description = "Growth rate in % for years 6 onwards, for a two-stage model (use with `years` 10)."
+
+[tools.args.wacc]
+type = "number"
+description = "Discount rate (WACC) in % (default 10)."
+
+[tools.args.terminal]
+type = "number"
+description = "Terminal growth rate in % (default 2.5)."
+
+[tools.args.years]
+type = "integer"
+description = "Projection years (default 5)."
+
+[tools.args.net_debt]
+type = "number"
+description = "Net debt in millions; negative for net cash."
+
+[tools.args.shares]
+type = "number"
+description = "Diluted shares outstanding, millions."
+
+[tools.args.current_price]
+type = "number"
+description = "Current share price, for the upside."
+
+[tools.args.ticker]
+description = "Label for the output, e.g. `AAPL`."
+
+[[tools]]
+name = "pairs_test"
+description = """Test whether two securities' prices are cointegrated (a pairs trade): hedge \
+ratio, Engle-Granger and ADF tests, spread half-life and amplitude, current z-score. Prices from \
+Yahoo Finance."""
+command = ["scripts/pairs.py", "{ticker_a}", "{ticker_b}"]
+output = "text"
+timeout = "5m"
+
+[tools.options]
+period = ["--period={period}"]
+trend = ["--trend={trend}"]
+
+[tools.args.ticker_a]
+description = "First ticker, e.g. `XIC.TO`."
+required = true
+
+[tools.args.ticker_b]
+description = "Second ticker, e.g. `ZCN.TO`."
+required = true
+
+[tools.args.period]
+description = "Lookback, e.g. `1y`, `3y` (default), `5y`."
+
+[tools.args.trend]
+description = """`c` constant only, `ct` remove a linear trend first (funds on the same index \
+drift apart by their fee difference), `auto` (default) picks `ct` when the drift is significant."""
+enum = ["auto", "c", "ct"]
+
+[[tools]]
+name = "leveraged_etf_decay"
+description = """Measure a leveraged ETF's volatility decay against the same leverage on its \
+underlying (e.g. `HSU.TO` vs 2× `VFV.TO`), and backtest shorting the leveraged ETF against a long \
+leveraged position in the underlying, before borrow costs. Prices from Yahoo Finance."""
+command = ["scripts/levdecay.py", "{leveraged}", "{underlying}"]
+output = "text"
+timeout = "5m"
+
+[tools.options]
+leverage = ["--leverage={leverage}"]
+period = ["--period={period}"]
+
+[tools.args.leveraged]
+description = "The leveraged ETF, e.g. `HSU.TO`."
+required = true
+
+[tools.args.underlying]
+description = "The unleveraged fund on the same index, e.g. `VFV.TO`."
+required = true
+
+[tools.args.leverage]
+type = "number"
+description = "The leveraged ETF's daily leverage (default 2)."
+
+[tools.args.period]
+description = "Lookback, e.g. `5y` (default), `10y`."
+
+# ---- guides -----------------------------------------------------------------------
+
+[[guides]]
+name = "stock-analysis"
+description = "A full stock analysis of one company: data, DCF, filing, peers, macro, news, Bezos & Buffett synthesis."
+file = "guides/stock-analysis.md"
+
+[[guides]]
+name = "company-overview"
+description = "A short overview of one company: business, market snapshot, valuation, profitability, consensus."
+file = "guides/company-overview.md"
+
+[[guides]]
+name = "dcf-valuation"
+description = "Valuing a company with a discounted cash flow model."
+file = "guides/dcf-valuation.md"
+
+[[guides]]
+name = "earnings-summary"
+description = "Summarising a company's latest earnings: results vs estimates, surprises, revisions, guidance."
+file = "guides/earnings-summary.md"
+
+[[guides]]
+name = "earnings-calendar"
+description = "Upcoming and recent earnings dates for a list of tickers."
+file = "guides/earnings-calendar.md"
+
+[[guides]]
+name = "sec-filing-summary"
+description = "Summarising a company's latest 10-K, 10-Q or 8-K."
+file = "guides/sec-filing-summary.md"
+
+[[guides]]
+name = "macro-snapshot"
+description = "The current macro picture for equities (indices, rates, credit, commodities, sentiment), optionally for one company."
+file = "guides/macro-snapshot.md"
+
+[[guides]]
+name = "news-digest"
+description = "A digest of recent financial news for tickers or sectors."
+file = "guides/news-digest.md"
+
+[[guides]]
+name = "peer-comparison"
+description = "Comparing a company with its competitors on valuation, growth, profitability, leverage and sentiment."
+file = "guides/peer-comparison.md"
+
+[[guides]]
+name = "ratio-analysis"
+description = "Computing and interpreting a company's financial ratios."
+file = "guides/ratio-analysis.md"

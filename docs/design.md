@@ -718,6 +718,13 @@ plugin's manifest, its configuration and, for external plugins, its code:
     weather_tool.py
     test_weather_tool.py
     README.md
+  finance/                     command plugin: market data, filings, 13F, FRED, DCF; guides
+    plugin.toml
+    config.example.toml
+    check_config.py
+    scripts/*.py
+    guides/*.md
+    README.md
   youtube_transcribe/          command plugin: tools and guides (§9.9)
     plugin.toml
     check_config.py

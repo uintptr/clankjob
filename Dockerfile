@@ -25,7 +25,7 @@ LABEL org.opencontainers.image.source="https://github.com/uintptr/clankjob" \
       org.opencontainers.image.description="clankjob: AI agents that know how to wait"
 
 # python3: the plugins (Discord, email, documents and weather use the standard library only).
-# uv: plugins whose scripts need dependencies (youtube_transcribe).
+# uv: plugins whose scripts need dependencies (youtube_transcribe, finance).
 # tini: PID 1 that reaps plugin processes and forwards signals to the server.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates python3 tini tzdata \

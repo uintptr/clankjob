@@ -29,6 +29,7 @@ Current checks:
 | `shell`              | sandbox reachable, runs commands, programs present, sees no secrets, internet        |
 | `web`                | a page read as text, a feed parsed, local addresses refused, a Google search         |
 | `weather`            | Open-Meteo reachable (key if set), a place lookup, a forecast, past weather          |
+| `finance`            | `uv` and scripts, Yahoo quote, EDGAR filings and 13F, FRED (key if set), DCF runs    |
 
 ### The contract
 
