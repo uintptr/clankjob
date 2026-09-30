@@ -27,6 +27,11 @@ case     drafts the email ............................ you approve it
 Four LLM activations spread over three days. Everything else was the scheduler quietly
 checking the mailbox while the agent slept.
 
+The name is loosely based on **cron job**, and so is the design. A cron job does
+nothing until its time comes, runs, then goes back to waiting. A case works the same way,
+except it wakes on a reply or an answer as well as on a timer, and it decides for itself
+when to wait next. Swap the "cron" for a clank of the machine and you get clankjob.
+
 ## Why you might love it
 
 - **Sleeping is free.** While a case waits, no model is running. Cheap, deterministic
