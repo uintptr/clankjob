@@ -31,6 +31,7 @@ Current checks:
 | `weather`            | Open-Meteo reachable (key if set), a place lookup, a forecast, past weather          |
 | `ntfy`               | server healthy, credentials accepted for the topic; `--notify`                       |
 | `finance`            | `uv` and scripts, Yahoo quote, EDGAR filings and 13F, FRED (key if set), DCF runs    |
+| `home_assistant`     | hacli on PATH, token accepted, entities, templates, services, `HA_NO_APPROVAL` names |
 
 ### The contract
 

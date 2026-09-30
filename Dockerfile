@@ -27,7 +27,8 @@ FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source="https://github.com/uintptr/clankjob" \
       org.opencontainers.image.description="clankjob: AI agents that know how to wait"
 
-# python3: the plugins (Discord, email, documents, weather and ntfy use the standard library only).
+# python3: the plugins (Discord, email, documents, weather, ntfy and Home Assistant use the
+# standard library only).
 # uv: plugins whose scripts need dependencies (youtube_transcribe, finance).
 # tini: PID 1 that reaps plugin processes and forwards signals to the server.
 RUN apt-get update \
@@ -83,6 +84,10 @@ COPY sandbox/sandboxd.py /usr/local/lib/clankjob/sandboxd.py
 # Optional services next to the server, each started by its own compose service.
 COPY intake/discord/discord_intake.py /usr/local/lib/clankjob/discord_intake.py
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# hacli: the Home Assistant plugin's client (plugin/home_assistant), a static musl binary
+# released for amd64 and arm64, the same names as Docker's TARGETARCH.
+ARG TARGETARCH
+ADD --chmod=755 https://github.com/uintptr/hacli/releases/download/v0.0.2/hacli-linux-${TARGETARCH} /usr/local/bin/hacli
 COPY --from=build /usr/local/bin/clankjob /usr/local/bin/clankjob
 
 # A fixed, non-root user; match it to the owner of the host's data directory with

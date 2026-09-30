@@ -1,0 +1,20 @@
+# Copy to config.toml (git-ignored) to turn the Home Assistant plugin on. Values are passed
+# to ha_tool.py, and from it to hacli, as environment variables; secrets are references,
+# resolved by the server.
+
+[env]
+# Home Assistant's URL, as the clankjob server reaches it.
+HA_URL = "http://homeassistant.local:8123"
+
+# A long-lived access token: your profile in Home Assistant, Security tab, at the bottom.
+# The plugin can do whatever this user can, so consider a dedicated, non-admin user.
+HA_TOKEN = { env = "HA_TOKEN" }
+# HA_TOKEN = { secret = "ha_token" }
+
+# Services run without asking you first: whole domains or single services, comma-separated.
+# Everything else waits for your approval (and every call does if the case says `always`).
+# HA_NO_APPROVAL = "light, scene, notify.mobile_app_my_phone"
+
+# Services never run, even with your approval. The default leaves out restarting or
+# stopping Home Assistant, add-ons, backups and the recorder; "" allows everything.
+# HA_DENIED_SERVICES = "homeassistant.stop, homeassistant.restart, hassio, backup, recorder, lock"

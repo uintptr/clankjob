@@ -263,6 +263,7 @@ loads the ones it needs, so an unused plugin costs a line instead of its tool sc
 | `shell`              | A bash shell in a separate sandbox container, with network tools                  | the sandbox container (compose.yaml) |
 | `ntfy`               | Push notifications to your phone or desktop through ntfy                          | an ntfy server and topic             |
 | `weather`            | Forecasts and past weather for a place (Open-Meteo)                               | nothing                              |
+| `home_assistant`     | Sensors, history and services of your home; waits for a state; approval to act    | Home Assistant and an access token   |
 | `youtube_transcribe` | Video transcripts, and guides for summaries and earnings calls                    | nothing (a proxy if YouTube blocks)  |
 | `finance`            | Market data, screens, SEC filings, 13F holdings, FRED macro, DCF; analysis guides | a free FRED key for the macro tools  |
 
@@ -287,6 +288,7 @@ plugin/
   documents/    metadata, OCR and text of the case's files
   ntfy/         push notifications through ntfy (any server, optional login)
   weather/      forecasts and past weather for a place (Open-Meteo, no key)
+  home_assistant/  states, history and services of Home Assistant, waits for a state (hacli)
   shell/        a bash shell for the agent, run in the sandbox container
   web/          web search (Google), pages as text, waits for page and feed changes
 sandbox/        the sandbox's exec service (sandboxd.py), for plugin/shell

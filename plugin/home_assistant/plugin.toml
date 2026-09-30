@@ -1,0 +1,241 @@
+# clankjob plugin manifest (design section 9.9): Home Assistant through hacli.
+id = "home_assistant"
+name = "Home Assistant"
+version = "0.1.0"
+runtime = "command"
+requires = ["python3", "hacli"]
+# Needs HA_URL and HA_TOKEN: without them every tool could only fail.
+requires_config = true
+
+[[tools]]
+name = "ha_entities"
+description = """List the owner's Home Assistant entities, one per line: `entity_id = state unit \
+(name)`. Use it to find an entity id before anything else; narrow by `domain` (`light`, `sensor`, \
+`binary_sensor`, `lock`, `climate`, `calendar`, …) and/or `search` (part of the id or name, e.g. \
+`garage`, `temperature`), since a home has hundreds of entities."""
+command = ["./ha_tool.py", "entities"]
+output = "auto"
+file_name = "ha-entities.txt"
+timeout = "1m"
+
+[tools.options]
+domain = ["--domain={domain}"]
+search = ["--search={search}"]
+
+[tools.args.domain]
+description = "Only this domain, e.g. `light` or `binary_sensor`."
+
+[tools.args.search]
+description = "Only entities whose id, name or state contains this text (ignoring case)."
+
+[[tools]]
+name = "ha_state"
+description = """One entity's current state with all its attributes (brightness, temperature, \
+battery, …) and when it last changed."""
+command = ["./ha_tool.py", "state", "{entity_id}"]
+output = "json"
+timeout = "1m"
+
+[tools.args.entity_id]
+description = "Entity id, e.g. `lock.front_door`."
+required = true
+
+[[tools]]
+name = "ha_template"
+description = """Render a Home Assistant (Jinja2) template against the live state. The best way \
+to answer a question over many entities in one call, e.g. `{{ states.light | selectattr('state', \
+'eq', 'on') | map(attribute='name') | list }}` or `{{ states('sensor.outdoor_temperature') }}`. \
+Read-only."""
+command = ["./ha_tool.py", "template", "--template={template}"]
+output = "auto"
+timeout = "1m"
+
+[tools.args.template]
+description = "The template, e.g. `{{ is_state('lock.front_door', 'locked') }}`."
+required = true
+max_length = 10000
+
+[[tools]]
+name = "ha_history"
+description = """How an entity's state changed over time (default: the last 24 hours): each \
+state and when it started. Use it to check what happened (did the sump pump run last night, when \
+did the door open)."""
+command = ["./ha_tool.py", "history", "{entity_id}"]
+output = "auto"
+file_name = "ha-history-{entity_id}.json"
+timeout = "2m"
+
+[tools.options]
+start = ["--start={start}"]
+end = ["--end={end}"]
+attributes = ["--attributes"]
+
+[tools.args.entity_id]
+description = "Entity id, e.g. `binary_sensor.back_door`."
+required = true
+
+[tools.args.start]
+description = "From this date or time, e.g. `2026-09-30` or `2026-09-30T18:00` (local time)."
+
+[tools.args.end]
+description = "Until this date or time (default: now)."
+
+[tools.args.attributes]
+type = "boolean"
+description = "Include the attributes of each state too (much longer)."
+
+[[tools]]
+name = "ha_logbook"
+description = """The logbook (default: the last 24 hours, every entity): what turned on or off, \
+opened, arrived, which automation ran, in words."""
+command = ["./ha_tool.py", "logbook"]
+output = "auto"
+file_name = "ha-logbook.json"
+timeout = "2m"
+
+[tools.options]
+entity_id = ["--entity-id={entity_id}"]
+start = ["--start={start}"]
+end = ["--end={end}"]
+
+[tools.args.entity_id]
+description = "Only this entity."
+
+[tools.args.start]
+description = "From this date or time, e.g. `2026-09-30` or `2026-09-30T18:00` (local time)."
+
+[tools.args.end]
+description = "Until this date or time (default: now)."
+
+[[tools]]
+name = "ha_services"
+description = """The services (actions) Home Assistant can run, with their target and fields \
+(`*` = required): what `ha_call_service` accepts. Pass a domain: all of them is long."""
+command = ["./ha_tool.py", "services"]
+output = "auto"
+file_name = "ha-services.txt"
+timeout = "1m"
+
+[tools.options]
+domain = ["--domain={domain}"]
+
+[tools.args.domain]
+description = "Only this domain, e.g. `light`, `climate`, `notify`."
+
+[[tools]]
+name = "ha_calendar_events"
+description = """Events of a Home Assistant calendar (default: the next 14 days). Calendars are \
+entities of the domain `calendar` (see ha_entities)."""
+command = ["./ha_tool.py", "calendar-events", "{calendar_id}"]
+output = "auto"
+timeout = "1m"
+
+[tools.options]
+start = ["--start={start}"]
+end = ["--end={end}"]
+
+[tools.args.calendar_id]
+description = "Calendar entity id, e.g. `calendar.family`."
+required = true
+
+[tools.args.start]
+description = "From this date or time (default: now)."
+
+[tools.args.end]
+description = "Until this date or time (default: 14 days after the start)."
+
+[[tools]]
+name = "ha_call_service"
+description = """Run a Home Assistant service: turn on a light, set the thermostat, lock a door, \
+send a notification, start a script. It acts on the owner's home, so the owner approves it first, \
+unless they listed the service as safe. Find the service and its fields with `ha_services` and \
+the entity ids with `ha_entities`; check the result with `ha_state` if it matters."""
+command = ["./ha_tool.py", "call", "{domain}", "{service}"]
+output = "json"
+requires_approval = true
+approval = "Home Assistant {domain}.{service} {data}"
+approval_check = ["./ha_tool.py", "needs-approval"]
+timeout = "1m"
+
+[tools.options]
+data = ["--data={data}"]
+return_response = ["--return-response"]
+
+[tools.args.domain]
+description = "Service domain, e.g. `light`."
+required = true
+
+[tools.args.service]
+description = "Service name, e.g. `turn_on`."
+required = true
+
+[tools.args.data]
+description = """The service's fields and target as a JSON object, e.g. `{"entity_id": \
+"light.kitchen", "brightness_pct": 40}` or `{"entity_id": "climate.living_room", \
+"temperature": 21}`."""
+max_length = 10000
+
+[tools.args.return_response]
+type = "boolean"
+description = """Return the service's response, for services that answer (e.g. \
+`weather.get_forecasts`, `calendar.get_events`); required by those."""
+
+# ---- wait conditions ------------------------------------------------------------
+# Home Assistant is usually on the local network and cheap to ask: every 5 minutes by
+# default, every minute at most.
+
+[[conditions]]
+name = "ha_state_is"
+description = """Fires when an entity has a state (`state`, or any other with `not`), or a number \
+above/below a value: a door `open`, a leak sensor `on`, a person `home`, a freezer above -10. \
+Also catches a state that came and went between two checks (from the history). Checked right \
+away too: if it is already true, it fires at once."""
+command = ["./ha_tool.py", "check-state"]
+interval = "5m"
+min_interval = "1m"
+
+[conditions.params.entity_id]
+description = "Entity id, e.g. `binary_sensor.garage_door`."
+required = true
+
+[conditions.params.state]
+description = "The state to wait for, e.g. `on`, `open`, `home`, `locked` (as `ha_state` shows it)."
+
+[conditions.params.not]
+type = "boolean"
+description = "Fire when the state is anything but `state` (e.g. not `home`)."
+
+[conditions.params.above]
+type = "number"
+description = "Fire when the state is a number above this."
+
+[conditions.params.below]
+type = "number"
+description = "Fire when the state is a number below this."
+
+[[conditions]]
+name = "ha_state_changed"
+description = """Fires when an entity's state changes from what it was when you started waiting \
+(even if it changed back in between), with each change and when it happened."""
+command = ["./ha_tool.py", "check-changed"]
+interval = "5m"
+min_interval = "1m"
+
+[conditions.params.entity_id]
+description = "Entity id, e.g. `climate.living_room` or `sensor.washer_status`."
+required = true
+
+[[conditions]]
+name = "ha_template_true"
+description = """Fires when a template renders true (`True`, `on`, `yes`, `1`), for anything \
+`ha_state_is` cannot say: several entities, attributes, time. E.g. `{{ is_state('lock.front_door', \
+'unlocked') and is_state('person.owner', 'not_home') }}`. Only the moments of the checks count, \
+so a brief change can be missed; try it with `ha_template` first."""
+command = ["./ha_tool.py", "check-template"]
+interval = "5m"
+min_interval = "1m"
+
+[conditions.params.template]
+description = "The template, rendering true when the case should wake."
+required = true
+max_length = 10000
