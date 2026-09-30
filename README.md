@@ -36,10 +36,12 @@ checking the mailbox while the agent slept.
   loses nothing. An activation interrupted mid-tool resumes without asking the model
   twice.
 - **You stay in charge.** Cases ask you questions and wait for the answer. Risky actions,
-  like sending an email, can require your approval first. The first answer wins,
-  whichever channel it came from.
+  like sending an email, wait for your approval first, which you can edit or reject;
+  emails to your trusted contacts can skip it, per case. The first answer wins, whichever
+  channel it came from.
 - **Bring any brain.** Any OpenAI-compatible endpoint works: OpenAI, OpenRouter, or a
-  model running on your own machine with Ollama, vLLM or LM Studio.
+  model running on your own machine with Ollama, vLLM or LM Studio. Pick the model per
+  case, and switch it while the case works: the next step uses the new one.
 - **Instructions it always follows, files it reads when needed.** Give a case short
   instructions (tone, limits, contacts) when you create it, and edit them any time. Drop a
   contractor's photo, a PDF quote or an email onto a running case and it wakes up to read
@@ -49,9 +51,10 @@ checking the mailbox while the agent slept.
   file in `/prompts` to change the rules, or write a profile ("you negotiate quotes with
   tradespeople") and pick it per case. Broken templates are caught at load time, not in
   the middle of a case.
-- **Extend it with plugins.** Email, Discord and anything else live outside the core as
-  plugins with their own config, tools and wake-up conditions. Plugins will soon be
-  writable in Python, too.
+- **Extend it with plugins.** Email, Discord, web search and everything else live
+  outside the core as plugins with their own config, tools and wake-up conditions. A
+  plugin is a Python process, or just a command-line script declared in a manifest: any
+  CLI becomes a tool without writing a line of plugin code.
 - **Boring where it counts.** One Rust binary, one SQLite file, synchronous code, no
   message broker. It runs happily in a small container.
 
@@ -64,30 +67,64 @@ A case's goal is plain language. Some things clankjob is built for:
 - Watch for something ("tell me when the permit office replies") and act on it.
 - Run a multi-day errand that needs your input at a few key moments.
 - Come back later: "check again on Monday at 9" is just a timer.
+- Research: a stock's filings and valuation, what a video says, the weather on the day a
+  roof started leaking.
 
 ## Status
 
-clankjob is young. Milestone 1, the engine every case depends on, is done and tested.
+clankjob is young. Everything below is built and tested:
 
-| Feature                                                             | State     |
-| ------------------------------------------------------------------- | --------- |
-| Case engine: activations, sleep and wake, crash-safe resume         | Available |
-| Core tools: `sleep`, `ask_human`, `complete`, `fail`, notes         | Available |
-| Timers, timeouts, "ask a human but also wake if X happens"          | Available |
-| Budgets: activations, turns per activation, tokens                  | Available |
-| OpenAI-compatible LLM adapter                                       | Available |
-| REST API with bearer tokens, prompt templates, profiles, hot reload | Available |
-| Web UI: cases, timeline, inbox, prompts, light and dark themes      | Available |
-| Discord: get asked, answer from chat, get notified when done        | Available |
-| Python plugins (human channels so far)                              | Available |
-| Command plugins: any CLI script as a tool, e.g. YouTube transcripts | Available |
-| Email: send, reply, read, wait for replies (you approve each email) | Available |
-| Approvals: approve, edit or reject tool calls (web and Discord)     | Available |
-| Docker image with document tools (metadata, OCR, text extraction)   | Available |
+| Feature                                                                      | State     |
+| ---------------------------------------------------------------------------- | --------- |
+| Case engine: activations, sleep and wake, crash-safe resume                  | Available |
+| Core tools: `sleep`, `ask_human`, `complete`, `fail`, notes, contacts        | Available |
+| Timers, timeouts, "ask a human but also wake if X happens"                   | Available |
+| Budgets: activations, turns per activation, tokens; cost estimates           | Available |
+| OpenAI-compatible LLM adapter, model catalog, model per case (changeable)    | Available |
+| REST API with bearer tokens, prompt templates, profiles, hot reload          | Available |
+| Web UI: cases, timeline, inbox, contacts, plugins, prompts, light and dark   | Available |
+| Instructions and files per case, images for vision models                    | Available |
+| Approvals: approve, edit or reject tool calls (web and Discord)              | Available |
+| Contacts: trusted recipients skip email approval (per-case setting)          | Available |
+| Discord: get asked, answer from chat, get notified; start a case by @mention | Available |
+| Plugins: Python processes, and command plugins (any CLI script as a tool)    | Available |
+| Published Docker image (amd64, arm64) and `deploy.py` for servers            | Available |
 
-The full design, including everything planned, is in [docs/design.md](docs/design.md).
+The bundled plugins are listed [below](#plugins). The full design, including everything
+planned, is in [docs/design.md](docs/design.md).
 
-## Quick start
+## Get started
+
+### On a server, with Docker (recommended)
+
+You need Docker with Compose, Python 3.11+ and an OpenAI-compatible endpoint (OpenRouter,
+OpenAI, or your own Ollama). Nothing is built on the server: the image
+`ghcr.io/uintptr/clankjob` is published by GitHub Actions for amd64 and arm64.
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/uintptr/clankjob/main/deploy/deploy.py
+python3 deploy.py ~/clankjob
+```
+
+[`deploy.py`](deploy/deploy.py) downloads the plugins, asks for your public URL, LLM,
+model and API key, generates the token you sign in with, and offers to configure each
+plugin (email, Discord, web search, …). Secrets are typed hidden and only written to
+`.env`. At the end it offers to pull the image and start everything; then open
+<http://127.0.0.1:8080> and sign in with `CLANKJOB_TOKEN` from `.env`.
+
+To update later, from inside the setup:
+
+```sh
+cd ~/clankjob && python3 deploy.py --yes --start
+```
+
+It refreshes the plugins and `compose.yaml`, pulls the latest image and restarts what
+changed, and never overwrites a setting or secret you already have. Configure a plugin
+you skipped with `python3 deploy.py --configure finance`. Put a reverse proxy with TLS in
+front for public access; [deploy/README.md](deploy/README.md) covers that, updates,
+backups and the same setup by hand.
+
+### From source
 
 You need a Rust toolchain and an OpenAI-compatible endpoint. A local
 [Ollama](https://ollama.com) works fine.
@@ -131,7 +168,14 @@ export OPENROUTER_API_KEY=sk-or-...   # or whatever your LLM block needs
 cargo run --release -p clankjob-server -- clankjob.toml
 ```
 
-**3. Give it a job:**
+To run this checkout in Docker instead, with the same `clankjob.toml`, `plugin/` and
+`data/`, put those two variables in `.env` and run `docker compose up -d --build`. Never
+run both on the same `data/`.
+
+### Give it a job
+
+In the web UI, **New case** needs only a title; the goal, instructions, files, model and
+budgets are optional. Or use the API:
 
 ```sh
 curl -s localhost:8080/api/v1/cases \
@@ -140,8 +184,8 @@ curl -s localhost:8080/api/v1/cases \
   -d '{"title": "Tea reminder", "goal": "Wait two minutes, then ask me whether the tea is ready."}'
 ```
 
-**4. Open the web UI** at <http://127.0.0.1:8080>, sign in with your token, and watch
-the case think, sleep and wake up. Questions from your agents land in the inbox.
+Watch the case think, sleep and wake up on its page. Questions from your agents land in
+the inbox (and on Discord, if you set it up).
 
 Prefer the terminal? Everything the UI does is plain REST:
 
@@ -197,6 +241,27 @@ Create a case with `"profile": "quotes"` to use it. Send `SIGHUP` or
 `POST /api/v1/admin/reload` to pick up changes; invalid templates are rejected with a
 precise error and the previous version keeps working.
 
+## Plugins
+
+Every plugin lives in its own directory under `plugin/`, with a README, a
+`config.example.toml` when it has settings, and a `check_config.py` that checks it
+against the real services (the web UI's **Plugins** page shows the same status). Every
+case is offered every loaded plugin's tools.
+
+| Plugin               | What cases get                                                                    | Needs                                |
+| -------------------- | --------------------------------------------------------------------------------- | ------------------------------------ |
+| `email`              | Send, reply, read, wait for replies; approval unless every recipient is trusted   | an IMAP/SMTP mailbox                 |
+| `discord`            | Questions, approvals and notifications in a Discord channel, answered in chat     | a bot token                          |
+| `web`                | Google search, pages as text, waits for a page or feed to change                  | a Google Programmable Search key     |
+| `documents`          | Metadata, OCR and text of the case's files (PDF, Office, images, media)           | nothing (in the image)               |
+| `shell`              | A bash shell in a separate sandbox container, with network tools                  | the sandbox container (compose.yaml) |
+| `weather`            | Forecasts and past weather for a place (Open-Meteo)                               | nothing                              |
+| `youtube_transcribe` | Video transcripts, and guides for summaries and earnings calls                    | nothing (a proxy if YouTube blocks)  |
+| `finance`            | Market data, screens, SEC filings, 13F holdings, FRED macro, DCF; analysis guides | a free FRED key for the macro tools  |
+
+The Discord **intake** ([intake/discord](intake/discord/README.md)) is separate: a small
+service that starts a case when you @mention its bot.
+
 ## Project layout
 
 ```
@@ -210,6 +275,7 @@ crates/
 plugin/
   discord/      Discord human channel (Python, standard library only)
   youtube_transcribe/  YouTube transcripts as tools, plus analysis guides
+  finance/      market data, SEC filings, 13F, FRED, DCF, plus analysis guides
   email/        send and read email, wait for replies (IMAP/SMTP, approvals)
   documents/    metadata, OCR and text of the case's files
   weather/      forecasts and past weather for a place (Open-Meteo, no key)
@@ -218,39 +284,11 @@ plugin/
 sandbox/        the sandbox's exec service (sandboxd.py), for plugin/shell
 intake/
   discord/      optional service: @mention the bot on Discord to start a case (REST API only)
+deploy/         deploy.py and the compose.yaml for servers running the published image
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/
   design.md     the full design
 ```
-
-## Run it with Docker
-
-The image has the server, Python for plugins, and the programs behind the document tools
-(ExifTool, Poppler, Tesseract OCR in English and French, pandoc, FFmpeg).
-`compose.yaml` runs it from this checkout with the same `clankjob.toml`, `plugin/` and
-`data/` as `cargo run`; the image overrides the listen address and paths itself.
-
-```sh
-# secrets for the { env = ... } references, next to compose.yaml (git-ignored)
-cat > .env <<'EOF'
-CLANKJOB_TOKEN=change-me
-OPENROUTER_API_KEY=sk-or-...
-EOF
-
-docker compose up -d --build
-docker compose logs -f
-```
-
-The web UI is on <http://127.0.0.1:8080>; put a reverse proxy with TLS in front for
-`public_url`. Stop any `cargo run` first: both would use `data/`. Details in
-[docs/design.md §18](docs/design.md).
-
-**On a server, without the source:** the image is published to
-`ghcr.io/uintptr/clankjob` (amd64 and arm64) by GitHub Actions. Download
-[`deploy/compose.yaml`](deploy/compose.yaml), write `clankjob.toml` and `.env`, and run
-`docker compose up -d`; [deploy/README.md](deploy/README.md) walks through it. Or let
-[`deploy/deploy.py`](deploy/deploy.py) do it: it downloads the plugins, asks for your
-settings and secrets, and writes everything.
 
 ## Development
 
@@ -258,6 +296,14 @@ settings and secrets, and writes everything.
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
+```
+
+Python (plugins, sandbox, intake, deploy), as CI runs it in each of those directories:
+
+```sh
+python -m unittest -v
+uvx ruff check .
+uvx basedpyright .
 ```
 
 Coding guidelines for contributors, human or AI, live in [AGENT.md](AGENT.md) and
