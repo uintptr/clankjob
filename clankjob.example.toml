@@ -40,6 +40,10 @@ data_dir = "./data"
 # email (configure plugin/email/config.toml), cases send email you approve and wait for
 # replies.
 # plugins_dir = "./plugin"
+# Plugin settings kept apart from the plugins' code, as <id>.toml (read before a plugin's
+# own config.toml); the image sets it to /config/plugins, its bundled plugins with
+# bundled_plugins_dir.
+# plugin_config_dir = "./config/plugins"
 
 # Chat channels new cases send questions and notifications to, besides the web UI.
 # Omitted: none (the web UI only). The New case form and a case's Settings turn one on

@@ -1,8 +1,8 @@
-//! The plugin host (design §9): loads plugins from the plugins directory and runs
+//! The plugin host (design §9): loads plugins from the plugins directories and runs
 //! external ones as child processes.
 //!
-//! Each plugin lives in its own directory with a `plugin.toml` manifest and a
-//! `config.toml` defining its instances. Only human-channel plugins (design §10.3) are
+//! Each plugin lives in its own directory with a `plugin.toml` manifest, and its settings
+//! (instances, `[env]`) in `<config_dir>/<id>.toml` or its own `config.toml`. Only human-channel plugins (design §10.3) are
 //! wired so far. A broken plugin or instance is reported and skipped; it never stops
 //! the server. [`PluginRegistry`] remembers what was found, so the API can show it and
 //! check an instance again.
@@ -216,6 +216,8 @@ fn strings(items: Vec<Value>) -> Vec<String> {
 pub struct PluginStatus {
     /// Directory name, which is also its id.
     pub id: String,
+    /// Where it was loaded from.
+    pub dir: PathBuf,
     /// Display name from the manifest.
     pub name: Option<String>,
     /// Version from the manifest.
@@ -239,9 +241,10 @@ pub struct PluginStatus {
 }
 
 impl PluginStatus {
-    fn new(id: &str) -> Self {
+    fn new(id: &str, dir: &Path) -> Self {
         Self {
             id: id.to_owned(),
+            dir: dir.to_path_buf(),
             name: None,
             version: None,
             runtime: None,
@@ -361,42 +364,103 @@ impl PluginRegistry {
     }
 }
 
-/// Load every plugin in `plugins_dir`, start the processes of channel plugins and check
-/// each instance's configuration.
-///
-/// # Arguments
-///
-/// * `plugins_dir` - Directory holding one sub-directory per plugin
-/// * `secrets_dir` - Where `{ secret = "name" }` references are read from
-#[must_use]
-pub fn load(plugins_dir: &Path, secrets_dir: &Path) -> PluginRegistry {
-    let mut registry = PluginRegistry::default();
-    // Plugins run with their own directory as working directory, so every path handed to
-    // them must be absolute; `plugins_dir` is often relative (`./plugin`).
-    let plugins_dir = &std::fs::canonicalize(plugins_dir).unwrap_or_else(|_| plugins_dir.to_path_buf());
-    let mut statuses = Vec::new();
-    let mut dirs: Vec<PathBuf> = match std::fs::read_dir(plugins_dir) {
-        Ok(entries) => entries
+/// Where plugins and their settings are found.
+#[derive(Debug, Clone, Default)]
+pub struct PluginPaths {
+    /// Directories holding one sub-directory per plugin, in order: a plugin replaces one
+    /// with the same id in an earlier directory (e.g. the image's bundled plugins, then
+    /// the owner's own).
+    pub dirs: Vec<PathBuf>,
+    /// Where settings are read from as `<id>.toml`, before `config.toml` in the plugin's
+    /// directory, so the plugins' code and their settings can live apart.
+    pub config_dir: Option<PathBuf>,
+    /// Where `{ secret = "name" }` references are read from.
+    pub secrets_dir: PathBuf,
+}
+
+impl PluginPaths {
+    /// A plugin's settings file, the first that exists of: `<config_dir>/<id>.toml`, then
+    /// `<id>/config.toml` in the plugin directories from the last one (so a directory
+    /// holding only settings, as older setups mount them, still configures a bundled
+    /// plugin), else the plugin's own `config.toml`.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The plugin's directory
+    /// * `id` - The plugin's id
+    #[must_use]
+    pub fn config_file(&self, dir: &Path, id: &str) -> PathBuf {
+        self.config_dir
+            .iter()
+            .map(|config_dir| config_dir.join(format!("{id}.toml")))
+            .chain(
+                self.dirs
+                    .iter()
+                    .rev()
+                    .map(|plugins_dir| plugins_dir.join(id).join("config.toml")),
+            )
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| dir.join("config.toml"))
+    }
+
+    /// Where the owner should put a plugin's settings, for notes.
+    fn config_hint(&self, id: &str) -> String {
+        self.config_dir.as_ref().map_or_else(
+            || "config.toml".to_owned(),
+            |config_dir| config_dir.join(format!("{id}.toml")).display().to_string(),
+        )
+    }
+}
+
+/// Every plugin directory by id: the last directory that has a plugin wins.
+fn plugin_dirs(registry: &mut PluginRegistry, dirs: &[PathBuf]) -> BTreeMap<String, PathBuf> {
+    let mut found = BTreeMap::new();
+    for plugins_dir in dirs {
+        // Plugins run with their own directory as working directory, so every path handed
+        // to them must be absolute; a plugins directory is often relative (`./plugin`).
+        let plugins_dir = std::fs::canonicalize(plugins_dir).unwrap_or_else(|_| plugins_dir.clone());
+        let entries = match std::fs::read_dir(&plugins_dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                registry.error(format!(
+                    "cannot read plugins directory {}: {error}",
+                    plugins_dir.display()
+                ));
+                continue;
+            }
+        };
+        for dir in entries
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.join("plugin.toml").is_file())
-            .collect(),
-        Err(error) => {
-            registry.error(format!(
-                "cannot read plugins directory {}: {error}",
-                plugins_dir.display()
-            ));
-            return registry;
+        {
+            let id = dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Some(replaced) = found.insert(id.clone(), dir) {
+                tracing::info!(plugin = %id, replaced = %replaced.display(), "plugin replaced by a later directory");
+            }
         }
-    };
-    dirs.sort();
-    for dir in dirs {
-        let id = dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let mut status = PluginStatus::new(&id);
-        if let Err(message) = load_plugin(&dir, secrets_dir, &mut registry, &mut status) {
+    }
+    found
+}
+
+/// Load every plugin, start the processes of channel plugins and check each instance's
+/// configuration.
+///
+/// # Arguments
+///
+/// * `paths` - Where the plugins, their settings and the secrets are
+#[must_use]
+pub fn load(paths: &PluginPaths) -> PluginRegistry {
+    let mut registry = PluginRegistry::default();
+    let dirs = plugin_dirs(&mut registry, &paths.dirs);
+    let mut statuses = Vec::with_capacity(dirs.len());
+    // A BTreeMap iterates in key order, so plugins load sorted by id.
+    for (id, dir) in dirs {
+        let mut status = PluginStatus::new(&id, &dir);
+        if let Err(message) = load_plugin(&dir, paths, &mut registry, &mut status) {
             registry.error(format!("plugin {id}: {message}"));
             status.error = Some(message);
         }
@@ -416,7 +480,7 @@ where
 
 fn load_plugin(
     dir: &Path,
-    secrets_dir: &Path,
+    paths: &PluginPaths,
     registry: &mut PluginRegistry,
     status: &mut PluginStatus,
 ) -> Result<(), String> {
@@ -440,7 +504,7 @@ fn load_plugin(
         command::require(program).map_err(|error| format!("needs `{program}`: {error}"))?;
     }
     if manifest.runtime == Runtime::Command {
-        return load_command_plugin(dir, secrets_dir, &manifest, registry, status);
+        return load_command_plugin(dir, paths, &manifest, registry, status);
     }
     if manifest.human_channel.is_none() {
         tracing::info!(plugin = %manifest.id, "plugin skipped: it provides neither a human channel nor command tools");
@@ -457,10 +521,13 @@ fn load_plugin(
         Runtime::Builtin => return Err("no built-in plugin with this id".to_owned()),
         Runtime::Command => return Err("a command plugin cannot be a human channel".to_owned()),
     };
-    let config_path = dir.join("config.toml");
+    let config_path = paths.config_file(dir, &manifest.id);
     if !config_path.is_file() {
-        tracing::info!(plugin = %manifest.id, "no config.toml: no instances");
-        status.note = Some("no instances: copy config.example.toml to config.toml".to_owned());
+        tracing::info!(plugin = %manifest.id, "no settings file: no instances");
+        status.note = Some(format!(
+            "no instances: copy config.example.toml to {}",
+            paths.config_hint(&manifest.id)
+        ));
         return Ok(());
     }
     let config: PluginConfig = read_toml(&config_path)?;
@@ -475,7 +542,7 @@ fn load_plugin(
                 .push(InstanceStatus::new(&name, InstanceState::Error, Some(message)));
             continue;
         }
-        match instance(&name, table, secrets_dir, &process) {
+        match instance(&name, table, &paths.secrets_dir, &process) {
             Ok(None) => {
                 tracing::info!(instance = %name, "instance disabled");
                 status.instances.push(InstanceStatus::new(&name, InstanceState::Off, None));
@@ -508,20 +575,23 @@ fn load_plugin(
 /// Load a command plugin: its tools and guides, all or nothing.
 fn load_command_plugin(
     dir: &Path,
-    secrets_dir: &Path,
+    paths: &PluginPaths,
     manifest: &Manifest,
     registry: &mut PluginRegistry,
     status: &mut PluginStatus,
 ) -> Result<(), String> {
-    let config_path = dir.join("config.toml");
+    let config_path = paths.config_file(dir, &manifest.id);
     if manifest.requires_config && !config_path.is_file() {
-        tracing::info!(plugin = %manifest.id, "not configured: no config.toml");
-        status.note = Some("not configured: copy config.example.toml to config.toml and fill it in".to_owned());
+        tracing::info!(plugin = %manifest.id, "not configured: no settings file");
+        status.note = Some(format!(
+            "not configured: copy config.example.toml to {} and fill it in",
+            paths.config_hint(&manifest.id)
+        ));
         return Ok(());
     }
     let env = if config_path.is_file() {
         let config: PluginConfig = read_toml(&config_path)?;
-        let Value::Object(resolved) = resolve(toml::Value::Table(config.env), secrets_dir, "env")? else {
+        let Value::Object(resolved) = resolve(toml::Value::Table(config.env), &paths.secrets_dir, "env")? else {
             return Err("`env` must be a table".to_owned());
         };
         resolved
@@ -755,6 +825,14 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
 "#;
 
+    fn paths(plugins_dir: &Path, secrets_dir: &Path) -> PluginPaths {
+        PluginPaths {
+            dirs: vec![plugins_dir.to_path_buf()],
+            config_dir: None,
+            secrets_dir: secrets_dir.to_path_buf(),
+        }
+    }
+
     fn plugin_dir(config: &str) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("chat");
@@ -782,7 +860,7 @@ for line in sys.stdin:
         );
 
         // Act
-        let loaded = load(root.path(), &root.path().join("secrets"));
+        let loaded = load(&paths(root.path(), &root.path().join("secrets")));
         let channels = loaded.channels();
         let channel = channels.get("chat_joe").unwrap();
         let delivery = channel.deliver(&json!({ "kind": "question" })).unwrap();
@@ -861,7 +939,7 @@ for line in sys.stdin:
         .unwrap();
 
         // Act
-        let loaded = load(root.path(), root.path());
+        let loaded = load(&paths(root.path(), root.path()));
         let tools = loaded.tools();
         let output = tools[0].run(&json!({}), &clankjob_core::tool::ToolContext::default()).unwrap();
 
@@ -896,14 +974,81 @@ for line in sys.stdin:
         .unwrap();
 
         // Act
-        let without = load(root.path(), root.path());
+        let without = load(&paths(root.path(), root.path()));
         std::fs::write(dir.join("config.toml"), "[env]\nMAIL = \"x\"\n").unwrap();
-        let with = load(root.path(), root.path());
+        let with = load(&paths(root.path(), root.path()));
 
         // Assert
         assert!(without.tools().is_empty());
         assert!(without.statuses()[0].note.as_deref().unwrap().starts_with("not configured"));
         assert_eq!(with.tools().len(), 1);
+    }
+
+    #[test]
+    fn a_later_directory_replaces_a_plugin_and_settings_are_found_apart_from_it() {
+        // Arrange: the same plugin bundled and in the owner's directory, each printing
+        // where it comes from and its setting.
+        let root = tempfile::tempdir().unwrap();
+        let write_plugin = |plugins_dir: &Path, origin: &str| {
+            let dir = plugins_dir.join("echo");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("plugin.toml"),
+                format!(
+                    "id = \"echo\"\nruntime = \"command\"\nrequires_config = true\n\
+                     [[tools]]\nname = \"echo\"\ndescription = \"Echo.\"\n\
+                     command = [\"sh\", \"-c\", \"echo {origin} $WORD\"]\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.join("config.toml"), "[env]\nWORD = \"beside\"\n").unwrap();
+            dir
+        };
+        let bundled = root.path().join("bundled");
+        let own = root.path().join("own");
+        let _ = write_plugin(&bundled, "bundled");
+        let own_echo = write_plugin(&own, "own");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir(&config_dir).unwrap();
+        let mut paths = PluginPaths {
+            dirs: vec![bundled, own],
+            config_dir: Some(config_dir.clone()),
+            secrets_dir: root.path().to_path_buf(),
+        };
+        let echo = |loaded: &PluginRegistry| {
+            loaded.tools()[0]
+                .run(&json!({}), &clankjob_core::tool::ToolContext::default())
+                .unwrap()
+        };
+
+        // Act
+        let beside = load(&paths);
+        std::fs::write(config_dir.join("echo.toml"), "[env]\nWORD = \"apart\"\n").unwrap();
+        let apart = load(&paths);
+        paths.dirs.truncate(1);
+        std::fs::remove_file(own_echo.join("config.toml")).unwrap();
+        let bundled_only = load(&paths);
+        std::fs::remove_file(config_dir.join("echo.toml")).unwrap();
+        std::fs::remove_file(own_echo.join("plugin.toml")).unwrap();
+        std::fs::write(own_echo.join("config.toml"), "[env]\nWORD = \"mounted\"\n").unwrap();
+        paths.dirs.push(root.path().join("own"));
+        let settings_only = load(&paths);
+
+        // Assert
+        let output = |text: &str| clankjob_core::tool::ToolOutput::Json(json!({ "output": text, "truncated": false }));
+        assert_eq!(echo(&beside), output("own beside\n"));
+        assert_eq!(
+            apart.statuses()[0].dir.canonicalize().unwrap(),
+            own_echo.canonicalize().unwrap()
+        );
+        assert_eq!(echo(&apart), output("own apart\n"));
+        assert_eq!(echo(&bundled_only), output("bundled apart\n"));
+        assert_eq!(
+            echo(&settings_only),
+            output("bundled mounted\n"),
+            "a directory with only config.toml configures the bundled plugin"
+        );
+        assert_eq!(apart.statuses().len(), 1);
     }
 
     #[test]
@@ -928,7 +1073,7 @@ for line in sys.stdin:
         )
         .unwrap();
 
-        let loaded = load(root.path(), root.path());
+        let loaded = load(&paths(root.path(), root.path()));
 
         assert!(loaded.channels().is_empty());
         assert!(loaded.errors()[0].contains("must match the directory name"));

@@ -787,11 +787,14 @@ dropping a directory into `/plugins` and reloading, with no rebuild.
 
 ### 9.4 Plugin instances & configuration
 
-`config.toml` in the plugin's directory defines its **instances**. The files are the
-source of truth: instances are not created or edited through the API or the web client.
+A plugin's settings file defines its **instances**: `<id>.toml` in `plugin_config_dir`
+when it exists (a deployment's `config/plugins/`, `/config/plugins` in the image), else
+`<id>/config.toml` in the plugin directories, the last first, else the plugin's own
+`config.toml` (a checkout). The files are the source of truth: instances are not created
+or edited through the API or the web client.
 
 ```toml
-# /plugins/email/config.toml
+# /config/plugins/email.toml
 [instances.home_mail]
 from_address = "joe@example.com"
 requires_approval = ["send_email", "reply"]
@@ -1680,7 +1683,8 @@ the image from a checkout, with the same files as a local `cargo run`:
 ```
 host (the checkout)                  container
   clankjob.toml                →    /config/clankjob.toml   read-only   server settings
-  plugin/<id>/...              →    /plugins/<id>/...       read-only   plugins + their config (§9.3)
+  plugin/<id>/...              →    /plugins/<id>/...       read-only   plugins + their config (§9.3),
+                                                                        replacing the bundled ones
   prompts/... (optional)       →    /prompts/...            read-only   prompt overrides, profiles (§7.4)
   secrets/ (optional)          →    /run/secrets/           read-only   Docker secrets
   data/                        →    /data/                  read-write  clankjob.db, files/, user_prompt.md, cache/
@@ -1690,7 +1694,8 @@ host (the checkout)                  container
 `/data` is the only writable mount and holds all runtime state: the database, the bytes
 of case files, the owner's prompt and the `uv` cache (`UV_CACHE_DIR=/data/cache/uv`, so
 plugin dependencies survive container restarts). The image creates empty `/plugins` and
-`/prompts`, so either can be left unmounted.
+`/prompts`, so either can be left unmounted. A deployment from the published image mounts
+its own layout instead (§18.5).
 
 ### 18.2 Server configuration (built)
 
@@ -1703,6 +1708,8 @@ data_dir = "/data"
 prompts_dir = "/prompts"                    # optional
 secrets_dir = "/run/secrets"                # the default
 plugins_dir = "/plugins"                    # optional; one directory per plugin (§9.3)
+bundled_plugins_dir = "/usr/share/clankjob/plugins"  # optional; loaded first, plugins_dir replaces by id
+plugin_config_dir = "/config/plugins"       # optional; <id>.toml per plugin (§9.4)
 default_human_channels = ["discord_joe"]    # optional; omitted = none (web only)
 workers = 4                                 # activation threads
 shutdown_grace = "30s"
@@ -1732,7 +1739,9 @@ Unknown keys are rejected at startup, so a typo is an error, not a silently igno
 setting. Environment variables override the listen address and the directories, so one
 file serves both a local run and the container, whose image sets them: `CLANKJOB_LISTEN`
 (`0.0.0.0:8080`), `CLANKJOB_DATA_DIR` (`/data`), `CLANKJOB_PLUGINS_DIR` (`/plugins`),
-`CLANKJOB_PROMPTS_DIR` (`/prompts`) and `CLANKJOB_SECRETS_DIR`, and
+`CLANKJOB_BUNDLED_PLUGINS_DIR` (`/usr/share/clankjob/plugins`),
+`CLANKJOB_PLUGIN_CONFIG_DIR` (`/config/plugins`), `CLANKJOB_PROMPTS_DIR` (`/prompts`)
+and `CLANKJOB_SECRETS_DIR`, and
 `CLANKJOB_REQUIRE_TOKEN=false` turns off the API token for testing (§14); the startup log lists the
 ones that took effect. `public_url` and `allowed_origins` must be `http(s)://` URLs. Secrets are
 `{ secret = "name" }` (a file in `secrets_dir`), `{ env = "NAME" }`, or a literal string
@@ -1773,7 +1782,10 @@ conditions.
   LLM call.
 - **Fast recovery after restart (built).** Leases are cleared at startup, so interrupted
   cases resume at once.
-- **Migrations (built)** run at startup, before any thread starts.
+- **Migrations (built)** run at startup, before any thread starts. A database that has a
+  schema is first copied with `VACUUM INTO` to `data/backups/before-schema-<n>-<time>.db`
+  (the newest 3 are kept), so going back a version means restoring that file. A database
+  migrated by a newer server is refused rather than misread.
 - **Health check (built).** `GET /healthz` (§14.7), for Docker's `HEALTHCHECK`.
 - **Backups.** Don't copy the live database file. Use `VACUUM INTO` on a timer, or a
   Litestream sidecar that streams the database to S3-compatible storage. Back up
@@ -1788,25 +1800,36 @@ conditions.
 - **CI** (`.github/workflows/ci.yml`): every push to `main` and every pull request runs
   `cargo fmt --check`, clippy with `-D warnings` and the Rust tests, and for each Python
   plugin its tests, ruff and basedpyright.
-- **Image** (`.github/workflows/docker.yml`): pushes to `main` and `v*` tags build the image
-  natively on amd64 and arm64 runners, push each by digest, and join them into one
-  multi-platform image at `ghcr.io/uintptr/clankjob`: `latest` and `sha-<commit>` from
-  `main`, `1.2.3` and `1.2` from a `v1.2.3` tag. Layers are cached per platform in the
-  GitHub Actions cache.
-- **Bundled plugins.** The image carries the repository's `plugin/` in `/plugins`, without
-  any `config.toml` (excluded by `.dockerignore`). Settings are mounted per plugin
-  (`/plugins/<id>/config.toml`), or a whole directory replaces `/plugins`. Plugins that
-  cannot work unconfigured set `requires_config` and stay unloaded until then.
-- **Deploying without the source** (`deploy/compose.yaml`, `deploy/README.md`): download
-  the compose file and `clankjob.example.toml`, write `.env`, `mkdir data`, and
-  `docker compose up -d`; `docker compose pull` updates.
+- **Image** (`.github/workflows/docker.yml`): only a `v*` tag builds the image, natively
+  on amd64 and arm64 runners; each is pushed by digest and joined into one multi-platform
+  image at `ghcr.io/uintptr/clankjob`: `1.2.3`, `1.2`, `latest` and `sha-<commit>` from a
+  `v1.2.3` tag (no `latest` for a pre-release such as `v1.3.0-rc1`), so `latest` is always
+  the newest release. Pushes to `main` build nothing; a manual run builds a branch as
+  `sha-<commit>` only. Layers are cached per platform in the GitHub Actions cache.
+- **The image is the version.** It carries the repository's plugins in
+  `/usr/share/clankjob/plugins` (without any `config.toml`, excluded by `.dockerignore`),
+  the templates a deployment is made of (`compose.yaml`, `clankjob.example.toml`,
+  `update`) and the setup wizard (`deploy/clankjob_setup.py`), which the entry point runs
+  for `setup` and `update`. A deployment holds only settings, secrets, data and the
+  owner's own plugins, so updating the image updates everything else, and nothing on the
+  host can drift from it. Plugins that cannot work unconfigured set `requires_config` and
+  stay unloaded until their settings exist.
+- **Deploying without the source** (`deploy/README.md`): `deploy/install.sh` pulls the
+  image and runs its `setup` on the directory, which writes `compose.yaml` (the image's
+  own, never edited: changes go in `compose.override.yaml`), `.env` (`CLANKJOB_TAG`,
+  `CLANKJOB_PORT`, `UID`, `GID` and the secrets), `config/clankjob.toml`,
+  `config/plugins/<id>.toml` and an `update` script. `./update` pulls the image, lets it
+  refresh `compose.yaml`, and restarts on it. Both convert a directory set up by the
+  former `deploy.py` or by hand; until then, such a directory keeps working with a new
+  image (its plugin copies replace the bundled ones, and a mounted
+  `/plugins/<id>/config.toml` configures the bundled plugin).
 
 ### 18.6 Running it from a checkout (built)
 
 ```sh
 docker compose up -d --build     # build and start
 docker compose logs -f           # follow the log
-docker compose exec clankjob /plugins/documents/check_config.py   # any plugin's check
+docker compose exec clankjob /plugins/documents/check_config.py   # any plugin's check (the checkout's)
 docker compose down              # stop: waits for running steps (stop_grace_period 60s)
 ```
 

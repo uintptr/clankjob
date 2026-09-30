@@ -761,8 +761,11 @@ fn plugins_summary(state: &AppState) -> Value {
         })
         .collect();
     let conflicts = state.plugins.conflicts();
+    let paths = state.plugins.paths();
     json!({
-        "plugins_dir": state.plugins.dir().map(|dir| dir.display().to_string()),
+        "plugins_dir": paths.dirs.last().map(|dir| dir.display().to_string()),
+        "plugin_dirs": paths.dirs.iter().map(|dir| dir.display().to_string()).collect::<Vec<_>>(),
+        "plugin_config_dir": paths.config_dir.as_ref().map(|dir| dir.display().to_string()),
         "attention": attention || !conflicts.is_empty(),
         "conflicts": conflicts,
         "plugins": plugins,
@@ -933,7 +936,11 @@ mod tests {
                 suggested: vec!["cheap-model".to_owned(), "big-model".to_owned()],
                 provider: None,
             }]);
-            let plugins = Arc::new(PluginManager::new(None, dir.path().to_path_buf(), None, engine.clone()));
+            let paths = clankjob_plugin_host::PluginPaths {
+                secrets_dir: dir.path().to_path_buf(),
+                ..Default::default()
+            };
+            let plugins = Arc::new(PluginManager::new(paths, None, engine.clone()));
             let state = AppState::new(
                 engine,
                 Some(vec![SecretString::from("token".to_owned())]),

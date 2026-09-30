@@ -1,15 +1,16 @@
-# Run clankjob from the published image; nothing to build. See deploy/README.md.
+# Runs clankjob from the published image; nothing to build. See deploy/README.md.
 #
-#   docker compose up -d                        # start (pulls the image the first time)
-#   docker compose pull && docker compose up -d # update
-#   docker compose logs -f                      # follow the log
+# Written by the image's setup and replaced by every update, so never edit it: put
+# changes in compose.override.yaml, which docker compose merges in by itself. Your values
+# come from .env: CLANKJOB_TAG (image tag), CLANKJOB_PORT, UID and GID, and the secrets.
 #
-# Next to this file: clankjob.toml (settings), .env (secrets), data/ (created by you, so
-# it belongs to your user), and a config file per plugin you use.
+#   docker compose up -d            # start
+#   ./update                        # pull the image, refresh this file, restart
+#   docker compose logs -f          # follow the log
 
 services:
   clankjob:
-    image: ghcr.io/uintptr/clankjob:latest
+    image: ghcr.io/uintptr/clankjob:${CLANKJOB_TAG:-latest}
     restart: unless-stopped
     # Resolve names (LLM API, mail servers, Discord…) with Cloudflare's DNS rather than
     # the host's, which some Docker setups cannot reach from containers.
@@ -17,32 +18,29 @@ services:
       - 1.1.1.1
     # Longer than shutdown_grace in clankjob.toml, so running LLM calls can finish.
     stop_grace_period: 60s
-    # Must own ./data (run `mkdir data` before the first start).
+    # The owner of this directory, so the server can write ./data.
     user: "${UID:-1000}:${GID:-1000}"
     ports:
       # A reverse proxy with TLS (Caddy, nginx…) in front serves public_url.
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${CLANKJOB_PORT:-8080}:8080"
     env_file:
       - path: .env
         required: false
     volumes:
-      - ./clankjob.toml:/config/clankjob.toml:ro
+      # clankjob.toml, and plugins/<id>.toml for each plugin you configured.
+      - ./config:/config:ro
       - ./data:/data
-      # Settings of the bundled plugins you use; the file must exist, so keep only the
-      # lines of plugins you configured:
-      # - ./plugins/email.toml:/plugins/email/config.toml:ro
-      # - ./plugins/discord.toml:/plugins/discord/config.toml:ro
-      # - ./plugins/youtube_transcribe.toml:/plugins/youtube_transcribe/config.toml:ro
-      # - ./plugins/shell.toml:/plugins/shell/config.toml:ro
-      # Your own prompt overrides and profiles:
-      # - ./prompts:/prompts:ro
+      # Your own plugins, if any; they replace bundled ones of the same id.
+      - ./plugins:/plugins:ro
+      # Your prompt overrides and profiles.
+      - ./prompts:/prompts:ro
 
   # The agent's shell (plugin/shell): the same image running sandbox/sandboxd.py, with
   # none of the server's secrets, data or settings. It runs whatever the agent asks, as
   # the image's unprivileged user, with internet access; /work keeps its files. No
   # ports: only the server reaches it, on this compose network.
   sandbox:
-    image: ghcr.io/uintptr/clankjob:latest
+    image: ghcr.io/uintptr/clankjob:${CLANKJOB_TAG:-latest}
     restart: unless-stopped
     dns:
       - 1.1.1.1
@@ -65,7 +63,7 @@ services:
   # Discord plugin keeps handling questions. Off unless COMPOSE_PROFILES=discord-intake
   # is in .env, with the DISCORD_INTAKE_* settings below.
   discord-intake:
-    image: ghcr.io/uintptr/clankjob:latest
+    image: ghcr.io/uintptr/clankjob:${CLANKJOB_TAG:-latest}
     profiles: ["discord-intake"]
     restart: unless-stopped
     dns:

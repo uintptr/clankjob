@@ -124,7 +124,9 @@ fn run() -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("creating data directory {}", config.data_dir.display()))?;
     let db = Db::new(config.data_dir.join("clankjob.db"));
-    db.migrate().context("migrating the database")?;
+    if let Some(backup) = db.migrate().context("migrating the database")? {
+        tracing::info!(backup = %backup.display(), "database migrated; the previous one is backed up");
+    }
     // A fresh process owns no work: interrupted activations resume right away (§18.4).
     let cleared = clankjob_storage::queue::clear_leases(&db.connect()?)?;
     tracing::info!(cleared, "leases from the previous run cleared");
@@ -141,8 +143,7 @@ fn run() -> anyhow::Result<()> {
     let engine = Engine::new(db, providers, config.prompts_dir.clone(), files_dir, channels, settings);
     // Every plugin is loaded and checked before the server starts listening.
     let plugins = Arc::new(plugins::PluginManager::new(
-        config.plugins_dir.clone(),
-        config.secrets_dir.clone(),
+        config.plugin_paths(),
         config.default_human_channels.clone(),
         engine.clone(),
     ));

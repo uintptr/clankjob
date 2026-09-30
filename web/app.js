@@ -2051,7 +2051,7 @@ function instanceCard(instance, onTest) {
 
 function pluginsView(view) {
     const reloadButton = h("button", { class: "btn sm", type: "button", onclick: () => reload().catch(report) }, "Reload plugins");
-    const body = pageFrame(view, "Plugins", "Loaded from the plugins directory. Edit a plugin's files and the server reloads it within seconds.", reloadButton);
+    const body = pageFrame(view, "Plugins", "Loaded from the plugin directories. Edit a plugin's files or its settings and the server reloads it within seconds.", reloadButton);
     const content = h("div");
     body.append(content);
     // Re-rendering while a test runs would reset its button, so polling waits for it.
@@ -2059,16 +2059,16 @@ function pluginsView(view) {
 
     function render(summary) {
         updatePluginAlert(summary.attention);
-        if (!summary.plugins_dir) {
+        if (!summary.plugin_dirs.length) {
             content.replaceChildren(emptyCard("No plugins directory", "Set plugins_dir in clankjob.toml (e.g. \"./plugin\") to load plugins such as Discord."));
             return;
         }
         if (!summary.plugins.length) {
-            content.replaceChildren(emptyCard("No plugins found", `Nothing with a plugin.toml in ${summary.plugins_dir}.`));
+            content.replaceChildren(emptyCard("No plugins found", `Nothing with a plugin.toml in ${summary.plugin_dirs.join(", ")}.`));
             return;
         }
         content.replaceChildren(
-            h("p", { class: "muted mono" }, summary.plugins_dir),
+            h("p", { class: "muted mono" }, summary.plugin_dirs.join(" + "), summary.plugin_config_dir ? ` · settings in ${summary.plugin_config_dir}` : ""),
             // replaceChildren would print `false`, so an absent notice is an empty string.
             summary.conflicts.length > 0
                 ? h("div", { class: "notice bad" }, h("div", { class: "grow" }, h("b", {}, "Left out because the name is taken"), h("ul", { class: "issues" }, summary.conflicts.map((text) => h("li", {}, text)))))

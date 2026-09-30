@@ -14,12 +14,13 @@ read an API key, change its own database or get around approvals.
 ## Setup
 
 `compose.yaml` (and `deploy/compose.yaml`) run the `sandbox` service next to the server.
-Turn the plugin on by copying `config.example.toml` to `config.toml`
+Turn the plugin on by copying `config.example.toml` to `config.toml` in a checkout, or to
+`config/plugins/shell.toml` in a deployment (the setup's `--configure shell` does it)
 (`SANDBOX_URL = "http://sandbox:8000"`), then check it from the server's container:
 
 ```sh
 docker compose up -d
-docker compose exec clankjob /plugins/shell/check_config.py
+docker compose exec clankjob /usr/share/clankjob/plugins/shell/check_config.py
 ```
 
 ```

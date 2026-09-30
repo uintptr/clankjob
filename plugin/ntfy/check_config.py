@@ -81,11 +81,23 @@ def live_checks(server: Server) -> list[Check]:
     return checks
 
 
+def default_config() -> Path:
+    """Where the server reads this plugin's settings, the first that exists of: `<id>.toml`
+    in CLANKJOB_PLUGIN_CONFIG_DIR (the image's /config/plugins), `<id>/config.toml` in
+    CLANKJOB_PLUGINS_DIR (a checkout or an older setup mounted there), else config.toml
+    next to this script."""
+    candidates = [Path(os.environ[name].strip()) / relative
+                  for name, relative in (("CLANKJOB_PLUGIN_CONFIG_DIR", f"{HERE.name}.toml"),
+                                         ("CLANKJOB_PLUGINS_DIR", f"{HERE.name}/config.toml"))
+                  if os.environ.get(name, "").strip()]
+    return next((path for path in candidates if path.is_file()), HERE / "config.toml")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config",
                         type=Path,
-                        default=HERE / "config.toml")
+                        default=default_config())
     parser.add_argument("--secrets-dir",
                         type=Path,
                         default=Path("/run/secrets"))

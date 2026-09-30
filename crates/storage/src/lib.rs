@@ -32,6 +32,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0004_contacts.sql"),
 ];
 
+/// Backups taken before migrating that are kept, newest first; older ones are deleted.
+const KEPT_BACKUPS: usize = 3;
+/// File name prefix of those backups, in `backups/` next to the database.
+const BACKUP_PREFIX: &str = "before-schema-";
+
 /// How long a connection waits for a lock held by another connection before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -47,6 +52,20 @@ pub enum StorageError {
     /// A stored value is not valid for its column (unknown enum, bad timestamp, …).
     #[error("corrupt database value: {0}")]
     Corrupt(String),
+    /// The database was migrated by a newer server; this one would misread it.
+    #[error(
+        "the database has schema {found}, newer than this server's {known}: run the newer \
+         version again, or restore the backup taken before it migrated (backups/ next to the database)"
+    )]
+    TooNew {
+        /// The database's schema version.
+        found: u32,
+        /// The newest schema this server knows.
+        known: usize,
+    },
+    /// The backup before migrating could not be written; nothing was migrated.
+    #[error("cannot back up the database before migrating it: {0}")]
+    Backup(#[from] std::io::Error),
 }
 
 /// Shorthand for results of storage functions.
@@ -89,23 +108,73 @@ impl Db {
         Ok(connection)
     }
 
-    /// Apply every migration newer than the database's `user_version`.
+    /// Copy the database into `backups/` next to it (a consistent snapshot, taken with
+    /// `VACUUM INTO`) and delete all but the newest [`KEPT_BACKUPS`].
+    fn backup(&self, connection: &Connection, schema: u32) -> Result<PathBuf> {
+        let dir = self.path.parent().unwrap_or_else(|| Path::new(".")).join("backups");
+        std::fs::create_dir_all(&dir)?;
+        // Down to the nanosecond: VACUUM INTO refuses a file that already exists.
+        let stamp = Utc::now().format("%Y%m%dT%H%M%S%.9fZ");
+        let backup = dir.join(format!("{BACKUP_PREFIX}{schema}-{stamp}.db"));
+        // VACUUM INTO takes a file name, not a bound parameter; quotes are doubled.
+        let name = backup.to_string_lossy().replace('\'', "''");
+        connection.execute_batch(&format!("VACUUM INTO '{name}'"))?;
+        let mut backups: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(BACKUP_PREFIX))
+            })
+            .collect();
+        // Sorted by modification time, newest first; the stamp in the name breaks ties.
+        backups.sort_by_cached_key(|path| {
+            let modified = std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok();
+            std::cmp::Reverse((modified, path.clone()))
+        });
+        for old in backups.iter().skip(KEPT_BACKUPS) {
+            std::fs::remove_file(old)?;
+        }
+        Ok(backup)
+    }
+
+    /// Apply every migration newer than the database's `user_version`. A database that
+    /// already has a schema is first backed up into `backups/` next to it, so going back to
+    /// the previous version means restoring that file.
+    ///
+    /// # Returns
+    ///
+    /// The backup taken, if anything was migrated on an existing database
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError::Sqlite`] if a migration fails; that migration is rolled back.
-    pub fn migrate(&self) -> Result<()> {
+    /// Returns [`StorageError::TooNew`] if a newer server migrated the database,
+    /// [`StorageError::Backup`] if the backup cannot be written (nothing is migrated then),
+    /// and [`StorageError::Sqlite`] if a migration fails; that migration is rolled back.
+    pub fn migrate(&self) -> Result<Option<PathBuf>> {
         let mut connection = self.connect()?;
         let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         // `u32` always fits in `usize` on the 32- and 64-bit targets this runs on.
-        for (index, migration) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+        let applied = current as usize;
+        if applied > MIGRATIONS.len() {
+            return Err(StorageError::TooNew {
+                found: current,
+                known: MIGRATIONS.len(),
+            });
+        }
+        let backup = if 0 < applied && applied < MIGRATIONS.len() {
+            Some(self.backup(&connection, current)?)
+        } else {
+            None
+        };
+        for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
             let transaction = connection.transaction()?;
             transaction.execute_batch(migration)?;
             // PRAGMA does not accept bound parameters, hence the format!.
             transaction.execute_batch(&format!("PRAGMA user_version = {}", index.saturating_add(1)))?;
             transaction.commit()?;
         }
-        Ok(())
+        Ok(backup)
     }
 }
 
@@ -231,6 +300,48 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version as usize, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn an_existing_database_is_backed_up_before_migrating_and_old_backups_are_pruned() {
+        // Arrange: a database one migration behind.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::new(dir.path().join("clankjob.db"));
+        let behind = MIGRATIONS.len().saturating_sub(1);
+        let connection = db.connect().unwrap();
+        for migration in &MIGRATIONS[..behind] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection.execute_batch(&format!("PRAGMA user_version = {behind}")).unwrap();
+
+        // Act
+        let backup = db.migrate().unwrap().unwrap();
+        let schema: u32 = Connection::open(&backup)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let again = db.migrate().unwrap();
+        for _ in 0..KEPT_BACKUPS {
+            let _ = db.backup(&connection, 1).unwrap();
+        }
+
+        // Assert
+        assert_eq!(schema as usize, behind, "the backup is the database as it was");
+        assert!(again.is_none(), "nothing to migrate, nothing backed up");
+        assert_eq!(
+            std::fs::read_dir(backup.parent().unwrap()).unwrap().count(),
+            KEPT_BACKUPS
+        );
+        assert!(!backup.exists(), "the oldest backup was pruned");
+    }
+
+    #[test]
+    fn a_database_from_a_newer_server_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::new(dir.path().join("clankjob.db"));
+        db.connect().unwrap().execute_batch("PRAGMA user_version = 999").unwrap();
+
+        assert!(matches!(db.migrate(), Err(StorageError::TooNew { found: 999, .. })));
     }
 
     #[test]

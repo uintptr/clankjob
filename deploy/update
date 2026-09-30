@@ -1,0 +1,27 @@
+#!/bin/sh
+# Update this clankjob setup (written by the image's setup; replaced by each update):
+# pull the image named in .env (CLANKJOB_TAG), let it refresh compose.yaml and convert
+# anything old, then restart the containers on it. The database is backed up to
+# data/backups/ before the new version migrates it.
+#
+#   ./update                        # the tag in .env (latest unless you changed it)
+#   CLANKJOB_TAG=1.2 ./update       # another tag, e.g. to go back a version
+set -eu
+cd "$(dirname "$0")"
+
+if [ -n "${CLANKJOB_TAG:-}" ]; then
+    # Saved to .env by `update --tag`, so the next plain ./update stays on it.
+    tag_option="--tag=$CLANKJOB_TAG"
+else
+    tag_option=""
+fi
+
+docker compose pull
+# The new image refreshes compose.yaml and the settings layout; it runs as the owner
+# of this directory (UID and GID in .env).
+# shellcheck disable=SC2086
+docker compose run --rm --no-deps -T -v "$PWD:/setup" clankjob update $tag_option
+# compose.yaml may have changed: pull again for services it adds, then start.
+docker compose pull --quiet
+docker compose up -d --remove-orphans
+docker compose ps

@@ -1,8 +1,11 @@
 # Builds the image natively for amd64 and arm64 and publishes it to the GitHub container
 # registry as ghcr.io/<owner>/clankjob (design §18.3):
 #
-#   push to main        → :latest and :sha-<commit>
-#   tag v1.2.3          → :1.2.3, :1.2 and :sha-<commit>
+#   tag v1.2.3          → :1.2.3, :1.2, :latest and :sha-<commit> (no :latest for a
+#                         pre-release such as v1.3.0-rc1)
+#   run by hand         → :sha-<commit> only, to try a branch without releasing it
+#
+# Pushes to main build nothing: `latest` is always the newest release.
 #
 # Each platform is built on its own runner and pushed by digest; the last job joins them
 # into one multi-platform image under the tags.
@@ -10,7 +13,6 @@ name: Docker image
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -85,7 +87,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha

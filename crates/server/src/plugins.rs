@@ -1,5 +1,5 @@
-//! Plugins at runtime: loads `plugins_dir`, hands the channels to the engine, and loads
-//! everything again when the directory changes (design §9.4).
+//! Plugins at runtime: loads the plugin directories, hands the channels to the engine, and
+//! loads everything again when a plugin or its settings change (design §9.4).
 //!
 //! A reload builds a complete new registry (starting and checking every instance) and only
 //! then swaps it in, so channels keep working while it runs. The old plugin processes are
@@ -12,9 +12,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 use clankjob_engine::Engine;
-use clankjob_plugin_host::PluginRegistry;
+use clankjob_plugin_host::{PluginPaths, PluginRegistry};
 
-/// How often the plugins directory is scanned for changes.
+/// How often the plugin directories are scanned for changes.
 const WATCH_INTERVAL: Duration = Duration::from_secs(3);
 /// How long a change must stay put before reloading, so a save in progress isn't loaded.
 const SETTLE: Duration = Duration::from_secs(1);
@@ -24,8 +24,7 @@ type Stamp = (PathBuf, Option<SystemTime>, u64);
 
 /// Owns the current plugin registry.
 pub struct PluginManager {
-    dir: Option<PathBuf>,
-    secrets_dir: PathBuf,
+    paths: PluginPaths,
     default_channels: Option<Vec<String>>,
     engine: Engine,
     current: RwLock<Arc<PluginRegistry>>,
@@ -40,20 +39,13 @@ impl PluginManager {
     ///
     /// # Arguments
     ///
-    /// * `dir` - The plugins directory, if configured
-    /// * `secrets_dir` - Where `{ secret = "name" }` references are read from
+    /// * `paths` - The plugin directories, the settings directory and the secrets
     /// * `default_channels` - `default_human_channels` from the config
     /// * `engine` - Receives the loaded channels
     #[must_use]
-    pub fn new(
-        dir: Option<PathBuf>,
-        secrets_dir: PathBuf,
-        default_channels: Option<Vec<String>>,
-        engine: Engine,
-    ) -> Self {
+    pub fn new(paths: PluginPaths, default_channels: Option<Vec<String>>, engine: Engine) -> Self {
         Self {
-            dir,
-            secrets_dir,
+            paths,
             default_channels,
             engine,
             current: RwLock::new(Arc::new(PluginRegistry::default())),
@@ -63,10 +55,10 @@ impl PluginManager {
         }
     }
 
-    /// The plugins directory, if configured.
+    /// Where plugins and their settings are read from.
     #[must_use]
-    pub fn dir(&self) -> Option<&Path> {
-        self.dir.as_deref()
+    pub fn paths(&self) -> &PluginPaths {
+        &self.paths
     }
 
     /// Tools and guides left out at the last load because their name was taken.
@@ -92,9 +84,11 @@ impl PluginManager {
         if self.stopped.load(Ordering::SeqCst) {
             return self.current();
         }
-        let registry = Arc::new(self.dir.as_deref().map_or_else(PluginRegistry::default, |dir| {
-            clankjob_plugin_host::load(dir, &self.secrets_dir)
-        }));
+        let registry = Arc::new(if self.paths.dirs.is_empty() {
+            PluginRegistry::default()
+        } else {
+            clankjob_plugin_host::load(&self.paths)
+        });
         let channels = registry.channels();
         let names: Vec<String> = channels.keys().cloned().collect();
         // Omitted: the web client only; the owner turns a channel on per case.
@@ -134,33 +128,34 @@ impl PluginManager {
         registry
     }
 
-    /// Reload whenever a file in the plugins directory changes.
+    /// Reload whenever a file in a plugin directory or the settings directory changes.
     ///
     /// # Errors
     ///
     /// Returns an I/O error if the thread cannot be created.
     pub fn watch(self: &Arc<Self>) -> std::io::Result<Option<JoinHandle<()>>> {
-        let Some(dir) = self.dir.clone() else {
+        if self.paths.dirs.is_empty() {
             return Ok(None);
-        };
+        }
         let manager = Arc::clone(self);
         thread::Builder::new()
             .name("plugin-watch".to_owned())
             .spawn(move || {
-                let mut last = fingerprint(&dir);
+                let paths = &manager.paths;
+                let mut last = fingerprint(paths);
                 while !manager.stopped.load(Ordering::SeqCst) {
                     thread::sleep(WATCH_INTERVAL);
-                    let seen = fingerprint(&dir);
+                    let seen = fingerprint(paths);
                     if seen == last {
                         continue;
                     }
                     thread::sleep(SETTLE);
-                    let settled = fingerprint(&dir);
+                    let settled = fingerprint(paths);
                     if settled != seen {
                         // Still being written; look again next time.
                         continue;
                     }
-                    tracing::info!(dir = %dir.display(), "plugins directory changed; reloading");
+                    tracing::info!("plugins or their settings changed; reloading");
                     manager.reload();
                     last = settled;
                 }
@@ -190,9 +185,9 @@ fn watched(path: &Path) -> bool {
     !(name.starts_with('.') || name == "__pycache__" || name.ends_with(".pyc") || name.ends_with(".log"))
 }
 
-/// What the plugins directory looks like: every plugin directory and the files directly
-/// inside it, with their modification times and sizes.
-fn fingerprint(dir: &Path) -> Vec<Stamp> {
+/// What the plugins look like: every plugin directory and the files directly inside it,
+/// and every file of the settings directory, with their modification times and sizes.
+fn fingerprint(paths: &PluginPaths) -> Vec<Stamp> {
     let stamp = |path: PathBuf| -> Stamp {
         let metadata = std::fs::metadata(&path).ok();
         let modified = metadata.as_ref().and_then(|metadata| metadata.modified().ok());
@@ -209,11 +204,10 @@ fn fingerprint(dir: &Path) -> Vec<Stamp> {
             })
             .unwrap_or_default()
     };
-    let mut stamps = Vec::new();
-    for plugin in entries(dir).into_iter().filter(|path| path.is_dir()) {
-        for file in entries(&plugin).into_iter().filter(|path| path.is_file()) {
-            stamps.push(stamp(file));
-        }
+    let files = |dir: &Path| entries(dir).into_iter().filter(|path| path.is_file()).map(stamp);
+    let mut stamps: Vec<Stamp> = paths.config_dir.as_deref().map(|dir| files(dir).collect()).unwrap_or_default();
+    for plugin in paths.dirs.iter().flat_map(|dir| entries(dir)).filter(|path| path.is_dir()) {
+        stamps.extend(files(&plugin));
         // By name only: a directory's own time changes when a cache appears inside it.
         stamps.push((plugin, None, 0));
     }
@@ -229,21 +223,31 @@ mod tests {
     fn fingerprint_sees_config_changes_but_not_caches_or_logs() {
         // Arrange
         let root = tempfile::tempdir().unwrap();
-        let plugin = root.path().join("chat");
-        std::fs::create_dir(&plugin).unwrap();
+        let plugin = root.path().join("plugins/chat");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::create_dir(&config_dir).unwrap();
         std::fs::write(plugin.join("config.toml"), "a = 1\n").unwrap();
-        let before = fingerprint(root.path());
+        let paths = PluginPaths {
+            dirs: vec![root.path().join("plugins")],
+            config_dir: Some(config_dir.clone()),
+            secrets_dir: PathBuf::new(),
+        };
+        let before = fingerprint(&paths);
 
         // Act
         std::fs::create_dir(plugin.join("__pycache__")).unwrap();
         std::fs::write(plugin.join("calls.log"), "noise").unwrap();
-        let after_noise = fingerprint(root.path());
+        let after_noise = fingerprint(&paths);
         std::fs::write(plugin.join("config.toml"), "a = 22\n").unwrap();
-        let after_edit = fingerprint(root.path());
+        let after_edit = fingerprint(&paths);
+        std::fs::write(config_dir.join("chat.toml"), "a = 3\n").unwrap();
+        let after_settings = fingerprint(&paths);
 
         // Assert
         assert_eq!(before.len(), 2);
         assert_eq!(after_noise, before);
         assert_ne!(after_edit, before);
+        assert_ne!(after_settings, after_edit);
     }
 }

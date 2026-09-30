@@ -1,144 +1,134 @@
 # Deploying clankjob with Docker Compose
 
 The image `ghcr.io/uintptr/clankjob` is built and published by GitHub Actions for amd64
-and arm64 (`.github/workflows/docker.yml`): `latest` follows `main`, and `v1.2.3` tags
-publish `1.2.3` and `1.2`. It contains the server, the web UI, the plugins of this
-repository (without settings), Python and `uv` for plugins, and the programs behind the
-document tools (ExifTool, Poppler, Tesseract OCR, pandoc, FFmpeg). On the server you only
-need Docker with Compose; nothing is built there.
+and arm64 (`.github/workflows/docker.yml`) for each release: a `v1.2.3` tag publishes
+`1.2.3`, `1.2` and `latest`, so `latest` is always the newest release. It contains the server, the web UI, every plugin of
+this repository, Python and `uv` for plugins, the programs behind the document tools
+(ExifTool, Poppler, Tesseract OCR, pandoc, FFmpeg), and the setup wizard. On the server
+you only need Docker with Compose: nothing is built or installed there.
 
-## Quick setup with deploy.py
+**The image is the version.** Your directory holds only your settings, secrets and data;
+the plugins, the templates and the wizard come with the image. Updating the image updates
+everything else, so nothing on the host drifts from it.
 
-`deploy.py` (Python 3.11+, standard library only) does the whole setup: it downloads the
-plugins and templates, asks for your settings and secrets, and writes everything Docker
-Compose needs.
+## Install
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/uintptr/clankjob/main/deploy/deploy.py
-python3 deploy.py ~/clankjob
+curl -fsSL https://raw.githubusercontent.com/uintptr/clankjob/main/deploy/install.sh | sh -s -- ~/clankjob
 ```
 
-It asks for your public URL, LLM endpoint, model and API key, generates the token you sign
-in with, and offers to configure each plugin (email, Discord, …), walking through its
-example settings. Secrets are typed hidden and only written to `.env` (mode 600). It
-creates:
+Or download it and read it first: `curl -fsSLO …/install.sh && sh install.sh ~/clankjob`.
+The directory defaults to `./clankjob`; `.` is the current one. It pulls the image and runs its `setup` on the directory. That asks for your public URL,
+LLM endpoint, model and API key, generates the token you sign in with, and offers to
+configure each plugin (email, Discord, …), walking through its example settings. Secrets
+are typed hidden and only written to `.env` (mode 600). Then it offers to start the
+containers. It creates:
 
 ```
 ~/clankjob/
-  compose.yaml      the published image, with ./plugins and ./prompts mounted
-  clankjob.toml     server settings
-  .env              secrets
-  plugins/<id>/     every plugin; config.toml for the ones you configured
-  prompts/          your prompt overrides and profiles
-  data/             database and case files
+  compose.yaml              the image's own, replaced by every update: never edit it
+  compose.override.yaml     your changes to it, if you need any (you create it)
+  update                    updates the setup, see below
+  .env                      CLANKJOB_TAG, CLANKJOB_PORT, UID, GID and the secrets
+  config/clankjob.toml      server settings
+  config/plugins/<id>.toml  settings of each plugin you configured
+  plugins/                  your own plugins, if any (they replace bundled ones by id)
+  prompts/                  your prompt overrides and profiles
+  data/                     database, case files, database backups
 ```
 
-Run it again at any time to update the plugins and `compose.yaml`, or configure a plugin
-you skipped (`--configure email`); it never overwrites a setting or secret you already
-have. `compose.yaml` is regenerated from the current template with your port and image
-tag; if that changes it, the previous file is saved as `compose.yaml.bak` and the changed
-lines are shown (edits of your own must be carried over by hand, or use
-`--keep-compose`). Run
-from inside a setup, it updates that setup (`cd ~/clankjob && python3 deploy.py`); from
-anywhere else, give the directory, or it creates a new one in `./clankjob`. Other
-options: `--ref v1.2.3` (plugins of a release), `--image-tag 1.2`, `--port 8081`,
-`--source ~/src/clankjob` (a local checkout), `--yes` (no questions).
+Options after the directory go to `setup`: `--configure email` (configure a plugin,
+repeatable), `--port 8081`, `--yes` (no questions); piped, they follow the directory
+(`| sh -s -- ~/clankjob --port 8081`). `CLANKJOB_TAG=1.2` before `sh` installs another tag. The web UI is then on `http://127.0.0.1:8080` (or your port); sign
+in with `CLANKJOB_TOKEN` from `.env`.
 
-At the end it offers to pull the image and start the containers (`--start` does it
-without asking): `docker compose pull`, `docker compose up -d`, and, on an existing setup
-whose plugins changed, `docker compose restart clankjob`, since the server reads its
-plugins at startup and `up -d` only recreates a container for a new image or setting. By
-hand:
+To configure a plugin later, run `setup` again from the directory; it asks only for what
+is missing and never overwrites a setting or secret you have:
 
 ```sh
-cd ~/clankjob && docker compose pull && docker compose up -d
+cd ~/clankjob
+docker compose run --rm --no-deps -v "$PWD:/setup" clankjob setup --configure email
 ```
 
-The rest of this page does the same by hand.
-
-## First start
+Or write `config/plugins/<id>.toml` yourself from the plugin's `config.example.toml`. The
+server picks it up within seconds. Every plugin has a check against the real services;
+the web UI's **Plugins** page shows the same status:
 
 ```sh
-mkdir clankjob && cd clankjob
-curl -fsSLO https://raw.githubusercontent.com/uintptr/clankjob/main/deploy/compose.yaml
-curl -fsSL -o clankjob.toml https://raw.githubusercontent.com/uintptr/clankjob/main/clankjob.example.toml
-mkdir data                        # before the first start, so it belongs to your user
+docker compose exec clankjob /usr/share/clankjob/plugins/email/check_config.py
 ```
 
-1. **Settings.** Edit `clankjob.toml`: your LLM and `public_url`. Leave `listen` and the
-   directories as they are: the image sets its own (`0.0.0.0:8080`, `/data`, `/plugins`,
-   `/prompts`).
-
-2. **Secrets.** Put the values of the `{ env = … }` references in `.env`, next to
-   `compose.yaml`, and keep it private (`chmod 600 .env`):
-
-   ```sh
-   CLANKJOB_TOKEN=a-long-random-token
-   OPENROUTER_API_KEY=sk-or-...
-   ```
-
-3. **Start.**
-
-   ```sh
-   docker compose up -d
-   docker compose ps               # "healthy" after a few seconds
-   ```
-
-   The web UI is on `http://127.0.0.1:8080`; sign in with `CLANKJOB_TOKEN`.
-
-4. **Public access.** Put a reverse proxy with TLS in front, e.g. Caddy:
-
-   ```
-   clank.example.com {
-       reverse_proxy 127.0.0.1:8080
-   }
-   ```
-
-   and set `public_url = "https://clank.example.com"` in `clankjob.toml`. No other port
-   is needed: every integration (LLM, email, Discord, YouTube) is an outbound connection.
-
-## Plugins
-
-All plugins of the repository are in the image. The document tools and YouTube
-transcripts work as they are; email and Discord stay inactive until you give them a
-`config.toml`:
+## Update
 
 ```sh
-mkdir -p plugins
-curl -fsSL -o plugins/email.toml https://raw.githubusercontent.com/uintptr/clankjob/main/plugin/email/config.example.toml
-# edit it, add its secret (EMAIL_PASSWORD=…) to .env, then enable its line in compose.yaml:
-#   - ./plugins/email.toml:/plugins/email/config.toml:ro
-docker compose up -d
-docker compose exec clankjob /plugins/email/check_config.py
+cd ~/clankjob && ./update
 ```
 
-Every plugin has a `check_config.py` that checks it against the real services; the
-web UI's **Plugins** page shows the same status. To use your own plugins instead of the
-bundled ones, mount a whole directory on `/plugins` (`- ./plugins:/plugins:ro`, one
-sub-directory per plugin, like `plugin/` in the repository).
+It pulls the image named in `.env`, lets the new image refresh `compose.yaml` (and
+convert anything old, see below), then restarts the containers on it. Before the new
+version migrates the database, the server copies it to
+`data/backups/before-schema-<n>-<time>.db` (the newest 3 are kept).
 
-## Updating
+- **Stay on a version:** set `CLANKJOB_TAG=1.2` (or `1.2.3`) in `.env`, or run
+  `CLANKJOB_TAG=1.2 ./update` once (it saves the tag).
+- **Go back a version:** `CLANKJOB_TAG=<previous> ./update`. If the newer version had
+  migrated the database, the older one refuses it: stop the containers
+  (`docker compose down`), copy the latest `data/backups/before-schema-*.db` over
+  `data/clankjob.db` (and delete `data/clankjob.db-wal` and `data/clankjob.db-shm`), then
+  `docker compose up -d`.
 
-From inside the setup, with the latest `deploy.py` (it updates the plugins and
-`compose.yaml` too):
+## Changing compose.yaml
 
-```sh
-python3 deploy.py --yes --start
+Never edit `compose.yaml`: updates replace it. Docker Compose merges
+`compose.override.yaml` from the same directory by itself, so put changes there, e.g.
+Docker secrets and a different DNS server:
+
+```yaml
+services:
+  clankjob:
+    dns: !reset [192.168.1.1]
+    volumes:
+      - ./secrets:/run/secrets:ro
 ```
 
-Or only the image: `docker compose pull && docker compose up -d`.
+## Setups from before
 
-Database migrations run at startup. To stay on a version, replace `latest` in
-`compose.yaml` with a version tag such as `1.2`.
+A directory set up by the former `deploy.py` (copies of the plugins in `plugins/`, their
+settings inside) or by hand (`clankjob.toml` next to `compose.yaml`, `plugins/<id>.toml`
+mounted per plugin) keeps working with a new image. To bring it to this layout, run the
+installer on it once, from inside it (stop it first with `docker compose down`):
+`curl -fsSL …/install.sh | sh -s -- .`. It moves the settings to `config/`, the
+plugin copies to `plugins.old/` (delete it once all works), and the old compose file's
+port and image tag to `.env`, keeping the file as `compose.yaml.old`: carry any changes
+of your own over to `compose.override.yaml`. Then `./update` as above.
+
+## Public access
+
+Put a reverse proxy with TLS in front, e.g. Caddy:
+
+```
+clank.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+and set `public_url = "https://clank.example.com"` in `config/clankjob.toml`. No other
+port is needed: every integration (LLM, email, Discord, YouTube) is an outbound
+connection.
 
 ## Good to know
 
 - **Data.** `data/` holds everything that changes: the database, case files, your prompt
-  (`user_prompt.md`) and plugin caches. Back it up while the server is stopped, or with
-  `VACUUM INTO` (design §18.4). Never run two servers on the same `data/`.
-- **Another user.** The container runs as `1000:1000` by default. If `data/` belongs to
-  another user, start with `UID=$(id -u) GID=$(id -g) docker compose up -d`.
-- **Docker secrets.** Instead of `.env`, mount a directory on `/run/secrets` and use
-  `{ secret = "name" }` references.
+  (`user_prompt.md`), plugin caches and database backups. Back it up while the server is
+  stopped, or with `VACUUM INTO` (design §18.4). Never run two servers on the same
+  `data/`.
+- **Ownership.** The containers run as `UID:GID` from `.env`, the user who ran the setup,
+  so they can write `data/`.
+- **Docker secrets.** Instead of `.env`, mount a directory on `/run/secrets` (in
+  `compose.override.yaml`, above) and use `{ secret = "name" }` references.
+- **Your own plugins.** A directory in `plugins/` with a `plugin.toml` is loaded after the
+  bundled ones, and replaces a bundled plugin with the same id.
 - **Stopping** waits up to 60 seconds for running steps; anything cut off resumes at the
   next start.
+- **Without the installer.** Run the image's setup yourself:
+  `docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/setup" ghcr.io/uintptr/clankjob setup`.

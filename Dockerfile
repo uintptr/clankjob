@@ -4,8 +4,10 @@
 #   docker build -t clankjob .
 #
 # The web UI is compiled into the binary, and the plugins of this repository are bundled
-# in /plugins without any configuration. Settings, secrets, prompts and data are mounted:
-# /config/clankjob.toml, /plugins/<id>/config.toml, /prompts (read-only), /data.
+# in /usr/share/clankjob/plugins without any settings, with the templates the setup
+# wizard writes (`setup`, `update`: deploy/clankjob_setup.py). Settings, secrets, prompts, the
+# owner's own plugins and data are mounted: /config (clankjob.toml, plugins/<id>.toml),
+# /prompts and /plugins (read-only), /data.
 
 # ---- build ---------------------------------------------------------------------------
 FROM rust:1-slim-bookworm AS build
@@ -94,19 +96,27 @@ COPY --from=build /usr/local/bin/clankjob /usr/local/bin/clankjob
 # `user:` in compose.yaml (default 1000:1000).
 RUN groupadd --gid 1000 clankjob \
     && useradd --uid 1000 --gid 1000 --home-dir /home/clankjob --create-home --shell /usr/sbin/nologin clankjob \
-    && mkdir -p /config /plugins /prompts /data /work /state \
+    && mkdir -p /config/plugins /plugins /prompts /data /work /state \
     && chown clankjob:clankjob /data /work /state
+
+# The setup wizard and what it writes into a setup directory.
+COPY deploy/clankjob_setup.py /usr/local/lib/clankjob/clankjob_setup.py
+COPY --chmod=755 deploy/entrypoint.sh /usr/local/bin/clankjob-entrypoint
+COPY deploy/compose.yaml clankjob.example.toml /usr/share/clankjob/
+COPY --chmod=755 deploy/update /usr/share/clankjob/update
 
 # Container paths override the ones in clankjob.toml, so the same file works for a local
 # `cargo run` and here (design §18.2).
 # The bundled plugins, last because they change most often. .dockerignore leaves out
-# their config.toml files: settings are mounted per plugin, or /plugins as a whole.
-COPY plugin/ /plugins/
+# their config.toml files: settings live in /config/plugins/<id>.toml.
+COPY plugin/ /usr/share/clankjob/plugins/
 
 ENV CLANKJOB_CONFIG=/config/clankjob.toml \
     CLANKJOB_LISTEN=0.0.0.0:8080 \
     CLANKJOB_DATA_DIR=/data \
+    CLANKJOB_BUNDLED_PLUGINS_DIR=/usr/share/clankjob/plugins \
     CLANKJOB_PLUGINS_DIR=/plugins \
+    CLANKJOB_PLUGIN_CONFIG_DIR=/config/plugins \
     CLANKJOB_PROMPTS_DIR=/prompts \
     UV_CACHE_DIR=/data/cache/uv \
     PYTHONDONTWRITEBYTECODE=1
@@ -119,4 +129,4 @@ VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4)"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/clankjob"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/clankjob-entrypoint"]

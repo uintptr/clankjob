@@ -93,7 +93,7 @@ clankjob is young. Everything below is built and tested:
 | Contacts: trusted recipients skip email approval (per-case setting)          | Available |
 | Discord: get asked, answer from chat, get notified; start a case by @mention | Available |
 | Plugins: Python processes, and command plugins (any CLI script as a tool)    | Available |
-| Published Docker image (amd64, arm64) and `deploy.py` for servers            | Available |
+| Published Docker image (amd64, arm64), one-command install and update       | Available |
 
 The bundled plugins are listed [below](#plugins). The full design, including everything
 planned, is in [docs/design.md](docs/design.md).
@@ -102,32 +102,32 @@ planned, is in [docs/design.md](docs/design.md).
 
 ### On a server, with Docker (recommended)
 
-You need Docker with Compose, Python 3.11+ and an OpenAI-compatible endpoint (OpenRouter,
-OpenAI, or your own Ollama). Nothing is built on the server: the image
-`ghcr.io/uintptr/clankjob` is published by GitHub Actions for amd64 and arm64.
+You need Docker with Compose and an OpenAI-compatible endpoint (OpenRouter, OpenAI, or
+your own Ollama). Nothing is built or installed on the server: the image
+`ghcr.io/uintptr/clankjob` is published by GitHub Actions for amd64 and arm64, and it
+carries the plugins and the setup wizard.
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/uintptr/clankjob/main/deploy/deploy.py
-python3 deploy.py ~/clankjob
+curl -fsSL https://raw.githubusercontent.com/uintptr/clankjob/main/deploy/install.sh | sh -s -- ~/clankjob
 ```
 
-[`deploy.py`](deploy/deploy.py) downloads the plugins, asks for your public URL, LLM,
-model and API key, generates the token you sign in with, and offers to configure each
-plugin (email, Discord, web search, …). Secrets are typed hidden and only written to
-`.env`. At the end it offers to pull the image and start everything; then open
-<http://127.0.0.1:8080> and sign in with `CLANKJOB_TOKEN` from `.env`.
+The image's setup asks for your public URL, LLM, model and API key, generates the token
+you sign in with, and offers to configure each plugin (email, Discord, web search, …).
+Secrets are typed hidden and only written to `.env`. At the end it offers to start
+everything; then open <http://127.0.0.1:8080> and sign in with `CLANKJOB_TOKEN` from
+`.env`.
 
-To update later, from inside the setup:
+To update later:
 
 ```sh
-cd ~/clankjob && python3 deploy.py --yes --start
+cd ~/clankjob && ./update
 ```
 
-It refreshes the plugins and `compose.yaml`, pulls the latest image and restarts what
-changed, and never overwrites a setting or secret you already have. Configure a plugin
-you skipped with `python3 deploy.py --configure finance`. Put a reverse proxy with TLS in
-front for public access; [deploy/README.md](deploy/README.md) covers that, updates,
-backups and the same setup by hand.
+It pulls the image, refreshes `compose.yaml` from it and restarts; the database is backed
+up before a new version migrates it. Your directory holds only settings, secrets and data,
+so an update never touches them. Put a reverse proxy with TLS in front for public access;
+[deploy/README.md](deploy/README.md) covers that, configuring plugins later, pinning or
+going back a version, and converting a setup made with the former `deploy.py`.
 
 ### From source
 
@@ -294,7 +294,7 @@ plugin/
 sandbox/        the sandbox's exec service (sandboxd.py), for plugin/shell
 intake/
   discord/      optional service: @mention the bot on Discord to start a case (REST API only)
-deploy/         deploy.py and the compose.yaml for servers running the published image
+deploy/         install.sh, the setup wizard and compose.yaml for servers running the published image
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/
   design.md     the full design

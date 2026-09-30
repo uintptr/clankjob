@@ -125,9 +125,21 @@ def checks(ticker: str, env: dict[str, str]) -> list[Check]:
     return found
 
 
+def default_config() -> Path:
+    """Where the server reads this plugin's settings, the first that exists of: `<id>.toml`
+    in CLANKJOB_PLUGIN_CONFIG_DIR (the image's /config/plugins), `<id>/config.toml` in
+    CLANKJOB_PLUGINS_DIR (a checkout or an older setup mounted there), else config.toml
+    next to this script."""
+    candidates = [Path(os.environ[name].strip()) / relative
+                  for name, relative in (("CLANKJOB_PLUGIN_CONFIG_DIR", f"{HERE.name}.toml"),
+                                         ("CLANKJOB_PLUGINS_DIR", f"{HERE.name}/config.toml"))
+                  if os.environ.get(name, "").strip()]
+    return next((path for path in candidates if path.is_file()), HERE / "config.toml")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", type=Path, default=HERE / "config.toml")
+    parser.add_argument("--config", type=Path, default=default_config())
     parser.add_argument("--secrets-dir", type=Path, default=Path("/run/secrets"))
     parser.add_argument("--ticker", default=DEFAULT_TICKER, help="US-listed ticker to test with")
     args = parser.parse_args()

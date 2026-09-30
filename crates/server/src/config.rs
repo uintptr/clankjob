@@ -197,9 +197,17 @@ pub struct Config {
     /// Directory holding Docker secrets.
     #[serde(default = "default_secrets_dir")]
     pub secrets_dir: PathBuf,
-    /// Directory with one sub-directory per plugin (design §9.3).
+    /// Directory with one sub-directory per plugin (design §9.3): the owner's own, which
+    /// replace bundled plugins of the same id.
     #[serde(default)]
     pub plugins_dir: Option<PathBuf>,
+    /// Plugins that come with the server, loaded before `plugins_dir` (the image's own).
+    #[serde(default)]
+    pub bundled_plugins_dir: Option<PathBuf>,
+    /// Plugin settings as `<id>.toml`, read before a plugin's own `config.toml`, so the
+    /// plugins' code and their settings live apart.
+    #[serde(default)]
+    pub plugin_config_dir: Option<PathBuf>,
     /// Channels questions and notifications go to for cases that don't choose; omitted
     /// means none (the web client only), and the owner turns one on per case.
     #[serde(default)]
@@ -309,6 +317,8 @@ impl Config {
     /// | `CLANKJOB_LISTEN`      | `listen`      |
     /// | `CLANKJOB_DATA_DIR`    | `data_dir`    |
     /// | `CLANKJOB_PLUGINS_DIR` | `plugins_dir` |
+    /// | `CLANKJOB_BUNDLED_PLUGINS_DIR` | `bundled_plugins_dir` |
+    /// | `CLANKJOB_PLUGIN_CONFIG_DIR` | `plugin_config_dir` |
     /// | `CLANKJOB_PROMPTS_DIR` | `prompts_dir` |
     /// | `CLANKJOB_SECRETS_DIR` | `secrets_dir` |
     /// | `CLANKJOB_REQUIRE_TOKEN` | `api.require_token` (`false`/`0`/`no` or `true`/`1`/`yes`) |
@@ -342,6 +352,14 @@ impl Config {
             self.plugins_dir = Some(PathBuf::from(dir));
             applied.push("CLANKJOB_PLUGINS_DIR");
         }
+        if let Some(dir) = get("CLANKJOB_BUNDLED_PLUGINS_DIR") {
+            self.bundled_plugins_dir = Some(PathBuf::from(dir));
+            applied.push("CLANKJOB_BUNDLED_PLUGINS_DIR");
+        }
+        if let Some(dir) = get("CLANKJOB_PLUGIN_CONFIG_DIR") {
+            self.plugin_config_dir = Some(PathBuf::from(dir));
+            applied.push("CLANKJOB_PLUGIN_CONFIG_DIR");
+        }
         if let Some(dir) = get("CLANKJOB_PROMPTS_DIR") {
             self.prompts_dir = Some(PathBuf::from(dir));
             applied.push("CLANKJOB_PROMPTS_DIR");
@@ -360,6 +378,17 @@ impl Config {
             applied.push("CLANKJOB_REQUIRE_TOKEN");
         }
         applied
+    }
+
+    /// Where the plugin host finds plugins, their settings and secrets: the bundled
+    /// plugins first, so the owner's own replace them.
+    #[must_use]
+    pub fn plugin_paths(&self) -> clankjob_plugin_host::PluginPaths {
+        clankjob_plugin_host::PluginPaths {
+            dirs: self.bundled_plugins_dir.iter().chain(&self.plugins_dir).cloned().collect(),
+            config_dir: self.plugin_config_dir.clone(),
+            secrets_dir: self.secrets_dir.clone(),
+        }
     }
 
     /// Read and parse a configuration file.
@@ -406,6 +435,8 @@ mod tests {
             ("CLANKJOB_LISTEN", "0.0.0.0:8080"),
             ("CLANKJOB_DATA_DIR", "/data"),
             ("CLANKJOB_PLUGINS_DIR", "/plugins"),
+            ("CLANKJOB_BUNDLED_PLUGINS_DIR", "/usr/share/clankjob/plugins"),
+            ("CLANKJOB_PLUGIN_CONFIG_DIR", "/config/plugins"),
             ("CLANKJOB_PROMPTS_DIR", " "),
         ]);
 
@@ -415,12 +446,25 @@ mod tests {
         // Assert
         assert_eq!(
             applied,
-            ["CLANKJOB_LISTEN", "CLANKJOB_DATA_DIR", "CLANKJOB_PLUGINS_DIR"]
+            [
+                "CLANKJOB_LISTEN",
+                "CLANKJOB_DATA_DIR",
+                "CLANKJOB_PLUGINS_DIR",
+                "CLANKJOB_BUNDLED_PLUGINS_DIR",
+                "CLANKJOB_PLUGIN_CONFIG_DIR"
+            ]
         );
         assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.data_dir, PathBuf::from("/data"));
         assert_eq!(config.plugins_dir, Some(PathBuf::from("/plugins")));
         assert_eq!(config.prompts_dir, None, "an empty variable changes nothing");
+        let paths = config.plugin_paths();
+        assert_eq!(
+            paths.dirs,
+            [PathBuf::from("/usr/share/clankjob/plugins"), PathBuf::from("/plugins")],
+            "bundled first, so the owner's plugins replace them"
+        );
+        assert_eq!(paths.config_dir, Some(PathBuf::from("/config/plugins")));
     }
 
     #[test]

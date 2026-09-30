@@ -24,7 +24,7 @@ when the condition is met.
    queries a day are free.
 3. Copy `config.example.toml` to `config.toml` and set `GOOGLE_CSE_ID`, the default
    country (`GOOGLE_CSE_GL`) and, if you like, languages. The key goes in `.env` as
-   `GOOGLE_CSE_API_KEY` (`deploy.py --configure web` asks for all of it).
+   `GOOGLE_CSE_API_KEY` (the setup's `--configure web` asks for all of it).
 
 Google has announced that the Custom Search JSON API is closed to new customers and will
 be retired for existing ones; the check below tells whether your key still works.

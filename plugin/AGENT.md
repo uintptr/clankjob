@@ -42,12 +42,15 @@ Current checks:
   the plugin itself needs dependencies: the check is what tells the user those are
   missing. Call the plugin's own script to exercise them (as `youtube_transcribe` runs
   `scripts/yt.py`).
-- **Configuration exactly as the server reads it.** Read `config.toml` next to the script
-  and resolve values the same way: a literal string, `{ env = "NAME" }` from the
+- **Configuration exactly as the server reads it.** Read the settings file the server
+  reads, the first that exists of: `<id>.toml` in `CLANKJOB_PLUGIN_CONFIG_DIR` (the image
+  sets it to `/config/plugins`), `<id>/config.toml` in `CLANKJOB_PLUGINS_DIR`, else
+  `config.toml` next to the script (every check has the same `default_config()`), and
+  resolve values the same way: a literal string, `{ env = "NAME" }` from the
   environment, or `{ secret = "name" }` from the secrets directory. Pass the plugin's
   commands the same environment the server does (`PATH`, `HOME`, `TZ`, `LANG`, `LC_ALL`
   plus the plugin's `[env]`), so a check that passes here passes in the server.
-- **Flags.** `--config PATH` (default: `config.toml` next to the script) and
+- **Flags.** `--config PATH` (default: `default_config()` above) and
   `--secrets-dir DIR` (default `/run/secrets`); `--instance NAME` for plugins with
   instances. Anything else is specific to the plugin (e.g. `--video` for the video used).
 - **Read-only by default.** Log in, list, look up, never change anything: no message
@@ -123,7 +126,8 @@ belongs in that plugin's README.
 plugin/<id>/
   plugin.toml            manifest (id = directory name, runtime, tools, conditions, guides)
   config.example.toml    template, committed; documents every setting
-  config.toml            the user's settings, git-ignored (plugin/*/config.toml)
+  config.toml            the user's settings in a checkout, git-ignored; a deployment keeps
+                         them apart, in config/plugins/<id>.toml
   check_config.py        see above
   README.md              what it does, setup, check_config.py, tests
   <code>, test_<code>.py

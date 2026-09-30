@@ -8,7 +8,7 @@ whether it can see anything of the server (secrets in its environment, /data, /r
 the server's processes), and whether it reaches the internet.
 
     ./check_config.py
-    docker compose exec clankjob /plugins/shell/check_config.py
+    docker compose exec clankjob /usr/share/clankjob/plugins/shell/check_config.py
 """
 
 import argparse
@@ -104,9 +104,21 @@ def live_checks(url: str) -> list[Check]:
     return checks
 
 
+def default_config() -> Path:
+    """Where the server reads this plugin's settings, the first that exists of: `<id>.toml`
+    in CLANKJOB_PLUGIN_CONFIG_DIR (the image's /config/plugins), `<id>/config.toml` in
+    CLANKJOB_PLUGINS_DIR (a checkout or an older setup mounted there), else config.toml
+    next to this script."""
+    candidates = [Path(os.environ[name].strip()) / relative
+                  for name, relative in (("CLANKJOB_PLUGIN_CONFIG_DIR", f"{HERE.name}.toml"),
+                                         ("CLANKJOB_PLUGINS_DIR", f"{HERE.name}/config.toml"))
+                  if os.environ.get(name, "").strip()]
+    return next((path for path in candidates if path.is_file()), HERE / "config.toml")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", type=Path, default=HERE / "config.toml")
+    parser.add_argument("--config", type=Path, default=default_config())
     parser.add_argument("--secrets-dir", type=Path, default=Path("/run/secrets"))
     args = parser.parse_args()
     try:
