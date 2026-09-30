@@ -40,6 +40,16 @@ class ScriptedAsker(Asker):
         return default if found is None else found == "y"
 
 
+class AskerTests(unittest.TestCase):
+
+    def test_backspaces_in_a_hidden_answer_delete_what_was_typed(self) -> None:
+        self.assertEqual("secret", deploy.erase_backspaces("sex\bcret"))
+        self.assertEqual("secret", deploy.erase_backspaces("\x7fsecrex\x7ft"))
+        self.assertEqual("", deploy.erase_backspaces("ab\b\b\b"))
+        with mock.patch("getpass.getpass", return_value="tk_1x\b2 "):
+            self.assertEqual("tk_12", Asker().secret("Token"))
+
+
 class FillTemplateTests(unittest.TestCase):
 
     def test_discord_example_is_filled_and_its_token_goes_to_env(self) -> None:

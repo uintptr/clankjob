@@ -40,6 +40,13 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
+try:
+    # Line editing for input(): without it, a terminal whose Backspace sends ^H while the
+    # tty expects ^? (DEL) echoes "^H" and keeps it in the answer.
+    import readline  # noqa: F401  # pyright: ignore[reportUnusedImport]
+except ImportError:
+    pass
+
 REPO = "uintptr/clankjob"
 IMAGE = "ghcr.io/uintptr/clankjob"
 DEFAULT_PORT = 8080
@@ -58,6 +65,21 @@ class SetupError(Exception):
 # ---------------------------------------------------------------- asking
 
 
+def erase_backspaces(text: str) -> str:
+    """`text` with each backspace (^H or DEL) removing the character before it, as typed.
+
+    getpass reads with echo off and without readline, so a Backspace the tty does not
+    treat as its erase character arrives in the answer instead of deleting."""
+    kept: list[str] = []
+    for character in text:
+        if character in "\b\x7f":
+            if kept:
+                kept.pop()
+        else:
+            kept.append(character)
+    return "".join(kept)
+
+
 class Asker:
     """Asks the user; with `assume_defaults`, takes every default without asking."""
 
@@ -74,7 +96,7 @@ class Asker:
     def secret(self, question: str) -> str:
         if self.assume_defaults:
             return ""
-        return getpass.getpass(f"{question} (hidden): ").strip()
+        return erase_backspaces(getpass.getpass(f"{question} (hidden): ")).strip()
 
     def yes(self, question: str, default: bool = False) -> bool:
         if self.assume_defaults:
