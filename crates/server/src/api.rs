@@ -216,8 +216,10 @@ fn health(state: &AppState) -> Response {
     let last_tick = state.engine.last_scheduler_tick();
     let scheduler = last_tick.is_some_and(|tick| Utc::now().signed_duration_since(tick) < chrono::Duration::minutes(2));
     let status = if database && scheduler { 200 } else { 503 };
-    // `token_required` tells the web UI whether to show its sign-in page.
+    // `token_required` tells the web UI whether to show its sign-in page; `version` is
+    // the commit the server was built from (build.rs).
     Response::json(&json!({
+        "version": env!("CLANKJOB_COMMIT"),
         "database": database,
         "scheduler": scheduler,
         "last_scheduler_tick": last_tick,
@@ -1000,10 +1002,9 @@ mod tests {
         let (mut reader, _) = health.data.into_reader_and_size();
         let mut text = String::new();
         reader.read_to_string(&mut text).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&text).unwrap()["token_required"],
-            json!(false)
-        );
+        let health = serde_json::from_str::<Value>(&text).unwrap();
+        assert_eq!(health["token_required"], json!(false));
+        assert_eq!(health["version"], json!(env!("CLANKJOB_COMMIT")));
     }
 
     #[test]

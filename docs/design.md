@@ -1386,7 +1386,9 @@ a look; the web client shows it in the navigation. Secrets are never included.
 
 `GET /healthz`, without auth: `200` when the database answers and the scheduler ticked in
 the last two minutes, `503` otherwise, with
-`{ "database", "scheduler", "last_scheduler_tick" }`.
+`{ "version", "database", "scheduler", "last_scheduler_tick", "token_required" }`.
+`version` is the short commit the binary was built from (the `CLANKJOB_COMMIT` build
+argument in Docker, `git` otherwise, else `unknown`); the web UI shows it in its header.
 
 ### 14.8 Errors (built)
 

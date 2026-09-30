@@ -11,6 +11,9 @@
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY . .
+# The commit shown in the web UI and /healthz; the build context has no .git.
+ARG CLANKJOB_COMMIT=""
+ENV CLANKJOB_COMMIT=${CLANKJOB_COMMIT}
 # Cache mounts keep the registry and build outputs between builds; the binary is copied
 # out because the target directory is not part of the image layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

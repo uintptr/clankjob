@@ -308,6 +308,7 @@ function pollHealth() {
     const dot = document.getElementById("dot");
     const text = document.getElementById("pulse-text");
     const sub = document.getElementById("pulse-sub");
+    const version = document.getElementById("version");
     poll(async () => {
         const response = await fetch("/healthz").catch(() => null);
         const health = response ? await response.json().catch(() => null) : null;
@@ -315,6 +316,7 @@ function pollHealth() {
         dot.className = `dot ${healthy ? "" : "bad"}`;
         text.textContent = healthy ? "engine running" : "engine unreachable";
         sub.textContent = health?.last_scheduler_tick ? `tick ${relative(health.last_scheduler_tick)}` : "";
+        if (health?.version) version.textContent = health.version;
     }, 15000);
 }
 
