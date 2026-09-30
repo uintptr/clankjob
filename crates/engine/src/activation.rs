@@ -1408,6 +1408,52 @@ mod tests {
     }
 
     #[test]
+    fn a_model_changed_while_the_case_waits_is_used_from_the_next_turn() {
+        // Arrange: a case waiting for an answer, on the LLM's default model
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let provider = ScriptedProvider::new([
+            Ok(text("Thinking...")),
+            Ok(text("Should I accept the quote?")),
+            Ok(reply(&[("complete", json!({"summary": "Accepted"}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let case = create(&engine, &mut connection, Budgets::default());
+        activate(&engine, &mut connection);
+
+        // Act: the owner switches models, then answers
+        let changed = engine
+            .set_model(
+                &mut connection,
+                &case.id,
+                None,
+                &clankjob_core::case::ModelChange::Model("big/model".to_owned()),
+            )
+            .unwrap();
+        let unknown = engine.set_model(
+            &mut connection,
+            &case.id,
+            Some("nope"),
+            &clankjob_core::case::ModelChange::Keep,
+        );
+        engine.post_message(&mut connection, &case.id, "Yes").unwrap();
+        let done = activate(&engine, &mut connection);
+
+        // Assert
+        assert_eq!(changed.model.as_deref(), Some("big/model"));
+        assert!(matches!(unknown, Err(crate::EngineError::UnknownLlm(llm)) if llm == "nope"));
+        assert_eq!(done.state, CaseState::Completed);
+        let models: Vec<String> = provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.model.clone())
+            .collect();
+        assert_eq!(models, ["scripted", "scripted", "big/model"]);
+    }
+
+    #[test]
     fn files_added_mid_case_wake_it_and_are_readable_and_viewable() {
         // Arrange: a sleeping case, then three files arrive.
         let test_db = TestDb::new();

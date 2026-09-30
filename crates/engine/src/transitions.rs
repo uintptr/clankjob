@@ -4,7 +4,7 @@
 //! between two states.
 
 use chrono::{DateTime, Utc};
-use clankjob_core::case::{ApprovalPolicy, Case, CaseState, Instruction, NewCase, NewInstruction};
+use clankjob_core::case::{ApprovalPolicy, Case, CaseState, Instruction, ModelChange, NewCase, NewInstruction};
 use clankjob_core::event::{EventBody, InstructionChange, WakeReason};
 use clankjob_core::file::CaseFile;
 use clankjob_core::human::{HumanRequest, HumanRequestKind, HumanRequestStatus};
@@ -400,6 +400,35 @@ pub fn set_approvals(
     let transaction = begin_write(connection)?;
     load_case(&transaction, case_id)?;
     storage::cases::update_approvals(&transaction, case_id, approvals, now)?;
+    let case = load_case(&transaction, case_id)?;
+    commit(transaction)?;
+    Ok(case)
+}
+
+/// Move a case to another LLM or model (`llm` is `None` to keep the case's). Only the
+/// owner calls this; the next LLM turn uses it, even mid-activation, and nothing wakes.
+/// The caller checks that the LLM is configured.
+///
+/// # Errors
+///
+/// Returns [`EngineError::CaseNotFound`] or [`EngineError::Storage`].
+pub fn set_model(
+    connection: &mut Connection,
+    case_id: &CaseId,
+    llm: Option<&str>,
+    model: &ModelChange,
+    now: DateTime<Utc>,
+) -> Result<Case> {
+    let transaction = begin_write(connection)?;
+    let case = load_case(&transaction, case_id)?;
+    let llm_changed = llm.is_some_and(|llm| llm != case.llm);
+    let model = match model {
+        ModelChange::Model(model) => Some(model.as_str()),
+        ModelChange::Default => None,
+        ModelChange::Keep if llm_changed => None,
+        ModelChange::Keep => case.model.as_deref(),
+    };
+    storage::cases::update_model(&transaction, case_id, llm.unwrap_or(&case.llm), model, now)?;
     let case = load_case(&transaction, case_id)?;
     commit(transaction)?;
     Ok(case)

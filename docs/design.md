@@ -575,7 +575,8 @@ pub struct CompletionResponse {
   (other 4xx, unparsable responses). See §17.2 for what happens next.
 - **Choosing the model.** Each `[llm.<name>]` in the config is one endpoint with a default
   `model`. A case picks an LLM by name (`default_llm` otherwise) and may override the
-  model with any id.
+  model with any id. The owner can switch either while the case works (`PATCH /cases/{id}`, §14.1): the engine reloads the case before every LLM turn, so the next
+  turn uses the new model, even mid-activation.
 - **Model catalog.** A background thread calls each LLM's `{base_url}/models` at startup
   and every hour (`discover_models`, on by default). When the provider says which models
   support tools (OpenRouter does), only those are kept, with their prices per million
@@ -1300,6 +1301,13 @@ prices, or a model it does not list), `usd` is `null` with a `reason`.
 and returns it like `GET`; nothing wakes, and the agent sees the new title in its next
 system prompt. The web client renames on a double-click on the case's title.
 
+The same `PATCH` moves a case to another model: `{ "model": "openai/gpt-4.1" }`, or
+`{ "model": null }` (or blank) for the LLM's default, and `{ "llm": "local" }` for another
+configured LLM, which starts from that LLM's default model unless `model` is given too.
+An unknown LLM is `400` and changes nothing else. The next LLM turn uses it, even in a
+running activation; nothing wakes. Usage is counted per case, not per model, so the cost
+estimate prices the whole case at its current model.
+
 `DELETE /cases/{id}` removes a case for good: its row and every row about it (timeline,
 activations, questions and their channel messages, wait conditions, notes, instructions,
 files), in one transaction, then its files' bytes. A running case is refused (`409`)
@@ -1422,8 +1430,9 @@ the same origin as the API. Everything the server sends is inserted as text, nev
     with a filter box. Selecting a case keeps the rail, its filter and its scroll.
   - The **detail** pane shows the state chip and details, the open question with an answer
     box, the result or failure reason, the goal, the **instructions** (write, upload, edit,
-    remove), the **files** (add, preview text, view images), what the case is waiting
-    for, budget use, notes, the **timeline** (answers from a chat channel say which), and a
+    remove), the **files** (add, preview text, view images), the **approvals** setting,
+    the **model** (the LLM and a model id with the catalog's suggestions, applied from
+    the agent's next turn), what the case is waiting for, budget use, notes, the **timeline** (answers from a chat channel say which), and a
     message box. The details line shows where the case asks ("web, discord_joe") and the
     estimated cost so far ("Cost ≈ $0.0027", the calculation in its tooltip; "unknown"
     when the model has no known price).

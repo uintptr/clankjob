@@ -212,6 +212,25 @@ pub fn update_approvals(
     Ok(())
 }
 
+/// Change the LLM a case runs on and its model override (`None`: the LLM's default).
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if the update fails.
+pub fn update_model(
+    connection: &Connection,
+    id: &CaseId,
+    llm: &str,
+    model: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE cases SET llm = ?2, model = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id.as_str(), llm, model, to_millis(now)],
+    )?;
+    Ok(())
+}
+
 /// Change a case's title.
 ///
 /// # Errors

@@ -4,7 +4,7 @@
 //! so request threads always return quickly.
 
 use chrono::Utc;
-use clankjob_core::case::{ApprovalPolicy, Budgets, CaseState, NewCase, NewInstruction};
+use clankjob_core::case::{ApprovalPolicy, Budgets, CaseState, ModelChange, NewCase, NewInstruction};
 use clankjob_core::contact::{ContactSource, NewContact};
 use clankjob_core::file::FileKind;
 use clankjob_core::human::Decision;
@@ -460,16 +460,34 @@ struct UpdateCaseBody {
     title: Option<String>,
     #[serde(default)]
     approvals: Option<ApprovalPolicy>,
+    /// Another configured LLM.
+    #[serde(default)]
+    llm: Option<String>,
+    /// Absent: keep the model; `null` or blank: the LLM's default; a string: that model.
+    #[serde(default, deserialize_with = "model_change")]
+    model: ModelChange,
+}
+
+/// `model` in `PATCH /cases/{id}`, when it is present (absent is `Keep`, by default).
+fn model_change<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<ModelChange, D::Error> {
+    Ok(match Option::<String>::deserialize(deserializer)? {
+        Some(model) if !model.trim().is_empty() => ModelChange::Model(model.trim().to_owned()),
+        _ => ModelChange::Default,
+    })
 }
 
 /// Longest case title, in characters.
 const MAX_TITLE_CHARS: usize = 200;
 
+/// Longest model id, in characters.
+const MAX_MODEL_CHARS: usize = 200;
+
 fn update_case(state: &AppState, request: &Request, id: &CaseId) -> Handled {
     let body: UpdateCaseBody = json_body(request)?;
-    if body.title.is_none() && body.approvals.is_none() {
+    let model_given = body.model != ModelChange::Keep;
+    if body.title.is_none() && body.approvals.is_none() && body.llm.is_none() && !model_given {
         return Err(AppError::BadRequest(
-            "nothing to change: give a `title` or `approvals`".to_owned(),
+            "nothing to change: give a `title`, `approvals`, `llm` or `model`".to_owned(),
         ));
     }
     let title = body.title.as_deref().map(str::trim);
@@ -478,7 +496,22 @@ fn update_case(state: &AppState, request: &Request, id: &CaseId) -> Handled {
             "`title` must be 1 to {MAX_TITLE_CHARS} characters"
         )));
     }
+    let llm = body.llm.as_deref().map(str::trim);
+    if llm.is_some_and(str::is_empty) {
+        return Err(AppError::BadRequest("`llm` must not be empty".to_owned()));
+    }
+    if let ModelChange::Model(model) = &body.model
+        && model.chars().count() > MAX_MODEL_CHARS
+    {
+        return Err(AppError::BadRequest(format!(
+            "`model` must be at most {MAX_MODEL_CHARS} characters"
+        )));
+    }
     let mut connection = state.connect()?;
+    // First: an unknown LLM is refused before anything else changes.
+    if llm.is_some() || model_given {
+        state.engine.set_model(&mut connection, id, llm, &body.model)?;
+    }
     if let Some(title) = title {
         state.engine.rename_case(&mut connection, id, title)?;
     }
@@ -855,7 +888,10 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let db = Db::new(dir.path().join("test.db"));
             db.migrate().unwrap();
-            let providers = HashMap::from([("default".to_owned(), Arc::new(UnusedProvider) as Arc<dyn LlmProvider>)]);
+            let providers = HashMap::from([
+                ("default".to_owned(), Arc::new(UnusedProvider) as Arc<dyn LlmProvider>),
+                ("other".to_owned(), Arc::new(UnusedProvider) as Arc<dyn LlmProvider>),
+            ]);
             let engine = Engine::new(
                 db,
                 providers,
@@ -1029,6 +1065,56 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(detail["case"]["title"], "Panel quote, Laval");
         assert_eq!((empty, long, nothing, unknown), (400, 400, 400, 404));
+    }
+
+    #[test]
+    fn a_cases_model_can_be_changed_while_it_works() {
+        let api = TestApi::new();
+        let (_, case) = api.call("POST", "/api/v1/cases", Some(json!({"title": "t", "model": "a/one"})));
+        let id = case["id"].as_str().unwrap().to_owned();
+        let path = format!("/api/v1/cases/{id}");
+        let change = |body: Value| api.call("PATCH", &path, Some(body));
+        let llm_model = |detail: &Value| {
+            (
+                detail["case"]["llm"].as_str().map(str::to_owned),
+                detail["case"]["model"].as_str().map(str::to_owned),
+            )
+        };
+
+        let (status, model) = change(json!({"model": " b/two "}));
+        let (_, other_llm) = change(json!({"llm": "other"}));
+        change(json!({"model": "c/three"}));
+        let (_, default) = change(json!({"model": null}));
+        change(json!({"model": "c/three"}));
+        let (_, blank) = change(json!({"model": " "}));
+        let (_, both) = change(json!({"llm": "default", "model": "d/four"}));
+        let unknown_llm = change(json!({"llm": "nope", "title": "renamed"})).0;
+        let empty_llm = change(json!({"llm": " "})).0;
+        let long_model = change(json!({"model": "m".repeat(201)})).0;
+        let (_, after) = api.call("GET", &path, None);
+
+        assert_eq!(status, 200);
+        assert_eq!(
+            llm_model(&model),
+            (Some("default".to_owned()), Some("b/two".to_owned()))
+        );
+        assert_eq!(
+            llm_model(&other_llm),
+            (Some("other".to_owned()), None),
+            "another LLM starts from its default model"
+        );
+        assert_eq!(llm_model(&default), (Some("other".to_owned()), None));
+        assert_eq!(llm_model(&blank), (Some("other".to_owned()), None));
+        assert_eq!(
+            llm_model(&both),
+            (Some("default".to_owned()), Some("d/four".to_owned()))
+        );
+        assert_eq!((unknown_llm, empty_llm, long_model), (400, 400, 400));
+        assert_eq!(after["case"]["title"], "t", "a refused change changes nothing else");
+        assert_eq!(
+            llm_model(&after),
+            (Some("default".to_owned()), Some("d/four".to_owned()))
+        );
     }
 
     #[test]

@@ -1058,6 +1058,8 @@ pre.raw {
 .field select,
 .field textarea,
 .approvals select,
+.model select,
+.model input,
 .signin input {
     display: block;
     width: 100%;
@@ -1121,6 +1123,8 @@ pre.raw {
     .field input,
     .field select,
     .approvals select,
+    .model select,
+    .model input,
     .field textarea,
     .rail-tools input {
         font-size: 16px;
@@ -1761,4 +1765,24 @@ label.check input[type="checkbox"] {
 
 .approvals select {
     max-width: 360px;
+}
+
+.model {
+    display: grid;
+    gap: 6px;
+}
+
+.model-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.model select {
+    flex: 0 1 180px;
+}
+
+.model input {
+    flex: 1 1 240px;
+    min-width: 0;
 }

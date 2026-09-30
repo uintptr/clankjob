@@ -639,6 +639,25 @@ impl Engine {
         transitions::set_approvals(connection, case_id, approvals, Utc::now())
     }
 
+    /// Move a case to another LLM or model; see [`transitions::set_model`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::UnknownLlm`] if `llm` is not configured, otherwise see
+    /// [`transitions::set_model`].
+    pub fn set_model(
+        &self,
+        connection: &mut Connection,
+        case_id: &CaseId,
+        llm: Option<&str>,
+        model: &clankjob_core::case::ModelChange,
+    ) -> Result<Case> {
+        if let Some(llm) = llm.filter(|llm| !self.shared.providers.contains_key(*llm)) {
+            return Err(EngineError::UnknownLlm(llm.to_owned()));
+        }
+        transitions::set_model(connection, case_id, llm, model, Utc::now())
+    }
+
     /// Give a case a new title; see [`transitions::rename_case`].
     ///
     /// # Errors

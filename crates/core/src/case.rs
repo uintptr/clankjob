@@ -195,6 +195,19 @@ pub struct CaseNote {
     pub updated_at: DateTime<Utc>,
 }
 
+/// What to do with a case's model override when the owner changes its model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ModelChange {
+    /// Keep the override, unless the case moves to another LLM, which starts from its
+    /// default (model ids rarely carry over between providers).
+    #[default]
+    Keep,
+    /// Drop the override: the LLM's default model.
+    Default,
+    /// This model id.
+    Model(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

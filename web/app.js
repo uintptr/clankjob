@@ -1094,6 +1094,10 @@ function caseDetail(pane, id, onRenamed) {
     // Redrawn only when the setting changes, so a refresh never closes the menu in use.
     const approvalsSlot = h("div");
     let approvalsKey = null;
+    // The same for the model; the LLM choices (GET /llms) are loaded once.
+    const modelSlot = h("div");
+    let modelKey = null;
+    let llmChoices = null;
     const thread = h("div", { class: "card thread" });
     const render = timelineRenderer(thread);
     const hint = h("small", { class: "why" });
@@ -1265,6 +1269,67 @@ function caseDetail(pane, id, onRenamed) {
             },
         });
         approvalsSlot.replaceChildren(section("Approvals", "when this case's emails wait for you", h("div", { class: "card box approvals" }, select, hint)));
+    }
+
+    async function renderModel(item) {
+        const key = [item.llm, item.model || "", item.state === "cancelled"].join("\n");
+        if (key === modelKey) return;
+        modelKey = key;
+        if (!llmChoices) {
+            try {
+                llmChoices = await api("/llms");
+            } catch (error) {
+                report(error);
+                llmChoices = { llms: [] };
+            }
+        }
+        const llms = llmChoices.llms;
+        const disabled = item.state === "cancelled";
+        const suggestions = h("datalist", { id: "case-model-suggestions" });
+        const modelInput = h("input", { name: "model", list: "case-model-suggestions", autocomplete: "off", "aria-label": "Model", disabled, value: item.model || "", oninput: () => describe() });
+        const llmSelect = h(
+            "select",
+            { name: "llm", "aria-label": "LLM", disabled, onchange: () => showModelsFor(true) },
+            // The case's LLM stays selectable even if the config no longer lists it.
+            (llms.some((llm) => llm.name === item.llm) ? llms : [{ name: item.llm, models: [] }, ...llms]).map((llm) => h("option", { value: llm.name, selected: llm.name === item.llm }, llm.name)),
+        );
+        const hint = h("small", { class: "why" });
+        const selected = () => llms.find((llm) => llm.name === llmSelect.value);
+        function describe() {
+            const llm = selected();
+            const id = modelInput.value.trim() || llm?.model;
+            const model = llm?.models.find((candidate) => candidate.id === id);
+            hint.textContent = `${model ? `${id}: ${modelLabel(model)}. ` : ""}Used from the agent's next turn. Leave it empty for the LLM's default; the cost estimate prices the whole case at the current model.`;
+        }
+        function showModelsFor(changed) {
+            const llm = selected();
+            suggestions.replaceChildren(...(llm?.models || []).map((model) => h("option", { value: model.id, label: modelLabel(model) })));
+            // Model ids rarely carry over between providers.
+            if (changed) modelInput.value = "";
+            modelInput.placeholder = llm ? `${llm.model} (default)` : "LLM default";
+            describe();
+        }
+        showModelsFor(false);
+        const form = h(
+            "form",
+            {
+                class: "card box model",
+                onsubmit: async (event) => {
+                    event.preventDefault();
+                    try {
+                        await api(path, { method: "PATCH", body: { llm: llmSelect.value, model: modelInput.value.trim() || null } });
+                        toast("Model updated for this case.");
+                    } catch (error) {
+                        report(error);
+                    }
+                    modelKey = null;
+                    refresh().catch(report);
+                },
+            },
+            h("div", { class: "model-row" }, llms.length > 1 && llmSelect, modelInput, suggestions, h("button", { class: "btn sm", type: "submit", disabled }, "Use")),
+            hint,
+        );
+        modelSlot.replaceChildren(section("Model", "which model the agent runs on", form));
     }
 
     function renderStatus(detail) {
@@ -1461,6 +1526,7 @@ function caseDetail(pane, id, onRenamed) {
         renderComposer(item);
         renderStatus(detail);
         renderApprovals(item);
+        renderModel(item).catch(report);
         goalSlot.replaceChildren(item.goal ? section("Goal", null, h("div", { class: "card md" }, item.goal)) : "");
         renderFiles(item, detail.files);
         renderInstructions(item, detail.instructions);
@@ -1483,6 +1549,7 @@ function caseDetail(pane, id, onRenamed) {
             instructionsSection,
             filesSection,
             approvalsSlot,
+            modelSlot,
             statusSlot,
             section("Timeline", "oldest first", thread),
             section("Message", null, composer),
