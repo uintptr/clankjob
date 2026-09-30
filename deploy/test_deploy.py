@@ -6,6 +6,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import tomllib
 
@@ -154,12 +155,36 @@ class SetupTests(unittest.TestCase):
             deploy.update_compose(path, template, 9000, "latest", keep=False)
             self.assertEqual((9000, "latest"), deploy.compose_settings(path.read_text()))
 
+    def test_start_pulls_then_restarts_the_server_only_when_its_plugins_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as work, mock.patch("deploy.shutil.which", return_value="/usr/bin/docker"):
+            target = Path(work) / "clankjob"
+            args = argparse.Namespace(dir=target, ref="main", source=REPO, image_tag=None, port=None,
+                                      keep_compose=False, configure=None, yes=True, start=True)
+            commands: list[list[str]] = []
+
+            def run(command: list[str]) -> int:
+                commands.append(command[4:])
+                return 0
+
+            deploy.setup(args, Asker(assume_defaults=True), run)
+            first = list(commands)
+            commands.clear()
+            deploy.setup(args, Asker(assume_defaults=True), run)
+            unchanged = list(commands)
+            commands.clear()
+            (target / "plugins/weather/README.md").write_text("an older copy\n")
+            deploy.setup(args, Asker(assume_defaults=True), run)
+
+            self.assertEqual([["pull"], ["up", "-d"]], first, "a new setup has no server to restart")
+            self.assertEqual([["pull"], ["up", "-d"]], unchanged)
+            self.assertEqual([["pull"], ["up", "-d"], ["restart", "clankjob"]], commands)
+
     def test_a_full_setup_then_a_rerun_that_keeps_everything(self) -> None:
         # Arrange
         with tempfile.TemporaryDirectory() as work:
             target = Path(work) / "clankjob"
             args = argparse.Namespace(dir=target, ref="main", source=REPO, image_tag=None, port=None,
-                                      keep_compose=False, configure=None, yes=False)
+                                      keep_compose=False, configure=None, yes=False, start=False)
             asker = ScriptedAsker({"LLM API key": "sk-or-1", "Configure the email": "y",
                                    "EMAIL_ADDRESS": "me@gmail.com", "EMAIL_PASSWORD": "app-pw",
                                    "Start it now": "n"})

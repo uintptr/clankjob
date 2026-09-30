@@ -1,0 +1,16 @@
+# Copy to config.toml (git-ignored) to turn on web_search; web_page and the watches need
+# no configuration. Values are references, resolved by the server.
+
+[env]
+# Google's Custom Search JSON API (100 queries a day free):
+# 1. Create a Programmable Search Engine that searches the entire web:
+#    https://programmablesearchengine.google.com (its "Search engine ID" is the cx).
+# 2. Create an API key with the Custom Search API enabled: https://console.cloud.google.com
+GOOGLE_CSE_ID = "0123456789abcdef0"
+GOOGLE_CSE_API_KEY = { env = "GOOGLE_CSE_API_KEY" }
+
+# Defaults for every search; the agent can override them per search. Google has no
+# latitude/longitude: results are localized by country, and by a city in the query.
+GOOGLE_CSE_GL = "ca"    # favor results from this country (two letters)
+# GOOGLE_CSE_HL = "en"  # interface language
+# GOOGLE_CSE_LR = "fr"  # only pages in this language (leave unset for any language)

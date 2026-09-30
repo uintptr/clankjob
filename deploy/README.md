@@ -42,10 +42,16 @@ lines are shown (edits of your own must be carried over by hand, or use
 from inside a setup, it updates that setup (`cd ~/clankjob && python3 deploy.py`); from
 anywhere else, give the directory, or it creates a new one in `./clankjob`. Other
 options: `--ref v1.2.3` (plugins of a release), `--image-tag 1.2`, `--port 8081`,
-`--source ~/src/clankjob` (a local checkout), `--yes` (no questions). Then:
+`--source ~/src/clankjob` (a local checkout), `--yes` (no questions).
+
+At the end it offers to pull the image and start the containers (`--start` does it
+without asking): `docker compose pull`, `docker compose up -d`, and, on an existing setup
+whose plugins changed, `docker compose restart clankjob`, since the server reads its
+plugins at startup and `up -d` only recreates a container for a new image or setting. By
+hand:
 
 ```sh
-cd ~/clankjob && docker compose up -d
+cd ~/clankjob && docker compose pull && docker compose up -d
 ```
 
 The rest of this page does the same by hand.
@@ -113,9 +119,14 @@ sub-directory per plugin, like `plugin/` in the repository).
 
 ## Updating
 
+From inside the setup, with the latest `deploy.py` (it updates the plugins and
+`compose.yaml` too):
+
 ```sh
-docker compose pull && docker compose up -d
+python3 deploy.py --yes --start
 ```
+
+Or only the image: `docker compose pull && docker compose up -d`.
 
 Database migrations run at startup. To stay on a version, replace `latest` in
 `compose.yaml` with a version tag such as `1.2`.

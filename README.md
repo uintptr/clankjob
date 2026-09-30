@@ -214,6 +214,7 @@ plugin/
   documents/    metadata, OCR and text of the case's files
   weather/      forecasts and past weather for a place (Open-Meteo, no key)
   shell/        a bash shell for the agent, run in the sandbox container
+  web/          web search (Google), pages as text, waits for page and feed changes
 sandbox/        the sandbox's exec service (sandboxd.py), for plugin/shell
 web/            the web UI (vanilla JavaScript and CSS, no CDN, compiled into the binary)
 docs/

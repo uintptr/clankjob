@@ -20,12 +20,14 @@ overwritten.
     python3 deploy.py ~/clankjob
     python3 deploy.py ~/clankjob --configure email      # configure one plugin later
     python3 deploy.py ~/clankjob --yes                  # no questions: defaults only
+    python3 deploy.py ~/clankjob --yes --start          # update and restart, no questions
     cd ~/clankjob && python3 deploy.py                  # from inside a setup: update it
 """
 
 import argparse
 import difflib
 import getpass
+import hashlib
 import json
 import re
 import secrets
@@ -247,6 +249,28 @@ def fetch_source(ref: str, local: Path | None, work: Path) -> Path:
     return work / "source"
 
 
+def tree_digest(directory: Path) -> str:
+    """A fingerprint of every file under a directory (names and contents), to tell whether
+    an update changed anything."""
+    digest = hashlib.sha256()
+    for path in sorted(directory.rglob("*")) if directory.is_dir() else []:
+        if path.is_file() and "__pycache__" not in path.parts:
+            digest.update(str(path.relative_to(directory)).encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def start(target: Path, run: Callable[[list[str]], int], restart_server: bool) -> None:
+    """Pull the image, start or update the containers, and restart the server when only
+    its mounted plugins changed (`up -d` recreates a container for a new image or
+    configuration, not for new files in a mounted directory)."""
+    compose = ["docker", "compose", "--project-directory", str(target)]
+    for command, what in ((["pull"], "pull"), (["up", "-d"], "up")):
+        if 0 != run([*compose, *command]):
+            raise SetupError(f"docker compose {what} failed; see its output above")
+    if restart_server and 0 != run([*compose, "restart", "clankjob"]):
+        raise SetupError("docker compose restart failed; see its output above")
+
+
 def copy_plugins(source: Path, target: Path) -> list[str]:
     """Copy every plugin's files, except config.toml: an existing one is kept untouched."""
     plugins = sorted(path for path in (source / "plugin").iterdir() if (path / "plugin.toml").is_file())
@@ -378,6 +402,10 @@ def setup(args: argparse.Namespace, asker: Asker, run: Callable[[list[str]], int
     env = read_env(env_path)
     new_env: dict[str, str] = {}
 
+    # An existing setup whose plugins change needs its server restarted to load them.
+    existing = (target / "compose.yaml").is_file()
+    plugins_before = tree_digest(target / "plugins")
+
     with tempfile.TemporaryDirectory(prefix="clankjob-deploy-") as work:
         source = fetch_source(args.ref, args.source, Path(work))
         names = copy_plugins(source, target / "plugins")
@@ -415,14 +443,17 @@ def setup(args: argparse.Namespace, asker: Asker, run: Callable[[list[str]], int
     if added:
         print(f".env: added {', '.join(added)}")
 
+    restart_server = existing and tree_digest(target / "plugins") != plugins_before
     print(f"\nReady in {target}. Next:")
-    print(f"  cd {target} && docker compose up -d")
+    print(f"  cd {target} && docker compose pull && docker compose up -d")
+    if restart_server:
+        print("  plugins changed: docker compose restart clankjob (or Reload plugins on the Plugins page)")
     print(f"  then open http://127.0.0.1:{port} and sign in with CLANKJOB_TOKEN from .env")
     print("  check a plugin:  docker compose exec clankjob /plugins/<id>/check_config.py")
-    if shutil.which("docker") and asker.yes("\nStart it now (docker compose up -d)?", False):
-        status = run(["docker", "compose", "--project-directory", str(target), "up", "-d"])
-        if 0 != status:
-            raise SetupError("docker compose up failed; see its output above")
+    if not shutil.which("docker"):
+        return
+    if args.start or asker.yes("\nPull the image and start it now (docker compose pull, up -d)?", False):
+        start(target, run, restart_server)
 
 
 def main() -> int:
@@ -434,6 +465,8 @@ def main() -> int:
     parser.add_argument("--image-tag", help="image tag, e.g. 1.2 (default: the current one, else latest)")
     parser.add_argument("--port", type=int,
                         help=f"local port for the web UI and API (default: the current one, else {DEFAULT_PORT})")
+    parser.add_argument("--start", action="store_true",
+                        help="then pull the image and start or update the containers, without asking")
     parser.add_argument("--keep-compose", action="store_true",
                         help="leave an existing compose.yaml as it is instead of updating it")
     parser.add_argument("--configure", action="append", metavar="PLUGIN", help="configure this plugin (repeatable)")

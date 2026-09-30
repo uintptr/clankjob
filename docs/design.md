@@ -702,6 +702,13 @@ plugin's manifest, its configuration and, for external plugins, its code:
     shell_tool.py
     test_shell_tool.py
     README.md
+  web/                         command plugin: search, pages as text, page and feed watches
+    plugin.toml
+    config.example.toml
+    check_config.py
+    web_tool.py
+    test_web_tool.py
+    README.md
   weather/                     command plugin: forecasts and past weather (Open-Meteo)
     plugin.toml
     config.example.toml
