@@ -1,0 +1,16 @@
+# Copy to config.toml (git-ignored) to turn the ntfy plugin on. Values are passed to
+# ntfy_tool.py as environment variables; secrets are references, resolved by the server.
+
+[env]
+# The ntfy server: the public one, or your own.
+NTFY_URL = "https://ntfy.sh"
+
+# The topic notifications go to; subscribe to it in the ntfy app. On a server without
+# login anyone who knows the name can read it, so pick one that is hard to guess.
+NTFY_TOPIC = "clankjob-change-me"
+
+# Authentication, when the server or the topic needs it: an access token...
+# NTFY_TOKEN = { env = "NTFY_TOKEN" }
+# ...or a user name and password.
+# NTFY_USERNAME = "clankjob"
+# NTFY_PASSWORD = { secret = "ntfy_password" }

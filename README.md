@@ -261,6 +261,7 @@ loads the ones it needs, so an unused plugin costs a line instead of its tool sc
 | `web`                | Google search, pages as text, waits for a page or feed to change                  | a Google Programmable Search key     |
 | `documents`          | Metadata, OCR and text of the case's files (PDF, Office, images, media)           | nothing (in the image)               |
 | `shell`              | A bash shell in a separate sandbox container, with network tools                  | the sandbox container (compose.yaml) |
+| `ntfy`               | Push notifications to your phone or desktop through ntfy                          | an ntfy server and topic             |
 | `weather`            | Forecasts and past weather for a place (Open-Meteo)                               | nothing                              |
 | `youtube_transcribe` | Video transcripts, and guides for summaries and earnings calls                    | nothing (a proxy if YouTube blocks)  |
 | `finance`            | Market data, screens, SEC filings, 13F holdings, FRED macro, DCF; analysis guides | a free FRED key for the macro tools  |
@@ -284,6 +285,7 @@ plugin/
   finance/      market data, SEC filings, 13F, FRED, DCF, plus analysis guides
   email/        send and read email, wait for replies (IMAP/SMTP, approvals)
   documents/    metadata, OCR and text of the case's files
+  ntfy/         push notifications through ntfy (any server, optional login)
   weather/      forecasts and past weather for a place (Open-Meteo, no key)
   shell/        a bash shell for the agent, run in the sandbox container
   web/          web search (Google), pages as text, waits for page and feed changes

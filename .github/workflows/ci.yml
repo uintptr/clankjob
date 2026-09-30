@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: [plugin/discord, plugin/email, plugin/documents, plugin/weather, plugin/web, plugin/shell, sandbox, intake/discord, deploy]
+        dir: [plugin/discord, plugin/email, plugin/documents, plugin/weather, plugin/ntfy, plugin/web, plugin/shell, sandbox, intake/discord, deploy]
     defaults:
       run:
         working-directory: ${{ matrix.dir }}

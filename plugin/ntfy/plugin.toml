@@ -1,0 +1,50 @@
+# clankjob plugin manifest (design section 9.9): push notifications through ntfy.
+id = "ntfy"
+name = "Notifications (ntfy)"
+version = "0.1.0"
+runtime = "command"
+requires = ["python3"]
+# Needs NTFY_URL and NTFY_TOPIC: without a server and a topic the tool could only fail.
+requires_config = true
+
+[[tools]]
+name = "ntfy_send"
+description = """Push a notification to the owner's phone or desktop through ntfy, on the \
+topic they configured. Use it when the owner asked to be notified, or for something they must \
+know soon (a deadline, a failure, a result they are waiting for). Keep it short: a title and a \
+line or two, with the details in the case. It only informs: to get an answer, use `ask_human`. \
+Each call sends a notification, so do not repeat one that was sent."""
+command = ["./ntfy_tool.py", "send", "--message={message}"]
+output = "json"
+timeout = "1m"
+
+[tools.options]
+title = ["--title={title}"]
+priority = ["--priority={priority}"]
+tags = ["--tags={tags}"]
+click = ["--click={click}"]
+markdown = ["--markdown"]
+
+[tools.args.message]
+description = "The notification's text (at most 4096 bytes)."
+required = true
+max_length = 4096
+
+[tools.args.title]
+description = "A short title shown above the message."
+
+[tools.args.priority]
+description = """`default` unless it matters: `high` or `urgent` for what needs attention now \
+(urgent may ring through do-not-disturb), `low` or `min` for what can wait."""
+enum = ["min", "low", "default", "high", "urgent"]
+
+[tools.args.tags]
+description = """Comma-separated tags; emoji shortcodes become icons (`warning`, \
+`white_check_mark`, `x`, `rotating_light`, `tada`)."""
+
+[tools.args.click]
+description = "An http(s) URL opened when the notification is tapped."
+
+[tools.args.markdown]
+type = "boolean"
+description = "Render the message as Markdown (in the web app and on desktop)."
