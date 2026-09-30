@@ -251,7 +251,8 @@ precise error and the previous version keeps working.
 Every plugin lives in its own directory under `plugin/`, with a README, a
 `config.example.toml` when it has settings, and a `check_config.py` that checks it
 against the real services (the web UI's **Plugins** page shows the same status). Every
-case is offered every loaded plugin's tools.
+case can use every loaded plugin: the system prompt lists each one in a line, and a case
+loads the ones it needs, so an unused plugin costs a line instead of its tool schemas.
 
 | Plugin               | What cases get                                                                    | Needs                                |
 | -------------------- | --------------------------------------------------------------------------------- | ------------------------------------ |

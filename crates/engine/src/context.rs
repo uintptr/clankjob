@@ -222,6 +222,7 @@ mod tests {
             instructions: &[],
             files: &[],
             guides: &[],
+            plugins: &[],
             user_prompt: None,
             wake: None,
         };
@@ -305,6 +306,7 @@ mod tests {
             instructions: &[],
             files: &[],
             guides: &[],
+            plugins: &[],
             user_prompt: None,
             wake: None,
         };

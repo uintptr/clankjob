@@ -1,15 +1,46 @@
 //! Tools and guides offered by plugins (design §9), next to the core tools.
 //!
-//! Every case sees every loaded plugin tool. The set is swapped as a whole when plugins
-//! are reloaded.
+//! A case sees a plugin's tools only once it has loaded the plugin (with `load_plugin`, by
+//! reading one of its guides, or by calling one of its tools); until then the system
+//! prompt only lists the plugin, so unused plugins cost a line instead of their schemas.
+//! The set is swapped as a whole when plugins are reloaded.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError, RwLock};
 
+use clankjob_core::event::{Event, EventBody};
 use clankjob_core::llm::ToolSpec;
 use clankjob_core::tool::{Guide, PluginCondition, PluginTool};
+use serde::Serialize;
 
-use crate::tools::CORE_TOOL_NAMES;
+use crate::tools::{CORE_TOOL_NAMES, LOAD_PLUGIN, READ_GUIDE};
+
+/// A plugin as listed in the system prompt, for `load_plugin`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PluginEntry {
+    /// Plugin id, what `load_plugin` takes.
+    pub id: String,
+    /// Names of its tools.
+    pub tools: Vec<String>,
+    /// Kind names of its wait conditions.
+    pub conditions: Vec<String>,
+    /// The case has loaded it, so its tools are offered.
+    pub loaded: bool,
+}
+
+/// The entry for `plugin`, added if missing.
+fn entry<'a>(
+    entries: &'a mut BTreeMap<String, PluginEntry>,
+    plugin: &str,
+    loaded: &BTreeSet<String>,
+) -> &'a mut PluginEntry {
+    entries.entry(plugin.to_owned()).or_insert_with(|| PluginEntry {
+        id: plugin.to_owned(),
+        tools: Vec::new(),
+        conditions: Vec::new(),
+        loaded: loaded.contains(plugin),
+    })
+}
 
 #[derive(Clone, Default)]
 struct ToolSet {
@@ -91,16 +122,53 @@ impl PluginTools {
             .map(Arc::clone)
     }
 
-    /// Specs of every plugin tool, by name.
+    /// Specs of the tools of the given plugins, by name.
     #[must_use]
-    pub fn specs(&self) -> Vec<ToolSpec> {
+    pub fn specs(&self, plugins: &BTreeSet<String>) -> Vec<ToolSpec> {
         self.set
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .tools
             .values()
+            .filter(|tool| plugins.contains(tool.plugin()))
             .map(|tool| tool.spec().clone())
             .collect()
+    }
+
+    /// The plugins a case has loaded, from its event log: those named by a successful
+    /// `load_plugin` or `read_guide`, and those whose tools it called.
+    #[must_use]
+    pub fn loaded(&self, events: &[Event]) -> BTreeSet<String> {
+        let set = self.set.read().unwrap_or_else(PoisonError::into_inner);
+        events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::ToolResult(result) if !result.is_error => Some(result),
+                _ => None,
+            })
+            .filter_map(|result| match result.tool_name.as_str() {
+                LOAD_PLUGIN | READ_GUIDE => result.content.get("plugin")?.as_str().map(str::to_owned),
+                name => set.tools.get(name).map(|tool| tool.plugin().to_owned()),
+            })
+            .collect()
+    }
+
+    /// Every plugin with tools or wait conditions, by id, for the system prompt.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The plugins the case has loaded, from [`Self::loaded`]
+    #[must_use]
+    pub fn index(&self, loaded: &BTreeSet<String>) -> Vec<PluginEntry> {
+        let set = self.set.read().unwrap_or_else(PoisonError::into_inner);
+        let mut entries = BTreeMap::new();
+        for (name, tool) in &set.tools {
+            entry(&mut entries, tool.plugin(), loaded).tools.push(name.clone());
+        }
+        for (name, condition) in &set.conditions {
+            entry(&mut entries, condition.plugin(), loaded).conditions.push(name.clone());
+        }
+        entries.into_values().collect()
     }
 
     /// The wait condition with this kind name, if a plugin offers it.

@@ -1278,7 +1278,7 @@ mod tests {
         let (reload_status, _) = api.call("POST", "/api/v1/admin/reload", None);
 
         assert_eq!((status, prompt_status, reload_status), (200, 200, 200));
-        assert_eq!(list["prompts"].as_array().unwrap().len(), 8);
+        assert_eq!(list["prompts"].as_array().unwrap().len(), 9);
         assert_eq!(prompt["source"], "builtin");
         assert_eq!(api.call("GET", "/api/v1/prompts/profiles/none", None).0, 404);
     }

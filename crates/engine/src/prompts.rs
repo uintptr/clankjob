@@ -38,16 +38,20 @@ pub const USER_PROMPT: &str = "user_prompt";
 /// Template listing the guides plugins offer, in the system prompt.
 pub const GUIDES: &str = "guides";
 
+/// Template listing the plugins a case can load with `load_plugin`, in the system prompt.
+pub const PLUGINS: &str = "plugins";
+
 /// Name prefix of profile templates, e.g. `profiles/quotes`.
 const PROFILE_PREFIX: &str = "profiles/";
 
 /// Built-in templates. `include_str!` embeds each file in the binary at compile time.
-const BUILTINS: [(&str, &str); 8] = [
+const BUILTINS: [(&str, &str); 9] = [
     (SYSTEM, include_str!("../prompts/system.md.j2")),
     (CASE_HEADER, include_str!("../prompts/case_header.md.j2")),
     (INSTRUCTIONS, include_str!("../prompts/instructions.md.j2")),
     (FILES, include_str!("../prompts/files.md.j2")),
     (GUIDES, include_str!("../prompts/guides.md.j2")),
+    (PLUGINS, include_str!("../prompts/plugins.md.j2")),
     (USER_PROMPT, include_str!("../prompts/user_prompt.md.j2")),
     (WAKE, include_str!("../prompts/wake.md.j2")),
     (NUDGE, include_str!("../prompts/nudge.md.j2")),
@@ -127,6 +131,8 @@ pub struct PromptContext<'a> {
     pub files: &'a [crate::files::FileView],
     /// Guides plugins offer, read with `read_guide`.
     pub guides: &'a [clankjob_core::tool::Guide],
+    /// Plugins the case can load, or has loaded, with `load_plugin`.
+    pub plugins: &'a [crate::plugin_tools::PluginEntry],
     /// The owner's own prompt, when they wrote one.
     pub user_prompt: Option<&'a str>,
     /// Why the case woke up; only set when rendering the `wake` template.
@@ -293,6 +299,12 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         parameters: serde_json::json!({"type": "object"}),
     }];
     let (files, guides, instructions) = sample_material();
+    let plugins = [crate::plugin_tools::PluginEntry {
+        id: "plugin".to_owned(),
+        tools: vec!["tool".to_owned()],
+        conditions: vec!["plugin.condition".to_owned()],
+        loaded: true,
+    }];
     let base = PromptContext {
         now: "2026-01-01T00:00:00Z".to_owned(),
         case: CaseView {
@@ -308,6 +320,7 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         instructions: &instructions,
         files: &files,
         guides: &guides,
+        plugins: &plugins,
         user_prompt: Some("Sign emails as Brad."),
         wake: None,
     };
@@ -521,6 +534,7 @@ mod tests {
             instructions: &[],
             files: &[],
             guides: &[],
+            plugins: &[],
             user_prompt: None,
             wake: None,
         }

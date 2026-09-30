@@ -1,5 +1,6 @@
 //! Core tools every case has (design §5.1): their specs and argument parsing.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -128,6 +129,19 @@ pub struct ReadGuideArgs {
     pub name: String,
 }
 
+/// Arguments of `load_plugin`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoadPluginArgs {
+    /// Plugin id, as listed under Plugins.
+    pub name: String,
+}
+
+/// Name of the tool that reads a guide; reading one loads its plugin.
+pub const READ_GUIDE: &str = "read_guide";
+/// Name of the tool that loads a plugin's tools.
+pub const LOAD_PLUGIN: &str = "load_plugin";
+
 /// Names of the core tools; plugin tools cannot take them.
 pub const CORE_TOOL_NAMES: &[&str] = &[
     "sleep",
@@ -140,7 +154,8 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
     "save_contact",
     "read_file",
     "view_image",
-    "read_guide",
+    READ_GUIDE,
+    LOAD_PLUGIN,
 ];
 
 /// Characters `read_file` returns when `max_chars` is not given.
@@ -173,6 +188,8 @@ pub enum CoreTool {
     ViewImage(ViewImageArgs),
     /// Read a plugin's guide.
     ReadGuide(ReadGuideArgs),
+    /// Offer a plugin's tools from the next turn on.
+    LoadPlugin(LoadPluginArgs),
 }
 
 fn parse_args<T>(call: &ToolCall) -> Result<T, String>
@@ -201,7 +218,8 @@ impl CoreTool {
             "save_contact" => parse_args(call).map(Self::SaveContact),
             "read_file" => parse_args(call).map(Self::ReadFile),
             "view_image" => parse_args(call).map(Self::ViewImage),
-            "read_guide" => parse_args(call).map(Self::ReadGuide),
+            READ_GUIDE => parse_args(call).map(Self::ReadGuide),
+            LOAD_PLUGIN => parse_args(call).map(Self::LoadPlugin),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -332,10 +350,20 @@ fn file_tool_specs(vision: bool) -> Vec<ToolSpec> {
     specs
 }
 
-/// Tell `sleep` about the plugin wait conditions: their kind names, when to use them and
-/// their params.
-pub fn describe_plugin_conditions(specs: &mut [ToolSpec], plugins: &PluginTools) {
-    let conditions = plugins.conditions();
+/// Tell `sleep` about the wait conditions of the loaded plugins: their kind names, when to
+/// use them and their params.
+///
+/// # Arguments
+///
+/// * `specs` - The tools offered, `sleep` among them
+/// * `plugins` - Plugin tools and conditions
+/// * `loaded` - The plugins the case has loaded
+pub fn describe_plugin_conditions(specs: &mut [ToolSpec], plugins: &PluginTools, loaded: &BTreeSet<String>) {
+    let conditions: Vec<_> = plugins
+        .conditions()
+        .into_iter()
+        .filter(|condition| loaded.contains(condition.plugin()))
+        .collect();
     if conditions.is_empty() {
         return;
     }
@@ -396,7 +424,22 @@ fn contact_tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
-/// Specs of the core tools, shown to the LLM.
+/// `load_plugin`, offered when plugins offer tools or wait conditions.
+#[must_use]
+pub fn load_plugin_spec() -> ToolSpec {
+    spec(
+        LOAD_PLUGIN,
+        "Load one of the plugins listed under Plugins: its tools and wait conditions are offered to you from \
+         your next turn on, for the rest of the case. Load a plugin as soon as the task needs it.",
+        json!({
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "The plugin's id, as listed under Plugins."}},
+            "required": ["name"]
+        }),
+    )
+}
+
+/// Specs of the core tools, shown to the LLM, except `load_plugin` ([`load_plugin_spec`]).
 ///
 /// # Arguments
 ///
@@ -494,8 +537,9 @@ pub fn core_tool_specs(has_files: bool, vision: bool, has_guides: bool) -> Vec<T
     }
     if has_guides {
         specs.push(spec(
-            "read_guide",
-            "Read one of the guides listed under Guides: instructions for a kind of task. Read it before starting that task.",
+            READ_GUIDE,
+            "Read one of the guides listed under Guides: instructions for a kind of task. Read it before starting that task. \
+             It also loads the guide's plugin.",
             json!({
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "The guide's name, as listed under Guides."}},
@@ -661,7 +705,9 @@ mod tests {
         );
         assert_eq!(names(true, false).last().map(String::as_str), Some("read_file"));
         assert_eq!(names(true, true)[8..], ["read_file", "view_image"]);
-        let every: Vec<String> = core_tool_specs(true, true, true).into_iter().map(|spec| spec.name).collect();
+        let mut every = core_tool_specs(true, true, true);
+        every.push(load_plugin_spec());
+        let every: Vec<String> = every.into_iter().map(|spec| spec.name).collect();
         assert_eq!(every, CORE_TOOL_NAMES);
         assert!(matches!(
             CoreTool::parse(&call("read_file", json!({"file": "a.pdf", "offset": 10}))).unwrap(),
@@ -674,6 +720,10 @@ mod tests {
         assert!(matches!(
             CoreTool::parse(&call("view_image", json!({"file": "p.png"}))).unwrap(),
             CoreTool::ViewImage(_)
+        ));
+        assert!(matches!(
+            CoreTool::parse(&call("load_plugin", json!({"name": "finance"}))).unwrap(),
+            CoreTool::LoadPlugin(_)
         ));
     }
 }

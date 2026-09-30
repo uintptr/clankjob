@@ -5,6 +5,7 @@
 //! at each step. After a crash, the next activation therefore resumes exactly where this
 //! one stopped: tool calls the LLM already requested are run without asking it again.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::thread;
 
@@ -24,11 +25,11 @@ use crate::context::{build_messages, pending_tool_calls};
 use crate::files::{FileStore, chunk, find, views};
 use crate::plugin_tools::PluginTools;
 use crate::prompts::{
-    CASE_HEADER, CaseView, FILES, GUIDES, INSTRUCTIONS, PromptContext, PromptSet, SYSTEM, USER_PROMPT,
+    CASE_HEADER, CaseView, FILES, GUIDES, INSTRUCTIONS, PLUGINS, PromptContext, PromptSet, SYSTEM, USER_PROMPT,
 };
 use crate::tools::{
     AskHumanArgs, CORE_TOOL_NAMES, CoreTool, DEFAULT_READ_CHARS, MAX_READ_CHARS, ReadFileArgs, add, core_tool_specs,
-    describe_plugin_conditions, schedule,
+    describe_plugin_conditions, load_plugin_spec, schedule,
 };
 use crate::transitions::{ClaimedCase, change_state, load_case};
 use crate::{Result, Shared, later};
@@ -223,6 +224,27 @@ fn read_guide(guides: &[Guide], wanted: &str) -> ToolExecution {
     ToolExecution::error(format!("no guide named `{wanted}`; available: {}", names.join(", ")))
 }
 
+/// `load_plugin`: offer a plugin's tools from the next turn on. The case's event log keeps
+/// the result, which is how later turns know the plugin is loaded.
+fn load_plugin(plugins: &PluginTools, wanted: &str) -> ToolExecution {
+    let wanted = wanted.trim();
+    let index = plugins.index(&BTreeSet::new());
+    let found = index
+        .iter()
+        .find(|plugin| plugin.id == wanted)
+        .or_else(|| index.iter().find(|plugin| plugin.id.eq_ignore_ascii_case(wanted)));
+    if let Some(plugin) = found {
+        return ToolExecution::ok(json!({
+            "plugin": plugin.id,
+            "tools": plugin.tools,
+            "conditions": plugin.conditions,
+            "note": "Its tools are offered to you from your next turn on.",
+        }));
+    }
+    let ids: Vec<&str> = index.iter().map(|plugin| plugin.id.as_str()).collect();
+    ToolExecution::error(format!("no plugin named `{wanted}`; available: {}", ids.join(", ")))
+}
+
 /// A name for a tool's output file that no file of the case has yet.
 fn unique_name(files: &[CaseFile], wanted: &str) -> String {
     if !files.iter().any(|file| file.name == wanted) {
@@ -369,6 +391,7 @@ fn execute(connection: &Connection, case: &Case, call: &ToolCall, env: &FileEnv<
         CoreTool::ReadFile(args) => read_file(env, &args),
         CoreTool::ViewImage(args) => view_image(env, &args.file),
         CoreTool::ReadGuide(args) => read_guide(env.guides, &args.name),
+        CoreTool::LoadPlugin(args) => load_plugin(env.plugins, &args.name),
     })
 }
 
@@ -389,9 +412,14 @@ fn build_request(
     let file_views = views(&files, vision);
     let guides = plugins.guides();
     let user_prompt = shared.settings.user_prompt_path.as_deref().and_then(crate::user_prompt::read);
+    let loaded = plugins.loaded(events);
+    let index = plugins.index(&loaded);
     let mut tools = core_tool_specs(!files.is_empty(), vision, !guides.is_empty());
-    describe_plugin_conditions(&mut tools, plugins);
-    tools.extend(plugins.specs());
+    if !index.is_empty() {
+        tools.push(load_plugin_spec());
+    }
+    describe_plugin_conditions(&mut tools, plugins, &loaded);
+    tools.extend(plugins.specs(&loaded));
     let context = PromptContext {
         now: Utc::now().to_rfc3339(),
         case: CaseView {
@@ -407,6 +435,7 @@ fn build_request(
         instructions: &instructions,
         files: &file_views,
         guides: &guides,
+        plugins: &index,
         user_prompt: user_prompt.as_deref(),
         wake: None,
     };
@@ -429,6 +458,9 @@ fn build_request(
     }
     if !guides.is_empty() {
         sections.push(prompts.render(GUIDES, &context)?);
+    }
+    if !index.is_empty() {
+        sections.push(prompts.render(PLUGINS, &context)?);
     }
     let image =
         |id: &clankjob_core::ids::FileId| files.iter().find(|file| &file.id == id).and_then(|file| store.image(file));
@@ -1045,10 +1077,86 @@ mod tests {
         assert_eq!(results[3].content, json!({ "title": "Earnings call" }));
         assert!(results[4].is_error);
         assert!(results[5].content["text"].as_str().unwrap().contains("Revenue grew 12%"));
-        let first = &provider.requests.lock().unwrap()[0];
-        assert!(first.system.contains("`earnings-call` (youtube): Analysing an earnings call."));
-        let offered: Vec<&str> = first.tools.iter().map(|tool| tool.name.as_str()).collect();
-        assert!(offered.contains(&"read_guide") && offered.contains(&"youtube_transcript"));
+        let requests = provider.requests.lock().unwrap();
+        assert!(
+            requests[0]
+                .system
+                .contains("`earnings-call` (youtube): Analysing an earnings call.")
+        );
+        let offered =
+            |index: usize| -> Vec<String> { requests[index].tools.iter().map(|tool| tool.name.clone()).collect() };
+        assert!(offered(0).contains(&"read_guide".to_owned()));
+        assert!(!offered(0).contains(&"youtube_transcript".to_owned()), "not loaded yet");
+        assert!(
+            offered(1).contains(&"youtube_transcript".to_owned()),
+            "reading its guide loaded it"
+        );
+    }
+
+    #[test]
+    fn plugin_tools_are_offered_once_their_plugin_is_loaded() {
+        // Arrange
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let provider = ScriptedProvider::new([
+            Ok(reply(&[("load_plugin", json!({"name": "nope"}))])),
+            Ok(reply(&[("load_plugin", json!({"name": "YouTube"}))])),
+            Ok(reply(&[("complete", json!({"summary": "Done."}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let tool = |name: &str| clankjob_core::llm::ToolSpec {
+            name: name.to_owned(),
+            description: "A tool.".to_owned(),
+            parameters: json!({"type": "object"}),
+        };
+        engine.plugin_tools().replace(
+            vec![
+                Arc::new(FakeTranscript {
+                    spec: tool("youtube_transcript"),
+                }),
+                Arc::new(FakeSend {
+                    spec: tool("send_email"),
+                    sent: std::sync::Mutex::default(),
+                }),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let case = create(&engine, &mut connection, Budgets::default());
+
+        // Act
+        let done = activate(&engine, &mut connection);
+
+        // Assert
+        assert_eq!(done.state, CaseState::Completed);
+        let results: Vec<ToolResult> = events(&connection, &case)
+            .into_iter()
+            .filter_map(|body| match body {
+                EventBody::ToolResult(result) => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert!(results[0].is_error);
+        assert!(
+            results[0].content["error"]
+                .as_str()
+                .unwrap()
+                .contains("available: email, youtube")
+        );
+        assert_eq!(results[1].content["plugin"], "youtube");
+        let requests = provider.requests.lock().unwrap();
+        let offered =
+            |index: usize| -> Vec<String> { requests[index].tools.iter().map(|tool| tool.name.clone()).collect() };
+        assert!(offered(0).contains(&"load_plugin".to_owned()));
+        assert!(!offered(1).contains(&"youtube_transcript".to_owned()));
+        assert!(offered(2).contains(&"youtube_transcript".to_owned()));
+        assert!(!offered(2).contains(&"send_email".to_owned()), "only the loaded plugin");
+        assert!(
+            requests[0]
+                .system
+                .contains("- `email`: tools send_email\n- `youtube`: tools youtube_transcript")
+        );
+        assert!(requests[2].system.contains("- `youtube` (loaded): tools youtube_transcript"));
     }
 
     /// A tool that needs approval and records what it was run with.

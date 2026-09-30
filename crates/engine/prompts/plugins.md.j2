@@ -1,0 +1,10 @@
+## Plugins
+
+Plugins offer more tools and wait conditions. A plugin's tools are offered to you only
+once it is loaded: when the task needs one, load its plugin with `load_plugin` first
+(reading one of its guides loads it too).
+
+{% for plugin in plugins %}
+- `{{ plugin.id }}`{% if plugin.loaded %} (loaded){% endif %}: {% if plugin.tools %}tools {{ plugin.tools | join(", ") }}{% endif %}{% if plugin.tools and plugin.conditions %}; {% endif %}{% if plugin.conditions %}wait conditions {{ plugin.conditions | join(", ") }}{% endif %}
+
+{% endfor %}
