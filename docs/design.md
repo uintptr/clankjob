@@ -31,6 +31,7 @@ marked **(built)**, **(partly built)** or **(planned)**.
 | Core tools, `core.timer`, `core.human_input`                             | Built                 | §5.1      |
 | Context rebuilding, notes, prompt templates, profiles, hot reload        | Built                 | §7.1–§7.4 |
 | Compaction of long transcripts                                           | Planned               | §7.3      |
+| Fresh wakes (`sleep` with `fresh`) for routine periodic checks           | Built                 | §7.7      |
 | Instructions (always in context) and files (read on demand)              | Built                 | §7.5      |
 | OpenAI-compatible LLM adapter, model discovery, images for vision models | Built                 | §8        |
 | Questions to the owner, answered from the web client                     | Built                 | §10.1     |
@@ -260,7 +261,7 @@ so they are never picked up later.
 
 | Tool           | Arguments                                                 | Effect                                                                                                             |
 | -------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `sleep`        | `conditions: [WaitCondition]`, `reason`                   | Suspends the case until **any** condition fires or times out.                                                      |
+| `sleep`        | `conditions: [WaitCondition]`, `reason`, `fresh?`         | Suspends the case until **any** condition fires or times out. With `fresh`, the next wake starts anew (§7.7).      |
 | `ask_human`    | `question`, `timeout?`, `also_wait_for?: [WaitCondition]` | Creates a question for the owner and suspends until it is answered, or an `also_wait_for` condition fires (§10.2). |
 | `complete`     | `summary`, `result?` (any JSON)                           | Finishes the case successfully.                                                                                    |
 | `fail`         | `reason`                                                  | Finishes the case as failed.                                                                                       |
@@ -543,6 +544,16 @@ to anything over $500"). A case's own instructions come later and win where they
 
 It differs from instructions (§7.5), which belong to one case, and from profiles (§7.4),
 which a case opts into.
+
+### 7.7 Fresh wakes (built)
+
+A case that wakes up again and again for routine work (checking the forecast every 30
+minutes, say) gains nothing from its old turns, yet every turn would resend them. When the
+LLM passes `fresh: true` to `sleep`, the next wake starts a new conversation: the messages
+are built only from the first wake after that sleep, so the LLM sees the system prompt
+(goal, notes, instructions) and the wake. The `system` prompt tells it when to do so and to
+save what it still needs in notes first. The decision is the LLM's; the owner can force it
+through the case's instructions. Earlier events are never deleted and stay in the timeline.
 
 ## 8. LLM providers (built)
 

@@ -20,6 +20,9 @@ pub struct SleepArgs {
     pub conditions: Vec<WaitConditionSpec>,
     /// Why the case is sleeping (shown in the timeline).
     pub reason: String,
+    /// Wake up with a fresh conversation: only the system prompt and the wake.
+    #[serde(default)]
+    pub fresh: bool,
 }
 
 /// Arguments of `ask_human`.
@@ -157,6 +160,10 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
     READ_GUIDE,
     LOAD_PLUGIN,
 ];
+
+/// Description of `sleep`'s `fresh` argument.
+const FRESH_DESCRIPTION: &str = "Wake up without this conversation: only the system prompt (goal, notes, \
+     instructions) and the wake. Use it for routine periodic checks once everything worth keeping is in notes.";
 
 /// Characters `read_file` returns when `max_chars` is not given.
 pub const DEFAULT_READ_CHARS: usize = 20_000;
@@ -391,6 +398,23 @@ pub fn describe_plugin_conditions(specs: &mut [ToolSpec], plugins: &PluginTools,
     );
 }
 
+/// `sleep`, given the schema of one wait condition.
+fn sleep_spec(condition: &Value) -> ToolSpec {
+    spec(
+        "sleep",
+        "Suspend the case until any of the conditions fires or times out. Costs nothing while asleep.",
+        json!({
+            "type": "object",
+            "properties": {
+                "conditions": {"type": "array", "items": condition, "minItems": 1},
+                "reason": {"type": "string", "description": "What you are waiting for."},
+                "fresh": {"type": "boolean", "description": FRESH_DESCRIPTION}
+            },
+            "required": ["conditions", "reason"]
+        }),
+    )
+}
+
 /// `find_contact` and `save_contact`, offered to every case.
 fn contact_tool_specs() -> Vec<ToolSpec> {
     vec![
@@ -462,18 +486,7 @@ pub fn core_tool_specs(has_files: bool, vision: bool, has_guides: bool) -> Vec<T
         "required": ["kind"]
     });
     let mut specs = vec![
-        spec(
-            "sleep",
-            "Suspend the case until any of the conditions fires or times out. Costs nothing while asleep.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "conditions": {"type": "array", "items": condition, "minItems": 1},
-                    "reason": {"type": "string", "description": "What you are waiting for."}
-                },
-                "required": ["conditions", "reason"]
-            }),
-        ),
+        sleep_spec(&condition),
         spec(
             "ask_human",
             "Ask the owner one clear question and suspend until they answer.",

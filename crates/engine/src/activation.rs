@@ -361,7 +361,7 @@ fn execute(connection: &Connection, case: &Case, call: &ToolCall, env: &FileEnv<
         }
         CoreTool::Sleep(args) => match register_waits(connection, case, &args.conditions, env.plugins)? {
             Ok(conditions) => ToolExecution::ending(
-                json!({ "status": "sleeping", "conditions": conditions }),
+                json!({ "status": "sleeping", "conditions": conditions, "fresh": args.fresh }),
                 CaseState::Sleeping,
             ),
             Err(message) => ToolExecution::error(message),

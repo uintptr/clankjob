@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use clankjob_core::event::{Event, EventBody, ToolResult};
 use clankjob_core::ids::FileId;
 use clankjob_core::llm::{ImageData, Message, ToolCall};
+use serde_json::Value;
 
 use crate::prompts::{NUDGE, PromptContext, PromptSet, RenderError, WAKE};
 
@@ -20,6 +21,26 @@ fn viewed_image(result: &ToolResult) -> Option<(FileId, String)> {
     let id = result.content.get("image_file_id")?.as_str()?;
     let name = result.content.get("file")?.as_str()?;
     Some((FileId::from_string(id), name.to_owned()))
+}
+
+/// Whether an event is a `sleep` that asked to wake up with a fresh conversation.
+fn is_fresh_sleep(event: &Event) -> bool {
+    matches!(&event.body, EventBody::ToolResult(result)
+        if result.tool_name == "sleep" && !result.is_error && result.content.get("fresh") == Some(&Value::Bool(true)))
+}
+
+/// The events the conversation is built from: those from the first wake after the latest
+/// `sleep` with `fresh`, or all of them. Earlier events stay in the log and the timeline.
+fn since_fresh_start(events: &[Event]) -> &[Event] {
+    let Some(sleep) = events.iter().rposition(is_fresh_sleep) else {
+        return events;
+    };
+    events
+        .iter()
+        .skip(sleep)
+        .position(|event| matches!(event.body, EventBody::Wake(_)))
+        .and_then(|offset| events.get(sleep.saturating_add(offset)..))
+        .unwrap_or(events)
 }
 
 /// Tool calls of the latest LLM turn that have no recorded result yet.
@@ -65,6 +86,8 @@ pub fn pending_tool_calls(events: &[Event]) -> Vec<ToolCall> {
 /// message during an activation) is held back until the results are in, because providers
 /// require tool results to directly follow the turn that requested them.
 ///
+/// After a `sleep` with `fresh`, the conversation starts again at the next wake.
+///
 /// # Arguments
 ///
 /// * `events` - The case's full event log, in order
@@ -81,6 +104,7 @@ pub fn build_messages(
     context: &PromptContext<'_>,
     image: &dyn Fn(&FileId) -> Option<ImageData>,
 ) -> Result<Vec<Message>, RenderError> {
+    let events = since_fresh_start(events);
     let viewed = events
         .iter()
         .filter(|event| matches!(&event.body, EventBody::ToolResult(result) if viewed_image(result).is_some()))
@@ -340,6 +364,63 @@ mod tests {
             ]
         );
         assert!(matches!(&messages[2], Message::User { text, .. } if text.contains("left out to save context")));
+    }
+
+    fn sleep(id: &str, fresh: bool) -> EventBody {
+        EventBody::ToolResult(ToolResult {
+            tool_call_id: id.to_owned(),
+            tool_name: "sleep".to_owned(),
+            content: json!({"status": "sleeping", "conditions": [], "fresh": fresh}),
+            is_error: false,
+        })
+    }
+
+    fn timer() -> EventBody {
+        EventBody::Wake(WakeReason::HumanMessage {
+            text: "tick".to_owned(),
+        })
+    }
+
+    #[test]
+    fn a_fresh_sleep_starts_the_conversation_again_at_the_next_wake() {
+        let events = [
+            event(1, EventBody::Wake(WakeReason::Created)),
+            event(2, turn(&["s1", "late"])),
+            event(3, sleep("s1", true)),
+            event(4, result("late")),
+            event(5, timer()),
+            event(6, turn(&["s2"])),
+            event(7, sleep("s2", true)),
+            event(8, timer()),
+        ];
+
+        let messages = build(&events);
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(&messages[0], Message::User { text, .. } if text.contains("tick")));
+    }
+
+    #[test]
+    fn a_sleep_without_fresh_keeps_the_conversation() {
+        let events = [
+            event(1, EventBody::Wake(WakeReason::Created)),
+            event(2, turn(&["s1"])),
+            event(3, sleep("s1", false)),
+            event(4, timer()),
+        ];
+
+        assert_eq!(build(&events).len(), 4);
+    }
+
+    #[test]
+    fn a_fresh_sleep_not_yet_woken_keeps_the_conversation() {
+        let events = [
+            event(1, EventBody::Wake(WakeReason::Created)),
+            event(2, turn(&["s1"])),
+            event(3, sleep("s1", true)),
+        ];
+
+        assert_eq!(build(&events).len(), 3);
     }
 
     #[test]
