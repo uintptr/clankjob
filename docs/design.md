@@ -1401,7 +1401,9 @@ a look; the web client shows it in the navigation. Secrets are never included.
 
 `GET /healthz`, without auth: `200` when the database answers and the scheduler ticked in
 the last two minutes, `503` otherwise, with
-`{ "version", "database", "scheduler", "last_scheduler_tick", "token_required" }`.
+`{ "version", "commit", "database", "scheduler", "last_scheduler_tick", "token_required" }`:
+`version` is the release (`0.1.0`), or `git describe` for a build between releases
+(`0.1.0-2-gabc1234`); the web UI shows it in its header.
 `version` is the short commit the binary was built from (the `CLANKJOB_COMMIT` build
 argument in Docker, `git` otherwise, else `unknown`); the web UI shows it in its header.
 

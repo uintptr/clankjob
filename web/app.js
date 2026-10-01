@@ -316,7 +316,10 @@ function pollHealth() {
         dot.className = `dot ${healthy ? "" : "bad"}`;
         text.textContent = healthy ? "engine running" : "engine unreachable";
         sub.textContent = health?.last_scheduler_tick ? `tick ${relative(health.last_scheduler_tick)}` : "";
-        if (health?.version) version.textContent = health.version;
+        if (health?.version) {
+            version.textContent = `v${health.version}`;
+            version.title = `Version ${health.version}, built from commit ${health.commit}`;
+        }
     }, 15000);
 }
 
