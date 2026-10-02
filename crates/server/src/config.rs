@@ -565,7 +565,7 @@ mod tests {
                 env: "API_TOKEN".to_owned()
             }
         );
-        assert_eq!(config.budgets.max_activations, 5);
+        assert_eq!(config.budgets.max_activations_per_day, 5, "read under its former name");
         assert_eq!(
             config.budgets.max_turns_per_activation,
             Budgets::default().max_turns_per_activation

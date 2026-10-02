@@ -4,7 +4,7 @@
 - Owner: {{ case.owner or "unknown" }}
 - Created: {{ case.created_at }}
 - Current time: {{ now }}
-- Activation {{ usage.activations }} of at most {{ budgets.max_activations }}
+- Activation {{ usage.activations }}; {{ activations_today }} in the last 24 hours, of at most {{ budgets.max_activations_per_day }} a day
 
 ## Goal
 

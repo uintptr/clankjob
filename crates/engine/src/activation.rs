@@ -395,6 +395,16 @@ fn execute(connection: &Connection, case: &Case, call: &ToolCall, env: &FileEnv<
     })
 }
 
+/// Activations of a case that started in the last 24 hours, the current one included.
+fn activations_today(connection: &Connection, case_id: &clankjob_core::ids::CaseId) -> Result<u32> {
+    let now = Utc::now();
+    // Only fails for a clock near the start of time; then every activation counts.
+    let since = now
+        .checked_sub_signed(chrono::Duration::hours(24))
+        .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC);
+    Ok(storage::activations::count_started_since(connection, case_id, since)?)
+}
+
 /// Build the request for the next LLM turn from the case and its event log.
 fn build_request(
     connection: &Connection,
@@ -430,6 +440,7 @@ fn build_request(
         },
         budgets: &case.budgets,
         usage: &case.usage,
+        activations_today: activations_today(connection, &case.id)?,
         notes: &notes,
         tools: &tools,
         instructions: &instructions,
@@ -828,10 +839,14 @@ impl Activation<'_> {
             return self.run_tools(&pending);
         }
         let budgets = case.budgets;
-        if case.usage.activations > budgets.max_activations {
+        let today = activations_today(self.connection, &case.id)?;
+        if today > budgets.max_activations_per_day {
             return self.fail(
                 &case,
-                &format!("budget exceeded: more than {} activations", budgets.max_activations),
+                &format!(
+                    "budget exceeded: more than {} activations in 24 hours",
+                    budgets.max_activations_per_day
+                ),
             );
         }
         if case.usage.total_tokens() >= budgets.max_total_tokens {
@@ -1906,6 +1921,51 @@ mod tests {
 
         assert_eq!(failed.state, CaseState::Failed);
         assert!(failed.outcome.unwrap().contains("2 LLM turns"));
+    }
+
+    #[test]
+    fn the_activation_budget_counts_the_last_24_hours_only() {
+        // Arrange: a case allowed one activation a day, with three from two days ago.
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let nap = || {
+            Ok(reply(&[(
+                "sleep",
+                json!({"conditions": [{"kind": "core.timer", "params": {"after": "0s"}}], "reason": "check later"}),
+            )]))
+        };
+        let provider = ScriptedProvider::new([nap(), nap()]);
+        let engine = engine(&test_db, provider);
+        let case = create(
+            &engine,
+            &mut connection,
+            Budgets {
+                max_activations_per_day: 1,
+                ..Budgets::default()
+            },
+        );
+        let two_days_ago = Utc::now() - chrono::Duration::days(2);
+        for _ in 0..3 {
+            let id = clankjob_core::ids::ActivationId::generate();
+            storage::activations::start_activation(
+                &connection,
+                &id,
+                &case.id,
+                &std::collections::BTreeMap::new(),
+                two_days_ago,
+            )
+            .unwrap();
+        }
+
+        // Act
+        let asleep = activate(&engine, &mut connection);
+        let _ = crate::scheduler::tick(&mut connection, Utc::now(), 10).unwrap();
+        let failed = activate(&engine, &mut connection);
+
+        // Assert
+        assert_eq!(asleep.state, CaseState::Sleeping, "older activations don't count");
+        assert_eq!(failed.state, CaseState::Failed);
+        assert!(failed.outcome.unwrap().contains("more than 1 activations in 24 hours"));
     }
 
     #[test]

@@ -546,7 +546,7 @@ async function newCaseDialog() {
                 h(
                     "div",
                     { class: "three" },
-                    field("Max activations", number("max_activations", "20")),
+                    field("Max activations a day", number("max_activations_per_day", "100")),
                     field("Turns per activation", number("max_turns_per_activation", "30")),
                     field("Max tokens", number("max_total_tokens", "2000000")),
                 ),
@@ -570,7 +570,7 @@ async function newCaseDialog() {
         for (const key of ["owner", "profile", "model"]) if (values[key]) body[key] = values[key].trim();
         if (values.approvals && values.approvals !== "default") body.approvals = values.approvals;
         const budgets = {};
-        for (const key of ["max_activations", "max_turns_per_activation", "max_total_tokens"]) if (values[key]) budgets[key] = Number(values[key]);
+        for (const key of ["max_activations_per_day", "max_turns_per_activation", "max_total_tokens"]) if (values[key]) budgets[key] = Number(values[key]);
         if (Object.keys(budgets).length) body.budgets = budgets;
         if (instructions.length) body.instructions = instructions;
         if (channels.length) body.human_channels = channelBoxes.filter((box) => box.checked).map((box) => box.value);
@@ -1421,7 +1421,7 @@ function caseDetail(pane, id, onRenamed) {
                 h(
                     "div",
                     { class: "facts" },
-                    fact("activations", usage.activations, item.budgets.max_activations),
+                    fact("activations", usage.activations),
                     fact("tokens", usage.input_tokens + usage.output_tokens, item.budgets.max_total_tokens),
                     fact("turn limit per activation", item.budgets.max_turns_per_activation, 0),
                 ),

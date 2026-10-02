@@ -30,6 +30,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_channels.sql"),
     include_str!("../migrations/0003_approvals_and_checks.sql"),
     include_str!("../migrations/0004_contacts.sql"),
+    include_str!("../migrations/0005_daily_activation_budget.sql"),
 ];
 
 /// Backups taken before migrating that are kept, newest first; older ones are deleted.
@@ -333,6 +334,40 @@ mod tests {
             KEPT_BACKUPS
         );
         assert!(!backup.exists(), "the oldest backup was pruned");
+    }
+
+    #[test]
+    fn the_lifetime_activation_budget_becomes_a_daily_one() {
+        // Arrange: two cases stored with the former budget, one at its default of 20.
+        let test_db = test_support::TestDb::new();
+        let connection = test_db.connect();
+        let default = test_support::insert_case(&connection);
+        let custom = test_support::insert_case(&connection);
+        for (case, limit) in [(&default, 20), (&custom, 5)] {
+            let old =
+                format!(r#"{{"max_activations": {limit}, "max_turns_per_activation": 30, "max_total_tokens": 9}}"#);
+            connection
+                .execute(
+                    "UPDATE cases SET budgets = ?1 WHERE id = ?2",
+                    rusqlite::params![old, case.as_str()],
+                )
+                .unwrap();
+        }
+
+        // Act
+        connection.execute_batch(MIGRATIONS[4]).unwrap();
+
+        // Assert
+        let budgets = |case: &clankjob_core::ids::CaseId| cases::get_case(&connection, case).unwrap().unwrap().budgets;
+        assert_eq!(budgets(&default).max_activations_per_day, 100);
+        assert_eq!(budgets(&custom).max_activations_per_day, 5);
+        assert_eq!(budgets(&custom).max_total_tokens, 9, "the other budgets are kept");
+        let stored: String = connection
+            .query_row("SELECT budgets FROM cases WHERE id = ?1", [custom.as_str()], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!stored.contains("\"max_activations\""));
     }
 
     #[test]

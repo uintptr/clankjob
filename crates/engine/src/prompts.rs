@@ -121,6 +121,8 @@ pub struct PromptContext<'a> {
     pub budgets: &'a Budgets,
     /// Its usage so far.
     pub usage: &'a Usage,
+    /// Its activations in the last 24 hours, the current one included.
+    pub activations_today: u32,
     /// Its notes.
     pub notes: &'a [CaseNote],
     /// Tools available to the LLM.
@@ -315,6 +317,7 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         },
         budgets: &budgets,
         usage: &usage,
+        activations_today: 1,
         notes: &notes,
         tools: &tools,
         instructions: &instructions,
@@ -529,6 +532,7 @@ mod tests {
             },
             budgets,
             usage,
+            activations_today: 1,
             notes: &[],
             tools: &[],
             instructions: &[],

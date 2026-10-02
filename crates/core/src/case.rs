@@ -57,8 +57,11 @@ string_enum!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Budgets {
-    /// Maximum number of activations (wake-ups that reach the LLM) over the case's life.
-    pub max_activations: u32,
+    /// Maximum activations (wake-ups that reach the LLM) in any 24 hours: stops a runaway
+    /// loop without ending a case that checks something every 15 minutes for weeks.
+    /// `max_activations`, its former name (then over the case's life), is still read.
+    #[serde(alias = "max_activations")]
+    pub max_activations_per_day: u32,
     /// Maximum LLM turns within a single activation.
     pub max_turns_per_activation: u32,
     /// Maximum input plus output tokens over the case's life.
@@ -68,7 +71,7 @@ pub struct Budgets {
 impl Default for Budgets {
     fn default() -> Self {
         Self {
-            max_activations: 20,
+            max_activations_per_day: 100,
             max_turns_per_activation: 30,
             max_total_tokens: 2_000_000,
         }
@@ -246,7 +249,7 @@ mod tests {
     fn budgets_fill_missing_fields_with_defaults() {
         let budgets: Budgets = serde_json::from_str(r#"{"max_activations": 3}"#).unwrap();
 
-        assert_eq!(budgets.max_activations, 3);
+        assert_eq!(budgets.max_activations_per_day, 3, "the former name is still read");
         assert_eq!(
             budgets.max_turns_per_activation,
             Budgets::default().max_turns_per_activation

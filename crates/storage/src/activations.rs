@@ -61,6 +61,20 @@ pub fn end_activation(
     Ok(())
 }
 
+/// How many activations of a case started at or after `since`, for the daily budget.
+///
+/// # Errors
+///
+/// Returns a [`crate::StorageError`] if the query fails.
+pub fn count_started_since(connection: &Connection, case_id: &CaseId, since: DateTime<Utc>) -> Result<u32> {
+    // Served by the (case_id, started_at) index.
+    Ok(connection.query_row(
+        "SELECT COUNT(*) FROM activations WHERE case_id = ?1 AND started_at >= ?2",
+        params![case_id.as_str(), to_millis(since)],
+        |row| row.get(0),
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +113,19 @@ mod tests {
             .unwrap();
         assert_eq!(end_state, "sleeping");
         assert_eq!(stored_hashes, r#"{"system":"abc"}"#);
+    }
+
+    #[test]
+    fn activations_are_counted_from_a_point_in_time() {
+        let test_db = TestDb::new();
+        let connection = test_db.connect();
+        let case_id = insert_case(&connection);
+        let other = insert_case(&connection);
+        for (case, at) in [(&case_id, 1), (&case_id, 5), (&case_id, 9), (&other, 9)] {
+            start_activation(&connection, &ActivationId::generate(), case, &BTreeMap::new(), time(at)).unwrap();
+        }
+
+        assert_eq!(count_started_since(&connection, &case_id, time(5)).unwrap(), 2);
+        assert_eq!(count_started_since(&connection, &case_id, time(10)).unwrap(), 0);
     }
 }

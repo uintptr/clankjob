@@ -300,11 +300,16 @@ config and can be overridden per case.
 
 | Budget                     | Default   | Checked                               |
 | -------------------------- | --------- | ------------------------------------- |
-| `max_activations`          | 20        | when an activation starts             |
+| `max_activations_per_day`  | 100       | before each LLM call, over 24 hours   |
 | `max_turns_per_activation` | 30        | before each LLM call                  |
 | `max_total_tokens`         | 2 000 000 | before each LLM call (input + output) |
 
-An exhausted budget fails the case with a `budget exceeded: …` reason. Sending the case a
+The activation budget is a rolling 24 hours rather than a lifetime total: a case that
+watches something (a forecast every 15 minutes, for weeks) must not run out, and showing
+the agent a small lifetime cap made it ration its checks (a rain alert checked the
+forecast twice in a day and missed the rain). It still stops a loop that wakes up every
+minute. `max_activations`, its former name, is still read as the daily limit. An
+exhausted budget fails the case with a `budget exceeded: …` reason. Sending the case a
 message reopens it. Planned: per-activation tool-call and wall-clock limits, a maximum
 case age, and a cost budget in dollars (which needs per-model prices).
 
@@ -1303,7 +1308,7 @@ POST /api/v1/cases
   "profile": "quotes",
   "llm": "default",
   "model": "openai/gpt-4.1-mini",
-  "budgets": { "max_activations": 20, "max_turns_per_activation": 30, "max_total_tokens": 2000000 },
+  "budgets": { "max_activations_per_day": 100, "max_turns_per_activation": 30, "max_total_tokens": 2000000 },
   "instructions": [{ "name": "tone.md", "content": "Be polite. Never offer more than $1,500." }],
   "human_channels": ["discord_joe"]
 }
@@ -1743,7 +1748,7 @@ vision = false                                       # the default
 timeout = "5m"
 
 [budgets]
-max_activations = 20
+max_activations_per_day = 100
 max_turns_per_activation = 30
 max_total_tokens = 2000000
 ```

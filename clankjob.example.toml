@@ -106,6 +106,6 @@ vision = false
 # Limits for cases that don't set their own. A case that exceeds one fails; send it a
 # message to reopen it after raising the limit.
 [budgets]
-max_activations = 20  # wake-ups that reach the LLM, over the case's life
+max_activations_per_day = 100  # wake-ups that reach the LLM in any 24 hours (stops runaway loops)
 max_turns_per_activation = 30  # LLM calls within one wake-up
 max_total_tokens = 2000000  # input + output tokens, over the case's life

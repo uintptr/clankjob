@@ -1041,7 +1041,7 @@ mod tests {
         assert_eq!((list_status, detail_status, events_status), (200, 200, 200));
         assert_eq!(list["cases"][0]["id"], id.as_str());
         assert_eq!(detail["case"]["state"], "pending");
-        assert_eq!(detail["case"]["budgets"]["max_activations"], 20);
+        assert_eq!(detail["case"]["budgets"]["max_activations_per_day"], 100);
         assert_eq!(events["events"][0]["kind"], "wake");
         assert_eq!(events["events"][0]["payload"]["reason"], "created");
     }
