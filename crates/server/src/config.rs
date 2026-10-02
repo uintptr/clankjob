@@ -502,9 +502,9 @@ mod tests {
         assert_eq!(config.budgets, Budgets::default());
         assert_eq!(config.llm["default"].timeout, Duration::from_mins(5));
         assert_eq!(config.llm["default"].api_key, None);
-        assert!(config.llm["default"].models.is_empty());
+        assert_eq!(config.llm["default"].models, [] as [std::string::String; 0]);
         assert!(config.llm["default"].discover_models);
-        assert!(config.cors_origins().is_empty());
+        assert_eq!(config.cors_origins(), [] as [std::string::String; 0]);
     }
 
     #[test]

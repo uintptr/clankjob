@@ -132,6 +132,6 @@ mod tests {
             "panel.png"
         );
         assert!(get_file(&connection, &other_case, &photo.id).unwrap().is_none());
-        assert!(list_files(&connection, &other_case).unwrap().is_empty());
+        assert_eq!(list_files(&connection, &other_case).unwrap(), [] as [CaseFile; 0]);
     }
 }

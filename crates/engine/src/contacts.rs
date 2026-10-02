@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(names(&find_all("robin tr")), ["Robin Tremblay"]);
         assert_eq!(find_all("robin tr")["contacts"][0]["trusted"], json!(true));
         assert_eq!(names(&find_all("")).len(), 3);
-        assert!(names(&find_all("nobody")).is_empty());
+        assert_eq!(names(&find_all("nobody")), [] as [std::string::String; 0]);
         assert!(find_all("nobody")["note"].as_str().unwrap().contains("Ask the owner"));
     }
 

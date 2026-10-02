@@ -192,7 +192,7 @@ mod tests {
             .map(|contact| contact.name)
             .collect();
         assert_eq!(names, ["alex", "Robin Tremblay"]);
-        assert!(trusted_emails(&connection).unwrap().is_empty());
+        assert_eq!(trusted_emails(&connection).unwrap(), [] as [String; 0]);
 
         let trusted = NewContact {
             trusted: true,

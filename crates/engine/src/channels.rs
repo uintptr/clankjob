@@ -820,7 +820,7 @@ mod tests {
 
         // Assert
         assert!(matches!(unknown, Err(EngineError::UnknownChannel(name)) if name == "slack"));
-        assert!(none.human_channels.is_empty());
+        assert_eq!(none.human_channels, [] as [std::string::String; 0]);
         assert_eq!(default.human_channels, ["discord_joe"]);
     }
 
@@ -847,7 +847,7 @@ mod tests {
         // Assert
         assert_eq!(on.human_channels, ["discord_joe"]);
         assert!(matches!(unknown, Err(EngineError::UnknownChannel(name)) if name == "slack"));
-        assert!(off.human_channels.is_empty());
+        assert_eq!(off.human_channels, [] as [std::string::String; 0]);
     }
 
     #[test]

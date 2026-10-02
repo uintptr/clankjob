@@ -1762,7 +1762,10 @@ mod tests {
         assert!(matches!(binary, Err(crate::EngineError::InvalidFile(_))));
         assert!(matches!(empty, Err(crate::EngineError::InvalidFile(_))));
         assert!(matches!(cancelled, Err(crate::EngineError::InvalidState { .. })));
-        assert!(storage::files::list_files(&connection, &case.id).unwrap().is_empty());
+        assert_eq!(
+            storage::files::list_files(&connection, &case.id).unwrap(),
+            [] as [clankjob_core::file::CaseFile; 0]
+        );
         assert_eq!(std::fs::read_dir(&test_db.files_dir).map_or(0, Iterator::count), 0);
     }
 
@@ -1805,7 +1808,10 @@ mod tests {
         let done = activate(&engine, &mut connection);
 
         assert_eq!(done.state, CaseState::Completed);
-        assert!(storage::notes::list_notes(&connection, &case.id).unwrap().is_empty());
+        assert_eq!(
+            storage::notes::list_notes(&connection, &case.id).unwrap(),
+            [] as [clankjob_core::case::CaseNote; 0]
+        );
         let skipped = events(&connection, &case).into_iter().filter(
             |body| matches!(body, EventBody::ToolResult(result) if result.is_error && result.tool_name == "note_set"),
         );
@@ -1829,7 +1835,10 @@ mod tests {
         let done = activate(&engine, &mut connection);
 
         assert_eq!(done.state, CaseState::Failed);
-        assert!(storage::waits::active_waits(&connection, &case.id).unwrap().is_empty());
+        assert_eq!(
+            storage::waits::active_waits(&connection, &case.id).unwrap(),
+            [] as [clankjob_core::wait::WaitCondition; 0]
+        );
         let requests = provider.requests.lock().unwrap();
         assert!(matches!(
             requests.last().unwrap().messages.last(),

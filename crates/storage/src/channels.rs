@@ -279,11 +279,14 @@ mod tests {
         answer_request(&connection, &request_id, answer, time(12)).unwrap();
 
         // Assert
-        assert!(not_yet.is_empty());
+        assert_eq!(not_yet, [] as [ChannelDelivery; 0]);
         assert_eq!((due.len(), due[0].attempts, due[0].payload.clone()), (1, 1, payload));
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].delivery, json!({ "thread_id": "7" }));
-        assert!(open_deliveries(&connection, "discord_joe").unwrap().is_empty());
+        assert_eq!(
+            open_deliveries(&connection, "discord_joe").unwrap(),
+            [] as [OpenDelivery; 0]
+        );
         assert_eq!(request_channels(&connection, &request_id).unwrap(), ["discord_joe"]);
         let sent = request_delivery(&connection, &request_id, "discord_joe").unwrap().unwrap();
         assert_eq!((sent.status, sent.last_error), (DeliveryStatus::Sent, None));

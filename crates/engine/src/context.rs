@@ -270,7 +270,10 @@ mod tests {
 
     #[test]
     fn no_turn_means_no_pending_calls() {
-        assert!(pending_tool_calls(&[event(1, EventBody::Wake(WakeReason::Created))]).is_empty());
+        assert_eq!(
+            pending_tool_calls(&[event(1, EventBody::Wake(WakeReason::Created))]),
+            [] as [clankjob_core::llm::ToolCall; 0]
+        );
     }
 
     #[test]

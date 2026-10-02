@@ -750,7 +750,10 @@ mod tests {
         ));
         put_to_sleep(&connection, &case);
         wake_case(&mut connection, &case.id, time(2)).unwrap();
-        assert!(storage::waits::active_waits(&connection, &case.id).unwrap().is_empty());
+        assert_eq!(
+            storage::waits::active_waits(&connection, &case.id).unwrap(),
+            [] as [clankjob_core::wait::WaitCondition; 0]
+        );
         assert_eq!(state(&connection, &case.id), CaseState::Pending);
     }
 
@@ -787,6 +790,9 @@ mod tests {
 
         // Assert
         assert_eq!(claimed.case.state, CaseState::Running);
-        assert!(storage::waits::active_waits(&connection, &case.id).unwrap().is_empty());
+        assert_eq!(
+            storage::waits::active_waits(&connection, &case.id).unwrap(),
+            [] as [clankjob_core::wait::WaitCondition; 0]
+        );
     }
 }

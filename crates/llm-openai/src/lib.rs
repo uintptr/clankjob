@@ -578,7 +578,7 @@ mod tests {
 
         assert_eq!(server.received.lock().unwrap()[0].0, None);
         assert_eq!(response.message.text.as_deref(), Some("Hello"));
-        assert!(response.message.tool_calls.is_empty());
+        assert_eq!(response.message.tool_calls, [] as [clankjob_core::llm::ToolCall; 0]);
         assert_eq!(response.usage, TokenUsage::default());
     }
 

@@ -261,7 +261,7 @@ mod tests {
             (due.len(), due[0].every_ms, due[0].cursor.clone()),
             (1, Some(900_000), None)
         );
-        assert!(not_yet.is_empty());
+        assert_eq!(not_yet, [] as [DueCheck; 0]);
         assert_eq!(
             (later[0].cursor.clone(), later[0].failures),
             (Some(serde_json::json!({ "uid": 7 })), 1)
@@ -299,7 +299,7 @@ mod tests {
 
         assert!(resolve_wait(&connection, &condition.id, WaitStatus::Fired).unwrap());
         assert!(!resolve_wait(&connection, &condition.id, WaitStatus::TimedOut).unwrap());
-        assert!(active_waits(&connection, &case_id).unwrap().is_empty());
+        assert_eq!(active_waits(&connection, &case_id).unwrap(), [] as [WaitCondition; 0]);
     }
 
     #[test]
@@ -320,6 +320,6 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, timer.id);
         cancel_waits(&connection, &case_id).unwrap();
-        assert!(active_waits(&connection, &case_id).unwrap().is_empty());
+        assert_eq!(active_waits(&connection, &case_id).unwrap(), [] as [WaitCondition; 0]);
     }
 }

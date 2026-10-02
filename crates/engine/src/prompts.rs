@@ -580,7 +580,7 @@ mod tests {
         let set = PromptSet::load(dir.path(), None);
 
         // Assert
-        assert!(set.errors().is_empty());
+        assert_eq!(set.errors(), []);
         assert_eq!(set.get(NUDGE).unwrap().source, PromptSource::File);
         assert_eq!(
             set.render(NUDGE, &context(&budgets, &usage)).unwrap(),
