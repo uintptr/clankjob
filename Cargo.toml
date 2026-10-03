@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 publish = false
 
@@ -19,6 +19,7 @@ clankjob-storage = { path = "crates/storage" }
 anyhow = "1.0.104"
 base64 = "0.23.1"
 chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = { version = "0.10.4", features = ["serde"] }
 humantime = "2.4.0"
 humantime-serde = "1.1.1"
 lopdf = "0.42.0"

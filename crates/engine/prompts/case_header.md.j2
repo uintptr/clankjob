@@ -3,7 +3,7 @@
 - Title: {{ case.title }}
 - Owner: {{ case.owner or "unknown" }}
 - Created: {{ case.created_at }}
-- Current time: {{ now }}
+- Current time: {{ now }} ({{ timezone }}). The owner's dates and times are in this time zone unless they say otherwise: "tomorrow at 11:30" means 11:30 tomorrow in it, so give timers its offset.
 - Activation {{ usage.activations }}; {{ activations_today }} in the last 24 hours, of at most {{ budgets.max_activations_per_day }} a day
 
 ## Goal

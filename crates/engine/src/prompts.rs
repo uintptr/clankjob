@@ -10,6 +10,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
+use chrono::{DateTime, SecondsFormat, Utc};
+use chrono_tz::Tz;
 use clankjob_core::case::{Budgets, CaseNote, Instruction, Usage};
 use clankjob_core::event::{InstructionChange, WakeReason};
 use clankjob_core::file::FileKind;
@@ -106,15 +108,32 @@ pub struct CaseView<'a> {
     pub goal: &'a str,
     /// Case owner.
     pub owner: Option<&'a str>,
-    /// Creation time, RFC 3339.
+    /// Creation time, RFC 3339 in the owner's time zone.
     pub created_at: String,
+}
+
+/// Format `at` as RFC 3339 in `timezone`, with its offset, to the second.
+///
+/// # Arguments
+///
+/// * `at` - The instant
+/// * `timezone` - The owner's time zone
+///
+/// # Returns
+///
+/// The time as the owner reads it, e.g. `2026-10-02T22:21:05-04:00`
+#[must_use]
+pub fn local_time(at: DateTime<Utc>, timezone: Tz) -> String {
+    at.with_timezone(&timezone).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 /// Variables available to every template.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PromptContext<'a> {
-    /// Current time, RFC 3339.
+    /// Current time, RFC 3339 in `timezone`.
     pub now: String,
+    /// The owner's time zone, as an IANA name in templates (`America/Toronto`).
+    pub timezone: Tz,
     /// The case.
     pub case: CaseView<'a>,
     /// Its budgets.
@@ -309,6 +328,7 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
     }];
     let base = PromptContext {
         now: "2026-01-01T00:00:00Z".to_owned(),
+        timezone: Tz::UTC,
         case: CaseView {
             title: "Title",
             goal: "Goal",
@@ -524,6 +544,7 @@ mod tests {
     fn context<'a>(budgets: &'a Budgets, usage: &'a Usage) -> PromptContext<'a> {
         PromptContext {
             now: "2026-09-28T12:00:00Z".to_owned(),
+            timezone: Tz::UTC,
             case: CaseView {
                 title: "Electrician quote",
                 goal: "Get a quote",
@@ -563,6 +584,26 @@ mod tests {
 
         assert!(with_goal.contains("Get a quote"));
         assert!(without.contains("created this case with only its title"), "{without}");
+    }
+
+    #[test]
+    fn times_are_shown_in_the_owners_time_zone() {
+        let (budgets, usage) = (Budgets::default(), Usage::default());
+        let at = DateTime::parse_from_rfc3339("2026-10-03T02:21:05.361Z").unwrap().to_utc();
+        let context = PromptContext {
+            now: local_time(at, Tz::America__Toronto),
+            timezone: Tz::America__Toronto,
+            ..context(&budgets, &usage)
+        };
+
+        let header = PromptSet::builtin().render(CASE_HEADER, &context).unwrap();
+
+        assert_eq!(context.now, "2026-10-02T22:21:05-04:00");
+        assert!(
+            header.contains("2026-10-02T22:21:05-04:00 (America/Toronto)"),
+            "{header}"
+        );
+        assert_eq!(local_time(at, Tz::UTC), "2026-10-03T02:21:05Z");
     }
 
     #[test]

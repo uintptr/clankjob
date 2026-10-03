@@ -38,6 +38,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     # Line editing for input(): without it, a terminal whose Backspace sends ^H while the
@@ -353,12 +354,18 @@ def install_files(target: Path, share: Share) -> list[str]:
 
 
 def server_config(template: str, asker: Asker, env: dict[str, str]) -> tuple[str, dict[str, str]]:
-    """clankjob.toml from the example: public URL, LLM endpoint, model and its key."""
+    """clankjob.toml from the example: public URL, time zone, LLM endpoint, model and its key."""
     print("\nServer (config/clankjob.toml)")
     text = template
     public_url = asker.ask("  Public URL, e.g. https://clank.example.com (empty: none)", "")
     if public_url:
         text = set_value(text, None, "public_url", toml_string(public_url))
+    timezone = asker.ask("  Your time zone, e.g. America/Toronto", "UTC")
+    try:
+        _ = ZoneInfo(timezone)
+    except (ValueError, ZoneInfoNotFoundError) as error:
+        raise SetupError(f"{timezone!r} is not a time zone like America/Toronto") from error
+    text = set_value(text, None, "timezone", toml_string(timezone))
     base_url = asker.ask("  LLM endpoint (OpenAI-compatible)", "https://openrouter.ai/api/v1")
     text = set_value(text, "llm.default", "base_url", toml_string(base_url))
     model = asker.ask("  Default model", "openai/gpt-4.1-mini")

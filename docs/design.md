@@ -470,7 +470,8 @@ the same name.
 ```
 
 - **Templates** use `minijinja` (Jinja2 syntax) with strict undefined variables. The
-  variables are `now`, `case` (title, goal, owner, created_at), `budgets`, `usage`,
+  variables are `now` and `case.created_at` (RFC 3339 in the owner's time zone), `timezone`
+  (its IANA name), `case` (title, goal, owner, created_at), `budgets`, `usage`,
   `notes`, `tools`, `instructions`, `files`, `guides`, `user_prompt`, and `wake` for the
   wake template.
 - **Profiles** are optional behaviour packs. A case chooses one with `"profile": "quotes"`
@@ -1733,6 +1734,7 @@ workers = 4                                 # activation threads
 shutdown_grace = "30s"
 default_llm = "default"
 default_profile = "general"                 # optional; must exist in prompts/profiles
+timezone = "America/Toronto"                # optional, IANA name; the LLM reads and shows times in it; UTC by default
 
 [api]
 tokens = [{ secret = "api_token" }]

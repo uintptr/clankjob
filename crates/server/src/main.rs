@@ -135,6 +135,7 @@ fn run() -> anyhow::Result<()> {
         workers: config.workers,
         // The owner's own prompt, editable in the web UI (design §7.6).
         user_prompt_path: Some(config.data_dir.join("user_prompt.md")),
+        timezone: config.timezone,
         ..EngineSettings::default()
     };
     // Rejected prompt files are logged by the engine as they are loaded.

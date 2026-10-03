@@ -117,7 +117,7 @@ pub fn build_messages(
         // Each event is rendered with its own timestamp so past messages never change,
         // which keeps the rebuilt conversation stable across activations.
         let at = PromptContext {
-            now: event.created_at.to_rfc3339(),
+            now: crate::prompts::local_time(event.created_at, context.timezone),
             ..context.clone()
         };
         let user_message = match &event.body {
@@ -233,6 +233,7 @@ mod tests {
         let (budgets, usage) = (Budgets::default(), Usage::default());
         let context = PromptContext {
             now: String::new(),
+            timezone: chrono_tz::Tz::UTC,
             case: CaseView {
                 title: "T",
                 goal: "G",
@@ -321,6 +322,7 @@ mod tests {
         let (budgets, usage) = (Budgets::default(), Usage::default());
         let context = PromptContext {
             now: String::new(),
+            timezone: chrono_tz::Tz::UTC,
             case: CaseView {
                 title: "T",
                 goal: "G",

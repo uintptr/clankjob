@@ -26,6 +26,7 @@ use crate::files::{FileStore, chunk, find, views};
 use crate::plugin_tools::PluginTools;
 use crate::prompts::{
     CASE_HEADER, CaseView, FILES, GUIDES, INSTRUCTIONS, PLUGINS, PromptContext, PromptSet, SYSTEM, USER_PROMPT,
+    local_time,
 };
 use crate::tools::{
     AskHumanArgs, CORE_TOOL_NAMES, CoreTool, DEFAULT_READ_CHARS, MAX_READ_CHARS, ReadFileArgs, add, core_tool_specs,
@@ -430,13 +431,15 @@ fn build_request(
     }
     describe_plugin_conditions(&mut tools, plugins, &loaded);
     tools.extend(plugins.specs(&loaded));
+    let timezone = shared.settings.timezone;
     let context = PromptContext {
-        now: Utc::now().to_rfc3339(),
+        now: local_time(Utc::now(), timezone),
+        timezone,
         case: CaseView {
             title: &case.title,
             goal: &case.goal,
             owner: case.owner.as_deref(),
-            created_at: case.created_at.to_rfc3339(),
+            created_at: local_time(case.created_at, timezone),
         },
         budgets: &case.budgets,
         usage: &case.usage,

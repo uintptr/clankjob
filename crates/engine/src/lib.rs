@@ -169,6 +169,9 @@ pub struct EngineSettings {
     /// The owner's own prompt, added to every case (`user_prompt.md` in the data
     /// directory); `None` for none.
     pub user_prompt_path: Option<PathBuf>,
+    /// The owner's time zone: times shown to the LLM are in it, and it reads the owner's
+    /// times in it.
+    pub timezone: chrono_tz::Tz,
 }
 
 impl Default for EngineSettings {
@@ -184,6 +187,7 @@ impl Default for EngineSettings {
             max_attempts: 5,
             scheduler_batch: 100,
             user_prompt_path: None,
+            timezone: chrono_tz::Tz::UTC,
         }
     }
 }

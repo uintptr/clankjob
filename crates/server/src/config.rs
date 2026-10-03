@@ -224,6 +224,10 @@ pub struct Config {
     /// LLM used by cases that do not name one.
     #[serde(default = "default_llm_name")]
     pub default_llm: String,
+    /// The owner's time zone, an IANA name such as `America/Toronto`: the LLM sees times
+    /// in it and reads the owner's in it. UTC when omitted.
+    #[serde(default = "default_timezone")]
+    pub timezone: chrono_tz::Tz,
     /// API settings.
     pub api: ApiConfig,
     /// Configured LLMs by name.
@@ -255,6 +259,10 @@ fn default_shutdown_grace() -> Duration {
 
 fn default_llm_name() -> String {
     "default".to_owned()
+}
+
+fn default_timezone() -> chrono_tz::Tz {
+    chrono_tz::Tz::UTC
 }
 
 impl Config {
@@ -520,6 +528,16 @@ mod tests {
             config.cors_origins(),
             ["https://clank.acme.com", "http://localhost:5173"]
         );
+    }
+
+    #[test]
+    fn timezone_is_an_iana_name_and_defaults_to_utc() {
+        let toronto = Config::parse(format!("timezone = \"America/Toronto\"\n{MINIMAL}")).unwrap();
+        let unknown = Config::parse(format!("timezone = \"Mars/Olympus\"\n{MINIMAL}"));
+
+        assert_eq!(toronto.timezone, chrono_tz::Tz::America__Toronto);
+        assert_eq!(Config::parse(MINIMAL).unwrap().timezone, chrono_tz::Tz::UTC);
+        assert!(matches!(unknown, Err(ConfigError::Parse(_))));
     }
 
     #[test]

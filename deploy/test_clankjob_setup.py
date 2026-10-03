@@ -86,17 +86,24 @@ class ServerConfigTests(unittest.TestCase):
 
     def test_public_url_and_model_are_set_and_a_keyless_llm_needs_no_key(self) -> None:
         template = (REPO / "clankjob.example.toml").read_text()
-        asker = ScriptedAsker({"Public URL": "https://cj.example.com", "LLM endpoint": "http://ollama:11434/v1",
-                               "Default model": "qwen3:14b"})
+        asker = ScriptedAsker({"Public URL": "https://cj.example.com", "time zone": "America/Toronto",
+                               "LLM endpoint": "http://ollama:11434/v1", "Default model": "qwen3:14b"})
 
         text, found = setup.server_config(template, asker, {})
 
         config = tomllib.loads(text)
         self.assertEqual(config["public_url"], "https://cj.example.com")
+        self.assertEqual(config["timezone"], "America/Toronto")
         self.assertEqual((config["llm"]["default"]["base_url"], config["llm"]["default"]["model"]),
                          ("http://ollama:11434/v1", "qwen3:14b"))
         self.assertNotIn("api_key", config["llm"]["default"])
         self.assertEqual(found, {})
+
+    def test_an_unknown_time_zone_is_refused(self) -> None:
+        template = (REPO / "clankjob.example.toml").read_text()
+
+        with self.assertRaises(setup.SetupError):
+            _ = setup.server_config(template, ScriptedAsker({"time zone": "Mars/Olympus"}), {})
 
 
 class FilesTests(unittest.TestCase):

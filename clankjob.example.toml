@@ -60,6 +60,10 @@ shutdown_grace = "30s"
 default_llm = "default"
 # default_profile = "quotes"   # must exist as prompts/profiles/quotes.md
 
+# Your time zone, an IANA name. The LLM sees the time in it and reads yours in it, so
+# "tomorrow at 11:30" means 11:30 where you are. UTC when omitted.
+# timezone = "America/Toronto"
+
 [api]
 # Bearer tokens accepted by the API and the web UI sign-in. At least one is required.
 tokens = [{ env = "CLANKJOB_TOKEN" }]

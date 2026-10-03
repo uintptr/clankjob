@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 clankjob-core.workspace = true
 clankjob-engine.workspace = true
 clankjob-llm-openai.workspace = true
