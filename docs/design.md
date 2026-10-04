@@ -561,6 +561,11 @@ are built only from the first wake after that sleep, so the LLM sees the system 
 save what it still needs in notes first. The decision is the LLM's; the owner can force it
 through the case's instructions. Earlier events are never deleted and stay in the timeline.
 
+Not every model passes `fresh` when it should, so the engine also trims what earlier wakes
+left behind: a tool result longer than 2,000 characters from before the case's latest
+`sleep` is sent as a one-line note naming the tool, which the LLM can call again. Its own
+turns, the wakes and small results stay, and the current activation's results are whole.
+
 ## 8. LLM providers (built)
 
 ```rust

@@ -13,6 +13,11 @@ use crate::prompts::{NUDGE, PromptContext, PromptSet, RenderError, WAKE};
 /// ones are replaced by a note, since every image is resent with every LLM turn.
 const MAX_IMAGES_IN_CONTEXT: usize = 4;
 
+/// Tool results longer than this many characters, from before the latest `sleep`, are
+/// replaced by a note: earlier wakes' forecasts or pages would otherwise be resent with
+/// every turn of every later wake, whether or not the LLM passed `fresh`.
+const MAX_OLD_RESULT_CHARS: usize = 2_000;
+
 /// The file a successful `view_image` result refers to.
 fn viewed_image(result: &ToolResult) -> Option<(FileId, String)> {
     if result.is_error {
@@ -27,6 +32,11 @@ fn viewed_image(result: &ToolResult) -> Option<(FileId, String)> {
 fn is_fresh_sleep(event: &Event) -> bool {
     matches!(&event.body, EventBody::ToolResult(result)
         if result.tool_name == "sleep" && !result.is_error && result.content.get("fresh") == Some(&Value::Bool(true)))
+}
+
+/// Whether an event is a successful `sleep`, which ends an activation.
+fn is_sleep(event: &Event) -> bool {
+    matches!(&event.body, EventBody::ToolResult(result) if result.tool_name == "sleep" && !result.is_error)
 }
 
 /// The events the conversation is built from: those from the first wake after the latest
@@ -86,7 +96,8 @@ pub fn pending_tool_calls(events: &[Event]) -> Vec<ToolCall> {
 /// message during an activation) is held back until the results are in, because providers
 /// require tool results to directly follow the turn that requested them.
 ///
-/// After a `sleep` with `fresh`, the conversation starts again at the next wake.
+/// After a `sleep` with `fresh`, the conversation starts again at the next wake. Large
+/// tool results from before the latest `sleep` are replaced by a note.
 ///
 /// # Arguments
 ///
@@ -110,10 +121,11 @@ pub fn build_messages(
         .filter(|event| matches!(&event.body, EventBody::ToolResult(result) if viewed_image(result).is_some()))
         .count();
     let mut to_omit = viewed.saturating_sub(MAX_IMAGES_IN_CONTEXT);
+    let last_sleep = events.iter().rposition(is_sleep);
     let mut messages = Vec::with_capacity(events.len());
     let mut deferred = Vec::new();
     let mut unanswered: HashSet<&str> = HashSet::new();
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
         // Each event is rendered with its own timestamp so past messages never change,
         // which keeps the rebuilt conversation stable across activations.
         let at = PromptContext {
@@ -142,9 +154,16 @@ pub fn build_messages(
             }
             EventBody::ToolResult(result) => {
                 unanswered.remove(result.tool_call_id.as_str());
+                let mut text = result.content.to_string();
+                if last_sleep.is_some_and(|sleep| index < sleep) && text.chars().count() > MAX_OLD_RESULT_CHARS {
+                    text = format!(
+                        "[Result of `{}` from an earlier wake, left out to save context; call it again if you need it.]",
+                        result.tool_name
+                    );
+                }
                 messages.push(Message::Tool {
                     tool_call_id: result.tool_call_id.clone(),
-                    content: result.content.to_string(),
+                    content: text,
                 });
                 if unanswered.is_empty() {
                     messages.append(&mut deferred);
@@ -428,6 +447,41 @@ mod tests {
         ];
 
         assert_eq!(build(&events).len(), 3);
+    }
+
+    #[test]
+    fn large_results_from_before_the_latest_sleep_are_left_out() {
+        let large = |id: &str| {
+            EventBody::ToolResult(ToolResult {
+                tool_call_id: id.to_owned(),
+                tool_name: "weather_forecast".to_owned(),
+                content: json!({"hourly": "x".repeat(MAX_OLD_RESULT_CHARS)}),
+                is_error: false,
+            })
+        };
+        let events = [
+            event(1, EventBody::Wake(WakeReason::Created)),
+            event(2, turn(&["old", "small"])),
+            event(3, large("old")),
+            event(4, result("small")),
+            event(5, turn(&["s1"])),
+            event(6, sleep("s1", false)),
+            event(7, timer()),
+            event(8, turn(&["new"])),
+            event(9, large("new")),
+        ];
+
+        let contents: Vec<String> = build(&events)
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::Tool { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect();
+
+        assert!(contents[0].contains("left out to save context"));
+        assert_eq!(contents[1], json!({"ok": true}).to_string());
+        assert!(contents[3].len() > MAX_OLD_RESULT_CHARS);
     }
 
     #[test]
