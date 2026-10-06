@@ -25,6 +25,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from typing import cast
 
 Json = dict[str, object]
 
@@ -224,6 +225,16 @@ def rows(block: object, key: str) -> list[Json]:
     return result
 
 
+def table(block: object, since: str) -> Json:
+    """Hourly rows from `since` (a local time like "2026-10-06T18:45") on, as a table:
+    the column names once, then each hour's values in that order."""
+    hours = rows(block, "time")
+    if since:
+        hours = [hour for hour in hours if str(hour["time"]) >= f"{since[:13]}:00"]
+    columns = list(hours[0]) if hours else []
+    return {"columns": columns, "rows": [[hour.get(column) for column in columns] for hour in hours]}
+
+
 def has_data(row: Json) -> bool:
     return any(value is not None for name, value in row.items() if name not in ("date", "time"))
 
@@ -258,7 +269,8 @@ def forecast(api: Api, location: str, days: int, hourly: bool, units: str) -> Js
                              for name, value in current.items() if "interval" != name}
     result["daily"] = rows(reply.get("daily"), "date")
     if hourly:
-        result["hourly"] = rows(reply.get("hourly"), "time")
+        now = cast(Json, current).get("time") if isinstance(current, dict) else None
+        result["hourly"] = table(reply.get("hourly"), now if isinstance(now, str) else "")
     result["units"] = units_of(reply, "current", "daily", *(["hourly"] if hourly else []))
     return with_place_notes(result, others, note)
 

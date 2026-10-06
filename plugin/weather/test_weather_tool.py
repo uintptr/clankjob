@@ -98,6 +98,16 @@ class ForecastTests(unittest.TestCase):
                                                             params["precipitation_unit"], params["forecast_days"]))
         self.assertIn("hourly", params)
 
+    def test_hourly_is_a_table_from_the_current_hour_on(self) -> None:
+        reply = {**self.reply(), "hourly": {"time": ["2026-09-29T16:00", "2026-09-29T17:00", "2026-09-29T18:00"],
+                                            "precipitation": [0.0, 0.1, 0.4], "weather_code": [3, 51, 61]}}
+        api = FakeApi(replies={"api": reply})
+        result = tool.forecast(api, "45.5,-73.6", 1, True, "metric")
+        self.assertEqual({"columns": ["time", "precipitation", "weather"],
+                          "rows": [["2026-09-29T17:00", 0.1, "light drizzle"],
+                                   ["2026-09-29T18:00", 0.4, "slight rain"]]},
+                         result["hourly"])
+
     def test_limits_are_checked_before_any_request(self) -> None:
         api = FakeApi()
         for days, hourly in ((0, False), (17, False), (4, True)):

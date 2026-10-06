@@ -63,8 +63,10 @@ library only, one subcommand per tool, printing JSON.
   `end` is capped at yesterday (UTC), and days still without data are dropped and named
   in a `note`. Long ranges (up to 366 days) are stored as a case file (`output = "auto"`).
 - **Output.** Open-Meteo's columns become one row per day or hour; WMO weather codes
-  become words (`moderate rain`); units are listed once in `units`. `units = imperial`
-  asks for °F, mph and inches.
+  become words (`moderate rain`); units are listed once in `units`. The hourly forecast
+  starts at the current hour and is a table (`columns` once, then `rows` of values),
+  which keeps it a third of its size: an agent polling the forecast resends it with
+  every turn. `units = imperial` asks for °F, mph and inches.
 - **Key.** With `OPEN_METEO_API_KEY` set, requests go to the `customer-` servers with
   `apikey`; the key is replaced by `***` in any error text.
 - Every call is read-only and safe to repeat; each HTTP request times out after 30 s.
