@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use clankjob_core::llm::{ToolCall, ToolSpec};
+use clankjob_core::skill::{SkillDraft, SkillFile};
 use clankjob_core::wait::{HUMAN_INPUT_KIND, TIMER_KIND, WaitConditionSpec};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -102,6 +103,33 @@ pub struct SaveContactArgs {
     pub note: Option<String>,
 }
 
+/// Arguments of `save_skill`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveSkillArgs {
+    /// Skill name, e.g. `weather-forecast`.
+    pub name: String,
+    /// When to use it.
+    pub description: String,
+    /// The instructions.
+    pub content: String,
+    /// Scripts and other files.
+    #[serde(default)]
+    pub files: Vec<SkillFile>,
+}
+
+impl SaveSkillArgs {
+    /// Its content, without the name.
+    #[must_use]
+    pub fn draft(&self) -> SkillDraft {
+        SkillDraft {
+            description: self.description.clone(),
+            content: self.content.clone(),
+            files: self.files.clone(),
+        }
+    }
+}
+
 /// Arguments of `read_file`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,6 +168,8 @@ pub struct LoadPluginArgs {
     pub name: String,
 }
 
+/// Name of the tool that saves a skill, once the owner approves it.
+pub const SAVE_SKILL: &str = "save_skill";
 /// Name of the tool that reads a guide; reading one loads its plugin.
 pub const READ_GUIDE: &str = "read_guide";
 /// Name of the tool that loads a plugin's tools.
@@ -155,6 +185,7 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
     "note_delete",
     "find_contact",
     "save_contact",
+    SAVE_SKILL,
     "read_file",
     "view_image",
     READ_GUIDE,
@@ -189,6 +220,8 @@ pub enum CoreTool {
     FindContact(FindContactArgs),
     /// Add a contact (never trusted).
     SaveContact(SaveContactArgs),
+    /// Save a skill for later cases, once approved.
+    SaveSkill(SaveSkillArgs),
     /// Read the text of a file in parts.
     ReadFile(ReadFileArgs),
     /// Show an image file to the model.
@@ -223,6 +256,7 @@ impl CoreTool {
             "note_delete" => parse_args(call).map(Self::NoteDelete),
             "find_contact" => parse_args(call).map(Self::FindContact),
             "save_contact" => parse_args(call).map(Self::SaveContact),
+            SAVE_SKILL => parse_args(call).map(Self::SaveSkill),
             "read_file" => parse_args(call).map(Self::ReadFile),
             "view_image" => parse_args(call).map(Self::ViewImage),
             READ_GUIDE => parse_args(call).map(Self::ReadGuide),
@@ -448,6 +482,40 @@ fn contact_tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
+/// `save_skill`, offered to every case.
+fn save_skill_spec() -> ToolSpec {
+    spec(
+        SAVE_SKILL,
+        "Save what you worked out as a skill that every later case can read under Guides: a reliable procedure, \
+         how a site or service works, or scripts that fetch or compute something. Save one only when it took real \
+         effort and will help again; never facts about this case alone (use notes), secrets or personal details. \
+         Saving an existing name makes a new version: read it first and keep what still holds. The owner approves \
+         every save; nothing is stored until then.",
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Lowercase letters, digits and dashes, e.g. `weather-forecast`."},
+                "description": {"type": "string", "description": "When to use it, in one sentence; listed in every case."},
+                "content": {
+                    "type": "string",
+                    "description": "Markdown instructions: when it applies, the steps, pitfalls, and how to run its files, \
+                                    which are copied to `skills/<name>/` in the sandbox, e.g. `uv run skills/<name>/forecast.py --city Montreal`."
+                },
+                "files": {
+                    "type": "array",
+                    "description": "Scripts or data, e.g. a Python script declaring its dependencies inline (PEP 723) for `uv run`.",
+                    "items": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "description": "e.g. `forecast.py`"}, "content": {"type": "string"}},
+                        "required": ["name", "content"]
+                    }
+                }
+            },
+            "required": ["name", "description", "content"]
+        }),
+    )
+}
+
 /// `load_plugin`, offered when plugins offer tools or wait conditions.
 #[must_use]
 pub fn load_plugin_spec() -> ToolSpec {
@@ -469,7 +537,7 @@ pub fn load_plugin_spec() -> ToolSpec {
 ///
 /// * `has_files` - The case has files, so `read_file` is offered
 /// * `vision` - The model can see images, so `view_image` is offered too
-/// * `has_guides` - Plugins offer guides, so `read_guide` is offered
+/// * `has_guides` - Plugins offer guides or skills were saved, so `read_guide` is offered
 #[must_use]
 pub fn core_tool_specs(has_files: bool, vision: bool, has_guides: bool) -> Vec<ToolSpec> {
     let condition = json!({
@@ -545,14 +613,15 @@ pub fn core_tool_specs(has_files: bool, vision: bool, has_guides: bool) -> Vec<T
         ),
     ];
     specs.extend(contact_tool_specs());
+    specs.push(save_skill_spec());
     if has_files {
         specs.extend(file_tool_specs(vision));
     }
     if has_guides {
         specs.push(spec(
             READ_GUIDE,
-            "Read one of the guides listed under Guides: instructions for a kind of task. Read it before starting that task. \
-             It also loads the guide's plugin.",
+            "Read one of the guides or skills listed under Guides: instructions for a kind of task. Read it before \
+             starting that task. It also loads the plugin the guide needs.",
             json!({
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "The guide's name, as listed under Guides."}},
@@ -713,11 +782,12 @@ mod tests {
                 "note_set",
                 "note_delete",
                 "find_contact",
-                "save_contact"
+                "save_contact",
+                "save_skill"
             ]
         );
         assert_eq!(names(true, false).last().map(String::as_str), Some("read_file"));
-        assert_eq!(names(true, true)[8..], ["read_file", "view_image"]);
+        assert_eq!(names(true, true)[9..], ["read_file", "view_image"]);
         let mut every = core_tool_specs(true, true, true);
         every.push(load_plugin_spec());
         let every: Vec<String> = every.into_iter().map(|spec| spec.name).collect();
@@ -737,6 +807,14 @@ mod tests {
         assert!(matches!(
             CoreTool::parse(&call("load_plugin", json!({"name": "finance"}))).unwrap(),
             CoreTool::LoadPlugin(_)
+        ));
+        assert!(matches!(
+            CoreTool::parse(&call(
+                "save_skill",
+                json!({"name": "f", "description": "d", "content": "c", "files": [{"name": "a.py", "content": "x"}]})
+            ))
+            .unwrap(),
+            CoreTool::SaveSkill(SaveSkillArgs { ref files, .. }) if files.len() == 1
         ));
     }
 }

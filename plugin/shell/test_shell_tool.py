@@ -71,6 +71,17 @@ class ShellToolTests(unittest.TestCase):
         files = fake.requests[0]["files"]
         self.assertEqual([{"name": "quote.pdf", "data": base64.b64encode(b"%PDF").decode()}], files)
 
+    def test_a_skill_is_sent_with_its_files(self) -> None:
+        fake = self.sandbox({"exit_code": 0})
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work) / "skill-weather-forecast"
+            path.mkdir()
+            (path / "forecast.py").write_text("print(1)")
+            tool.run(fake.env, "python3 skills/weather-forecast/forecast.py", 10, None, path)
+        skill = fake.requests[0]["skill"]
+        data = base64.b64encode(b"print(1)").decode()
+        self.assertEqual({"name": "weather-forecast", "files": [{"name": "forecast.py", "data": data}]}, skill)
+
     def test_errors(self) -> None:
         with self.assertRaisesRegex(ToolError, "SANDBOX_URL"):
             tool.run({}, "ls", 10, None)

@@ -60,6 +60,11 @@ when to wait next. Swap the "cron" for a clank of the machine and you get clankj
   outside the core as plugins with their own config, tools and wake-up conditions. A
   plugin is a Python process, or just a command-line script declared in a manifest: any
   CLI becomes a tool without writing a line of plugin code.
+- **It learns, with your say-so.** When a case works something out (how a site behaves,
+  a script that fetches a forecast), it can save it as a **skill** that every later case
+  reads like a guide. Each save waits for your approval, shown as a diff you can edit;
+  every version is kept, and scripts only ever run in the sandbox. The Skills page shows
+  each skill's instructions, scripts, history and the cases that used it.
 - **Boring where it counts.** One Rust binary, one SQLite file, synchronous code, no
   message broker. It runs happily in a small container.
 
@@ -93,7 +98,8 @@ clankjob is young. Everything below is built and tested:
 | Contacts: trusted recipients skip email approval (per-case setting)          | Available |
 | Discord: get asked, answer from chat, get notified; start a case by @mention | Available |
 | Plugins: Python processes, and command plugins (any CLI script as a tool)    | Available |
-| Published Docker image (amd64, arm64), one-command install and update       | Available |
+| Skills: cases save what they learned, with scripts, after your approval      | Available |
+| Published Docker image (amd64, arm64), one-command install and update        | Available |
 
 The bundled plugins are listed [below](#plugins). The full design, including everything
 planned, is in [docs/design.md](docs/design.md).
@@ -260,7 +266,7 @@ loads the ones it needs, so an unused plugin costs a line instead of its tool sc
 | `discord`            | Questions, approvals and notifications in a Discord channel, answered in chat     | a bot token                          |
 | `web`                | Google search, pages as text, waits for a page or feed to change                  | a Google Programmable Search key     |
 | `documents`          | Metadata, OCR and text of the case's files (PDF, Office, images, media)           | nothing (in the image)               |
-| `shell`              | A bash shell in a separate sandbox container, with network tools                  | the sandbox container (compose.yaml) |
+| `shell`              | A bash shell in a separate sandbox container, with network tools; runs skills     | the sandbox container (compose.yaml) |
 | `ntfy`               | Push notifications to your phone or desktop through ntfy                          | an ntfy server and topic             |
 | `weather`            | Forecasts and past weather for a place (Open-Meteo)                               | nothing                              |
 | `home_assistant`     | Sensors, history and services of your home; waits for a state; approval to act    | Home Assistant and an access token   |

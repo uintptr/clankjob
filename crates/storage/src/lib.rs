@@ -22,6 +22,7 @@ pub mod human;
 pub mod instructions;
 pub mod notes;
 pub mod queue;
+pub mod skills;
 pub mod waits;
 
 /// Schema migrations, applied in order. The index + 1 is stored in `PRAGMA user_version`.
@@ -31,6 +32,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0003_approvals_and_checks.sql"),
     include_str!("../migrations/0004_contacts.sql"),
     include_str!("../migrations/0005_daily_activation_budget.sql"),
+    include_str!("../migrations/0006_skills.sql"),
 ];
 
 /// Backups taken before migrating that are kept, newest first; older ones are deleted.

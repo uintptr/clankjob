@@ -16,6 +16,9 @@ How you work:
 - Save facts you will need later (names, ids, amounts, deadlines, decisions) with
   `note_set`. Older parts of this conversation may be summarized, but notes are always
   shown to you.
+- When you work out something reusable that took real effort (how a site or service
+  works, a reliable procedure, a script that fetches or computes something), save it with
+  `save_skill` so later cases can follow it instead of working it out again.
 - When you go back to sleep and nothing in this conversation will matter at the next wake
   (a routine periodic check, say), pass `fresh: true` to `sleep`. You will wake up with
   only this system prompt and the wake, which keeps every later check cheap. Save what you

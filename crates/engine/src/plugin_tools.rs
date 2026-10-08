@@ -28,6 +28,18 @@ pub struct PluginEntry {
     pub loaded: bool,
 }
 
+/// The plugin tool that runs skills' scripts (design §9.10): its argument that names a
+/// skill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillRunner {
+    /// Plugin id.
+    pub plugin: String,
+    /// Tool name, e.g. `run_command`.
+    pub tool: String,
+    /// The argument that names the skill, e.g. `skill`.
+    pub argument: String,
+}
+
 /// The entry for `plugin`, added if missing.
 fn entry<'a>(
     entries: &'a mut BTreeMap<String, PluginEntry>,
@@ -192,6 +204,19 @@ impl PluginTools {
             .values()
             .map(Arc::clone)
             .collect()
+    }
+
+    /// The first tool, by name, that takes a skill argument: what runs skills' scripts.
+    #[must_use]
+    pub fn skill_runner(&self) -> Option<SkillRunner> {
+        let set = self.set.read().unwrap_or_else(PoisonError::into_inner);
+        set.tools.iter().find_map(|(name, tool)| {
+            tool.skill_argument().map(|argument| SkillRunner {
+                plugin: tool.plugin().to_owned(),
+                tool: name.clone(),
+                argument: argument.to_owned(),
+            })
+        })
     }
 
     /// Every guide.

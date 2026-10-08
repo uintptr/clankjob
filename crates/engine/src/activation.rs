@@ -16,8 +16,10 @@ use clankjob_core::file::{CaseFile, FileKind};
 use clankjob_core::human::Execution;
 use clankjob_core::ids::{ActivationId, CaseId, FileId, HumanRequestId, WaitConditionId};
 use clankjob_core::llm::{CompletionRequest, CompletionResponse, LlmError, LlmProvider, TokenUsage, ToolCall};
-use clankjob_core::tool::{CaseFileRef, Guide, ToolContext, ToolOutput};
+use clankjob_core::skill::SkillAuthor;
+use clankjob_core::tool::{CaseFileRef, Guide, PluginTool, SkillRef, ToolContext, ToolOutput};
 use clankjob_core::wait::{HUMAN_INPUT_KIND, WaitCondition, WaitConditionSpec, WaitStatus};
+use clankjob_storage::skills::Saver;
 use clankjob_storage::{self as storage, Connection, begin_write, commit};
 use serde_json::{Value, json};
 
@@ -29,8 +31,8 @@ use crate::prompts::{
     local_time,
 };
 use crate::tools::{
-    AskHumanArgs, CORE_TOOL_NAMES, CoreTool, DEFAULT_READ_CHARS, MAX_READ_CHARS, ReadFileArgs, add, core_tool_specs,
-    describe_plugin_conditions, load_plugin_spec, schedule,
+    AskHumanArgs, CORE_TOOL_NAMES, CoreTool, DEFAULT_READ_CHARS, MAX_READ_CHARS, ReadFileArgs, SAVE_SKILL,
+    SaveSkillArgs, add, core_tool_specs, describe_plugin_conditions, load_plugin_spec, schedule,
 };
 use crate::transitions::{ClaimedCase, change_state, load_case};
 use crate::{Result, Shared, later};
@@ -211,18 +213,71 @@ struct FileEnv<'a> {
     plugins: &'a PluginTools,
 }
 
-/// `read_guide`: a plugin's instructions for a kind of task.
-fn read_guide(guides: &[Guide], wanted: &str) -> ToolExecution {
+/// `read_guide`: a plugin's instructions for a kind of task, or a skill.
+fn read_guide(connection: &Connection, case: &Case, env: &FileEnv<'_>, wanted: &str) -> Result<ToolExecution> {
     let wanted = wanted.trim();
+    let guides = env.guides;
     let found = guides
         .iter()
         .find(|guide| guide.name == wanted)
         .or_else(|| guides.iter().find(|guide| guide.name.eq_ignore_ascii_case(wanted)));
     if let Some(guide) = found {
-        return ToolExecution::ok(json!({ "guide": guide.name, "plugin": guide.plugin, "content": guide.content }));
+        return Ok(ToolExecution::ok(
+            json!({ "guide": guide.name, "plugin": guide.plugin, "content": guide.content }),
+        ));
     }
-    let names: Vec<&str> = guides.iter().map(|guide| guide.name.as_str()).collect();
-    ToolExecution::error(format!("no guide named `{wanted}`; available: {}", names.join(", ")))
+    if let Some(skill) = crate::skills::read(connection, case, wanted, env.plugins, Utc::now())? {
+        return Ok(ToolExecution::ok(skill));
+    }
+    let mut names: Vec<String> = guides.iter().map(|guide| guide.name.clone()).collect();
+    names.extend(
+        storage::skills::list_skills(connection, true)?
+            .into_iter()
+            .map(|skill| skill.name),
+    );
+    Ok(ToolExecution::error(format!(
+        "no guide or skill named `{wanted}`; available: {}",
+        names.join(", ")
+    )))
+}
+
+/// `save_skill`: ask the owner to approve the skill, or save it at once when the case
+/// is set to never ask.
+fn save_skill(
+    connection: &Connection,
+    case: &Case,
+    call: &ToolCall,
+    args: &SaveSkillArgs,
+    guides: &[Guide],
+) -> Result<ToolExecution> {
+    let (name, draft) = match crate::skills::prepare(&args.name, args.draft(), guides) {
+        Ok(prepared) => prepared,
+        Err(message) => return Ok(ToolExecution::error(message)),
+    };
+    if case.approvals == ApprovalPolicy::Never {
+        let unapproved = Saver {
+            author: SkillAuthor::Agent,
+            case_id: Some(&case.id),
+            approval_id: None,
+        };
+        let mut result = crate::skills::save(connection, &name, &draft, unapproved, Utc::now())?;
+        if let Some(object) = result.as_object_mut() {
+            object.insert(
+                "approval".to_owned(),
+                json!("not needed: this case is set to never ask for approval"),
+            );
+        }
+        return Ok(ToolExecution::ok(result));
+    }
+    let summary = crate::skills::approval_summary(connection, &name, &draft)?;
+    request_approval(connection, case, call, &summary)
+}
+
+/// The skill a plugin tool call names in its skill argument, canonical, if any.
+fn skill_named(tool: &dyn PluginTool, arguments: &Value) -> Option<String> {
+    let argument = tool.skill_argument()?;
+    let name = arguments.get(argument)?.as_str()?.trim().to_lowercase();
+    (!name.is_empty()).then_some(name)
 }
 
 /// `load_plugin`: offer a plugin's tools from the next turn on. The case's event log keeps
@@ -389,9 +444,10 @@ fn execute(connection: &Connection, case: &Case, call: &ToolCall, env: &FileEnv<
             Ok(content) => ToolExecution::ok(content),
             Err(message) => ToolExecution::error(message),
         },
+        CoreTool::SaveSkill(args) => save_skill(connection, case, call, &args, env.guides)?,
         CoreTool::ReadFile(args) => read_file(env, &args),
         CoreTool::ViewImage(args) => view_image(env, &args.file),
-        CoreTool::ReadGuide(args) => read_guide(env.guides, &args.name),
+        CoreTool::ReadGuide(args) => read_guide(connection, case, env, &args.name)?,
         CoreTool::LoadPlugin(args) => load_plugin(env.plugins, &args.name),
     })
 }
@@ -422,10 +478,11 @@ fn build_request(
     let files = storage::files::list_files(connection, &case.id)?;
     let file_views = views(&files, vision);
     let guides = plugins.guides();
+    let skills = storage::skills::list_skills(connection, true)?;
     let user_prompt = shared.settings.user_prompt_path.as_deref().and_then(crate::user_prompt::read);
     let loaded = plugins.loaded(events);
     let index = plugins.index(&loaded);
-    let mut tools = core_tool_specs(!files.is_empty(), vision, !guides.is_empty());
+    let mut tools = core_tool_specs(!files.is_empty(), vision, !guides.is_empty() || !skills.is_empty());
     if !index.is_empty() {
         tools.push(load_plugin_spec());
     }
@@ -449,6 +506,7 @@ fn build_request(
         instructions: &instructions,
         files: &file_views,
         guides: &guides,
+        skills: &skills,
         plugins: &index,
         user_prompt: user_prompt.as_deref(),
         wake: None,
@@ -470,7 +528,7 @@ fn build_request(
     if !files.is_empty() {
         sections.push(prompts.render(FILES, &context)?);
     }
-    if !guides.is_empty() {
+    if !guides.is_empty() || !skills.is_empty() {
         sections.push(prompts.render(GUIDES, &context)?);
     }
     if !index.is_empty() {
@@ -557,6 +615,19 @@ impl Activation<'_> {
                 .get(&case.llm)
                 .is_some_and(|provider| provider.supports_images());
             let guides = self.shared.plugin_tools.guides();
+            let ran = matches!(
+                plugin_call,
+                PluginCall::Ran(Ok(_)) | PluginCall::RanWithoutApproval(Ok(_), _)
+            );
+            if let Some(name) = self
+                .shared
+                .plugin_tools
+                .get(&call.name)
+                .filter(|_| ran)
+                .and_then(|tool| skill_named(tool.as_ref(), &call.arguments))
+            {
+                storage::skills::record_use(&transaction, &name, &case.id, now)?;
+            }
             let (execution, written) = match plugin_call {
                 PluginCall::Ran(output) => plugin_result(&transaction, &case, &self.shared.files, &files, output)?,
                 PluginCall::RanWithoutApproval(output, reason) => {
@@ -640,7 +711,7 @@ impl Activation<'_> {
     /// Follows the case's setting, which only the owner changes; by default the tool's
     /// own check decides (e.g. every recipient a trusted contact). Anything that fails
     /// means asking.
-    fn approval_skipped(&self, tool: &dyn clankjob_core::tool::PluginTool, call: &ToolCall) -> Option<String> {
+    fn approval_skipped(&self, tool: &dyn PluginTool, call: &ToolCall) -> Option<String> {
         let policy = match storage::cases::get_case(self.connection, &self.case_id) {
             Ok(Some(case)) => case.approvals,
             _ => ApprovalPolicy::Always,
@@ -667,11 +738,16 @@ impl Activation<'_> {
         }
     }
 
-    /// The case as plugin tools see it: its id, link and files. A database error becomes a
-    /// tool error.
-    fn tool_context(&self) -> std::result::Result<ToolContext, String> {
+    /// The case as a plugin tool call sees it: its id, link and files, and the skill the
+    /// call names. A database error becomes a tool error.
+    fn tool_context(&self, tool: &dyn PluginTool, arguments: &Value) -> std::result::Result<ToolContext, String> {
         let files = storage::files::list_files(self.connection, &self.case_id)
             .map_err(|error| format!("cannot list the case's files: {error}"))?;
+        let skill = match skill_named(tool, arguments) {
+            Some(name) => storage::skills::get_enabled(self.connection, &name)
+                .map_err(|error| format!("cannot read the skill `{name}`: {error}"))?,
+            None => None,
+        };
         Ok(ToolContext {
             case_id: self.case_id.to_string(),
             case_url: self.shared.channels.case_url(&self.case_id),
@@ -683,18 +759,25 @@ impl Activation<'_> {
                     media_type: file.media_type,
                 })
                 .collect(),
+            skills: skill
+                .into_iter()
+                .map(|skill| SkillRef {
+                    name: skill.skill,
+                    files: skill.draft.files,
+                })
+                .collect(),
         })
     }
 
     /// Run a plugin tool and log how long it took.
     fn run_timed(
         &self,
-        tool: &dyn clankjob_core::tool::PluginTool,
+        tool: &dyn PluginTool,
         name: &str,
         arguments: &Value,
     ) -> std::result::Result<ToolOutput, String> {
         let started = std::time::Instant::now();
-        let context = self.tool_context()?;
+        let context = self.tool_context(tool, arguments)?;
         let output = tool.run(arguments, &context);
         let elapsed_ms = started.elapsed().as_millis();
         match &output {
@@ -717,6 +800,10 @@ impl Activation<'_> {
     fn run_approved(&mut self, case: &Case) -> Result<()> {
         for request in storage::human::unfinished_executions(self.connection, &case.id)? {
             let tool = request.tool.clone().unwrap_or_default();
+            if tool == SAVE_SKILL {
+                self.save_approved_skill(case, &request)?;
+                continue;
+            }
             let output = if request.execution == Some(Execution::Running) {
                 Err("the server stopped while this call was running, so its outcome is unknown; check (e.g. the Sent folder) before trying again".to_owned())
             } else {
@@ -753,6 +840,42 @@ impl Activation<'_> {
                 return Err(error.into());
             }
         }
+        Ok(())
+    }
+
+    /// Save a skill the owner approved, possibly as they edited it, and record the result
+    /// as a wake event. It only writes to the database, so it all happens in one
+    /// transaction and cannot be left half done.
+    fn save_approved_skill(&mut self, case: &Case, request: &clankjob_core::human::HumanRequest) -> Result<()> {
+        let now = Utc::now();
+        let guides = self.shared.plugin_tools.guides();
+        let transaction = begin_write(self.connection)?;
+        let from = request.execution.unwrap_or(Execution::Pending);
+        if !storage::human::set_execution(&transaction, &request.id, from, Execution::Done)? {
+            return Ok(());
+        }
+        let prepared = serde_json::from_value::<SaveSkillArgs>(request.args.clone().unwrap_or(Value::Null))
+            .map_err(|error| format!("invalid arguments for `{SAVE_SKILL}`: {error}"))
+            .and_then(|args| crate::skills::prepare(&args.name, args.draft(), &guides));
+        let (result, is_error) = match prepared {
+            Ok((name, draft)) => {
+                let saver = Saver {
+                    author: SkillAuthor::Agent,
+                    case_id: Some(&case.id),
+                    approval_id: Some(&request.id),
+                };
+                (crate::skills::save(&transaction, &name, &draft, saver, now)?, false)
+            }
+            Err(message) => (json!({ "error": message }), true),
+        };
+        let reason = WakeReason::ApprovedCallFinished {
+            request_id: request.id.clone(),
+            tool: SAVE_SKILL.to_owned(),
+            result,
+            is_error,
+        };
+        storage::events::append_event(&transaction, &case.id, Some(&self.id), &EventBody::Wake(reason), now)?;
+        commit(transaction)?;
         Ok(())
     }
 
@@ -2029,5 +2152,138 @@ mod tests {
         // Assert
         assert_eq!(state, CaseState::Completed);
         assert!(engine.last_scheduler_tick().is_some());
+    }
+    /// A tool that runs skills' scripts, like the shell's `run_command`: it keeps the
+    /// skills it was handed.
+    struct FakeRunner {
+        spec: clankjob_core::llm::ToolSpec,
+        seen: std::sync::Mutex<Vec<Vec<SkillRef>>>,
+    }
+
+    impl PluginTool for FakeRunner {
+        fn plugin(&self) -> &'static str {
+            "shell"
+        }
+
+        fn spec(&self) -> &clankjob_core::llm::ToolSpec {
+            &self.spec
+        }
+
+        fn skill_argument(&self) -> Option<&str> {
+            Some("skill")
+        }
+
+        fn run(&self, _arguments: &Value, context: &ToolContext) -> std::result::Result<ToolOutput, String> {
+            self.seen.lock().unwrap().push(context.skills.clone());
+            Ok(ToolOutput::Json(json!({ "exit_code": 0 })))
+        }
+    }
+
+    #[test]
+    fn a_skill_is_saved_once_approved_and_later_cases_read_and_run_it() {
+        // Arrange
+        let test_db = TestDb::new();
+        let mut connection = test_db.connect();
+        let save = json!({
+            "name": "Weather-Forecast",
+            "description": "Weather for a city.",
+            "content": "Run forecast.py.",
+            "files": [{"name": "forecast.py", "content": "print('sunny')"}]
+        });
+        let run = json!({"command": "python3 skills/weather-forecast/forecast.py", "skill": "weather-forecast"});
+        let provider = ScriptedProvider::new([
+            Ok(reply(&[
+                (
+                    "save_skill",
+                    json!({"name": "bad name", "description": "d", "content": "c"}),
+                ),
+                ("save_skill", save.clone()),
+            ])),
+            Ok(reply(&[("complete", json!({"summary": "Saved."}))])),
+            Ok(reply(&[("read_guide", json!({"name": "weather-forecast"}))])),
+            Ok(reply(&[("run_command", run)])),
+            Ok(reply(&[("complete", json!({"summary": "Sunny."}))])),
+        ]);
+        let engine = engine(&test_db, Arc::clone(&provider));
+        let runner = Arc::new(FakeRunner {
+            spec: clankjob_core::llm::ToolSpec {
+                name: "run_command".to_owned(),
+                description: "Run a command.".to_owned(),
+                parameters: json!({"type": "object"}),
+            },
+            seen: std::sync::Mutex::default(),
+        });
+        engine
+            .plugin_tools()
+            .replace(vec![Arc::clone(&runner) as Arc<dyn PluginTool>], Vec::new(), Vec::new());
+        let first = create(&engine, &mut connection, Budgets::default());
+
+        // Act: the first case saves a skill, approved with the owner's edit
+        let waiting = activate(&engine, &mut connection);
+        let approval = open_approval(&connection, &first);
+        let not_yet = storage::skills::list_skills(&connection, false).unwrap().len();
+        let mut edited = save.clone();
+        edited["content"] = json!("Run forecast.py with the city.");
+        engine
+            .decide_approval(
+                &mut connection,
+                &approval.id,
+                verdict(clankjob_core::human::Decision::Approve, Some(&edited)),
+            )
+            .unwrap();
+        let saved = activate(&engine, &mut connection);
+        // A second case reads it and runs it
+        let second = create(&engine, &mut connection, Budgets::default());
+        let done = activate(&engine, &mut connection);
+
+        // Assert
+        assert_eq!((waiting.state, not_yet), (CaseState::WaitingForHuman, 0));
+        assert_eq!(
+            approval.question,
+            "Save a new skill `weather-forecast`, with forecast.py: Weather for a city."
+        );
+        let refused = events(&connection, &first).into_iter().any(
+            |body| matches!(body, EventBody::ToolResult(result) if result.is_error && result.tool_name == "save_skill"),
+        );
+        assert!(refused, "an invalid name is refused at once");
+        assert_eq!((saved.state, done.state), (CaseState::Completed, CaseState::Completed));
+        let skill = storage::skills::get_version(&connection, "weather-forecast", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(skill.draft.content, "Run forecast.py with the city.");
+        assert_eq!(
+            (skill.saved_by, skill.case_id.as_ref(), skill.approval_id.as_ref()),
+            (SkillAuthor::Agent, Some(&first.id), Some(&approval.id))
+        );
+        let read: Vec<Value> = events(&connection, &second)
+            .into_iter()
+            .filter_map(|body| match body {
+                EventBody::ToolResult(result) if result.tool_name == "read_guide" => Some(result.content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(read[0]["content"], "Run forecast.py with the city.");
+        assert_eq!(
+            (read[0]["plugin"].as_str(), read[0]["files"][0].as_str()),
+            (Some("shell"), Some("forecast.py"))
+        );
+        let requests = provider.requests.lock().unwrap();
+        let offered =
+            |index: usize| -> Vec<String> { requests[index].tools.iter().map(|tool| tool.name.clone()).collect() };
+        assert!(
+            requests[2]
+                .system
+                .contains("`weather-forecast` (skill, with scripts): Weather for a city.")
+        );
+        assert!(offered(2).contains(&"read_guide".to_owned()));
+        assert!(!offered(2).contains(&"run_command".to_owned()));
+        assert!(
+            offered(3).contains(&"run_command".to_owned()),
+            "reading the skill loaded its runner"
+        );
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(seen[0][0].files[0].content, "print('sunny')");
+        let uses = storage::skills::list_uses(&connection, "weather-forecast").unwrap();
+        assert_eq!((uses.len(), &uses[0].case_id, uses[0].uses), (1, &second.id, 2));
     }
 }

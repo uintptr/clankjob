@@ -7,9 +7,9 @@ access, but none of the server's secrets, data or settings. The agent can fetch 
 call APIs, clone repositories, convert files and write scripts, without being able to
 read an API key, change its own database or get around approvals.
 
-| Tool          | What it does                                                                               |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| `run_command` | `bash -c` in `/work`; optionally copies a case file to `/work/case-files/` first; 1–600 s |
+| Tool          | What it does                                                                                                                            |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `run_command` | `bash -c` in `/work`; optionally copies a case file to `/work/case-files/` and a skill's files to `/work/skills/<name>/` first; 1–600 s |
 
 ## Setup
 
@@ -57,6 +57,9 @@ compose, no `env_file`, no `/data` or secrets volumes and its own process namesp
 - **Files.** A `file` argument is sent along (40 MB at most) and written to
   `/work/case-files/<name>`. Nothing comes back but the output; long output becomes a
   case file (`output = "auto"`).
+- **Skills.** `skill` names a skill (design §9.10); its approved files are sent along
+  and replace `/work/skills/<name>/` before the command runs, so a copy a case changed
+  never outlives the next run.
 - **`/work`** is the `sandbox-work` volume: it persists across calls, restarts and cases,
   and every case shares it. `docker compose down -v` or removing the volume resets it.
 - `shell_tool.py` forwards the call; a failing command is a result (with its exit code),

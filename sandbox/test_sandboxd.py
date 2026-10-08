@@ -57,6 +57,18 @@ class RunTests(unittest.TestCase):
             with self.assertRaises(RequestError):
                 sandboxd.save_files(self.work, bad)
 
+    def test_a_skill_replaces_its_directory(self) -> None:
+        work = self.work
+        encoded = base64.b64encode(b"print(1)").decode()
+        (work / "skills" / "forecast").mkdir(parents=True)
+        (work / "skills" / "forecast" / "stale.py").write_text("tampered")
+        sandboxd.save_skill(work, {"name": "forecast", "files": [{"name": "f.py", "data": encoded}]})
+        self.assertEqual(["f.py"], [path.name for path in (work / "skills" / "forecast").iterdir()])
+        self.assertEqual(["forecast"], [path.name for path in (work / "skills").iterdir()], "no temporary left")
+        for bad in ({"name": "../x", "files": []}, {"name": "x", "files": "nope"}, "x", {"files": []}):
+            with self.assertRaises(RequestError):
+                sandboxd.save_skill(work, bad)
+
     def test_request_checks(self) -> None:
         requests: list[Json] = [{}, {"command": "  "}, {"command": "true", "timeout": 0},
                                  {"command": "true", "timeout": 601}, {"command": "true", "timeout": True}]
@@ -92,6 +104,12 @@ class HttpTests(unittest.TestCase):
         self.assertEqual((200, "from the case", 0), (status, reply["stdout"], reply["exit_code"]))
         with urllib.request.urlopen(f"{url}/health", timeout=10) as response:
             self.assertTrue(json.loads(response.read())["ok"])
+
+    def test_a_command_runs_a_skills_files(self) -> None:
+        script = base64.b64encode(b"print('sunny')").decode()
+        status, reply = self.post(self.start(), {"command": "python3 skills/forecast/f.py",
+                                                 "skill": {"name": "forecast", "files": [{"name": "f.py", "data": script}]}})
+        self.assertEqual((200, "sunny\n"), (status, reply["stdout"]))
 
     def test_bad_requests_get_400(self) -> None:
         url = self.start()

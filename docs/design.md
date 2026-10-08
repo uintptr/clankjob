@@ -38,6 +38,7 @@ marked **(built)**, **(partly built)** or **(planned)**.
 | Questions and notifications on chat channels, first answer wins          | Built                 | §10       |
 | Plugin host: plugin directory, instances, protocol, reload, Plugins page | Built for channels    | §9, §15   |
 | Command plugins: CLI scripts as LLM tools, plus guides                   | Built                 | §9.9      |
+| Skills: cases save what they learned, approved, versioned, with scripts  | Built                 | §9.10     |
 | Approvals of tool calls (web, with edits, and Discord reactions)         | Built                 | §9.7, §10 |
 | Plugin wait conditions (command plugins), checked on their own thread    | Built                 | §6, §9.9  |
 | Email plugin (IMAP/SMTP)                                                 | Built                 | §11       |
@@ -259,20 +260,21 @@ so they are never picked up later.
 
 ### 5.1 Core tools (built)
 
-| Tool           | Arguments                                                 | Effect                                                                                                             |
-| -------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `sleep`        | `conditions: [WaitCondition]`, `reason`, `fresh?`         | Suspends the case until **any** condition fires or times out. With `fresh`, the next wake starts anew (§7.7).      |
-| `ask_human`    | `question`, `timeout?`, `also_wait_for?: [WaitCondition]` | Creates a question for the owner and suspends until it is answered, or an `also_wait_for` condition fires (§10.2). |
-| `complete`     | `summary`, `result?` (any JSON)                           | Finishes the case successfully.                                                                                    |
-| `fail`         | `reason`                                                  | Finishes the case as failed.                                                                                       |
-| `note_set`     | `key`, `value`                                            | Saves a durable note (§7.2).                                                                                       |
-| `note_delete`  | `key`                                                     | Deletes a note.                                                                                                    |
-| `find_contact` | `query`                                                   | Looks the owner's contacts up by name, email or note, best match first (§9.7).                                     |
-| `save_contact` | `name`, `email?`, `phone?`, `note?`                       | Adds a contact, never trusted; an existing name or email is left unchanged (§9.7).                                 |
-| `read_file`    | `file`, `offset?`, `max_chars?`                           | Reads a case file's text in chunks (§7.5). Offered only when the case has files.                                   |
-| `view_image`   | `file`                                                    | Shows an image file to the model (§7.5). Offered only when the case has files and the model has `vision = true`.   |
-| `read_guide`   | `name`                                                    | Returns a plugin guide: instructions for a kind of task (§9.9), and loads its plugin. Offered only when a plugin offers guides. |
-| `load_plugin`  | `name`                                                    | Loads a plugin: its tools and wait conditions are offered from the next turn on (§9.9). Offered only when plugins offer tools or conditions. |
+| Tool           | Arguments                                                 | Effect                                                                                                                                                          |
+| -------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sleep`        | `conditions: [WaitCondition]`, `reason`, `fresh?`         | Suspends the case until **any** condition fires or times out. With `fresh`, the next wake starts anew (§7.7).                                                   |
+| `ask_human`    | `question`, `timeout?`, `also_wait_for?: [WaitCondition]` | Creates a question for the owner and suspends until it is answered, or an `also_wait_for` condition fires (§10.2).                                              |
+| `complete`     | `summary`, `result?` (any JSON)                           | Finishes the case successfully.                                                                                                                                 |
+| `fail`         | `reason`                                                  | Finishes the case as failed.                                                                                                                                    |
+| `note_set`     | `key`, `value`                                            | Saves a durable note (§7.2).                                                                                                                                    |
+| `note_delete`  | `key`                                                     | Deletes a note.                                                                                                                                                 |
+| `find_contact` | `query`                                                   | Looks the owner's contacts up by name, email or note, best match first (§9.7).                                                                                  |
+| `save_contact` | `name`, `email?`, `phone?`, `note?`                       | Adds a contact, never trusted; an existing name or email is left unchanged (§9.7).                                                                              |
+| `save_skill`   | `name`, `description`, `content`, `files?`                | Saves a skill for later cases once the owner approves it (§9.10).                                                                                               |
+| `read_file`    | `file`, `offset?`, `max_chars?`                           | Reads a case file's text in chunks (§7.5). Offered only when the case has files.                                                                                |
+| `view_image`   | `file`                                                    | Shows an image file to the model (§7.5). Offered only when the case has files and the model has `vision = true`.                                                |
+| `read_guide`   | `name`                                                    | Returns a plugin guide (§9.9) or a skill (§9.10): instructions for a kind of task, and loads the plugin it needs. Offered only when there are guides or skills. |
+| `load_plugin`  | `name`                                                    | Loads a plugin: its tools and wait conditions are offered from the next turn on (§9.9). Offered only when plugins offer tools or conditions.                    |
 
 Next to these, a case is offered the tools of the command plugins it has loaded (§9.9),
 e.g. `youtube_transcript`. A plugin tool cannot take a core tool's name.
@@ -422,8 +424,9 @@ The **system prompt** is made of these sections, in order:
    budget, the goal, and the case's **notes**.
 5. `instructions`: the owner's instructions in full, if any (§7.5).
 6. `files`: the **list** of the case's files, if any (§7.5).
-7. `guides`: the **list** of plugin guides (name, plugin, when to use it), if any, with
-   the advice to read the matching one with `read_guide` before starting (§9.9).
+7. `guides`: the **list** of plugin guides (name, plugin, when to use it) and enabled
+   skills (name, whether it has scripts, when to use it), if any, with the advice to read
+   the matching one with `read_guide` before starting (§9.9, §9.10).
 8. `plugins`: the **index** of plugins with tools or wait conditions (id, tool names,
    condition kinds, whether loaded), if any, with the advice to `load_plugin` one when the
    task needs it (§9.9).
@@ -1036,6 +1039,10 @@ file = "guides/earnings-call-analysis.md"
   The command gets a path to it, linked under its own name (so its extension survives)
   in a private temporary directory that is removed after the call; the store itself
   keeps files by id. Plugin tools receive the case's files for this in a `ToolContext`.
+- **Skills.** An argument of `type = "skill"` (at most one per tool) takes the name of an
+  enabled skill (§9.10). The command gets a directory, `<argument>-<skill>`, holding the
+  files of its current version, in the same private directory. The engine reads that
+  skill into the `ToolContext` and counts the call as a use of it.
 - **Approval.** `requires_approval = true` makes every call wait for the owner (§9.7);
   `approval = "Email {to}: {subject}"` is the summary shown to them, with placeholders of
   missing optional arguments dropped.
@@ -1058,6 +1065,58 @@ file = "guides/earnings-call-analysis.md"
   a missing `requires` program marks the plugin as not loaded, with the reason, on the
   Plugins page. A tool or guide whose name is taken (by a core tool or another plugin) is
   left out and listed as a conflict (§14.6). Reload works as for other plugins (§9.4).
+
+### 9.10 Skills (built)
+
+A case that works something out (how a booking site behaves, a reliable procedure, a
+script that fetches a forecast) can save it as a **skill**, so later cases follow it
+instead of working it out again. A skill is a plugin guide that a case wrote: a name, a
+one-line description listed in every case's system prompt, markdown instructions read
+with `read_guide`, and optional files, usually scripts, run in the sandbox.
+
+```json
+{
+    "name": "weather-forecast",
+    "description": "Hourly weather forecast for a city, with rain alerts.",
+    "content": "# Weather forecast\n\n1. Run `uv run skills/weather-forecast/forecast.py --city Montreal`.\n…",
+    "files": [{ "name": "forecast.py", "content": "#!/usr/bin/env python3\n…" }]
+}
+```
+
+- **Nothing is saved without the owner.** A skill reaches every later case, so an
+  instruction slipped into one email must not spread through it. `save_skill` checks the
+  skill, then opens an approval (§9.7) whose summary says whether it is new or which
+  version it replaces; the case waits. The Inbox shows the changes from the current
+  version, part by part, and the owner can edit the description, instructions and files
+  before approving. Once approved, the skill is saved as the call runs, in one
+  transaction with the result, which wakes the case like any approved call
+  (`approved_call_finished`). A case set to never ask (`approvals = "never"`) saves at
+  once, and the result says why nobody was asked.
+- **Versions.** Saving a name that exists adds a version and makes it current, so the
+  owner can see what changed and go back. Each version records who saved it (`owner` or
+  `agent`), the case, and the approval that let it in (and so who approved it, and on
+  which channel). The owner writes, edits, restores (a past version saved again as the
+  newest), disables (kept, hidden from cases) or deletes skills on the Skills page
+  (§15) or through the API (§14.11), without approval.
+- **Limits.** Names are 1 to 64 lowercase letters, digits and dashes, and cannot be a
+  plugin guide's name; the description at most 300 characters; the instructions at most
+  20 000; at most 20 files, named with letters, digits, `.`, `_` and `-` (not starting
+  with `.`), totalling 200 000 characters. Files are text.
+- **Reading.** Enabled skills are listed under Guides, after the plugin guides, with
+  "with scripts" when they have files. `read_guide` returns the instructions, the
+  version and the file names. For a skill with files it also names the tool that runs
+  them (the first plugin tool with a `skill` argument, §9.9) and loads that tool's
+  plugin, as reading a plugin guide does.
+- **Running scripts.** Scripts never run in the server: they would see its secrets and
+  database. The shell's `run_command` takes `skill`, and the sandbox writes the skill's
+  files fresh to `/work/skills/<name>/` before the command runs, replacing what was
+  there. `/work` is shared and writable by every case, so a case could change a copy;
+  the next run with `skill` restores the approved version. Scripts get nothing the
+  sandbox does not have: a skill that needs a secret must stay a plugin.
+- **Use.** Reading a skill, or a tool call that names it, counts as a use by the case.
+  The Skills page lists the cases that used each skill, how often and when last.
+- **Fixing.** The Guides section tells the agent to fix a skill that turned out wrong
+  or outdated with `save_skill`, which goes through approval like any save.
 
 ______________________________________________________________________
 
@@ -1465,6 +1524,20 @@ ______________________________________________________________________
 Emails are stored lowercased; `added_by` is `owner` or `agent` (`save_contact`). Only
 these endpoints set `trusted`.
 
+### 14.11 Skills (built)
+
+| Method   | Path                          | Description                                                                                                                                                                                                                                                |
+| -------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/skills`                     | `{ "skills": [{ name, description, enabled, version, files, created_by, created_by_case, created_at, updated_at, cases, last_used_at }] }`, by name.                                                                                                       |
+| `GET`    | `/skills/{name}`              | `{ skill, current, versions, used_by }`: the summary, the current version in full, every version (who saved it, the approval, `approved_via`, `approved_by`) and the cases that used it.                                                                   |
+| `GET`    | `/skills/{name}/versions/{n}` | One version in full.                                                                                                                                                                                                                                       |
+| `PUT`    | `/skills/{name}`              | `{ description, content, files? }` saves a new version by the owner (`201` for a new skill), no approval.                                                                                                                                                  |
+| `PATCH`  | `/skills/{name}`              | `{ "enabled": bool }`.                                                                                                                                                                                                                                     |
+| `DELETE` | `/skills/{name}`              | `204`; every version and use goes too.                                                                                                                                                                                                                     |
+| `POST`   | `/skills/diff`                | `{ old?, new }` (two `{ description, content, files }`) gives `{ parts }`: per part (`description`, `instructions`, each file) its `status` (`added`, `removed`, `changed`, `same`) and `lines` (`op` `=`, `-`, `+`, or `…` for unchanged lines left out). |
+
+Names are looked up lowercased. A name or content over the limits (§9.10) is a `400`.
+
 ## 15. Web client (built)
 
 A single-page app in `web/` (vanilla JavaScript, one stylesheet, system fonts, no
@@ -1486,9 +1559,12 @@ the same origin as the API. Everything the server sends is inserted as text, nev
   colouring over 100 KB.
 
 - **Sign in** with an API token, kept in the browser's local storage.
+
 - **Status bar**: engine health (scheduler tick), counts (need you / working / sleeping),
   navigation, **New case**, the theme toggle (auto / light / dark) and sign out.
+
 - **Cases**: two panes from 880 px up, one at a time below.
+
   - The **rail** lists cases grouped by state, "Needs you" first, finished groups folded,
     with a filter box. Selecting a case keeps the rail, its filter and its scroll.
   - The **detail** pane shows the state chip and details, the open question with an answer
@@ -1501,19 +1577,32 @@ the same origin as the API. Everything the server sends is inserted as text, nev
     message box. The details line shows where the case asks ("web, discord_joe") and the
     estimated cost so far ("Cost ≈ $0.0027", the calculation in its tooltip; "unknown"
     when the model has no known price).
+
 - **New case**: title, goal, owner, profile, LLM, model (with the catalog's suggestions,
   prices and context size), instructions, the chat channels to also ask on (when any are
   loaded, pre-ticked from `default_human_channels`, so none by default), and budgets.
+
 - **Inbox**: every open question and approval across cases, answerable in place. An
   approval card shows what the call will do and its arguments (to, subject, body…), with
   **Edit** (each argument becomes an input), an optional comment, **Reject** and
   **Approve** (or **Approve edited**). The same card appears on the case page, and the
   timeline shows the decision and the result of the call.
+
 - **Plugins**: each plugin and instance with an On / Off / Error / Needs attention chip,
   what the last check found (problems and warnings with their fix, and every check in a
   collapsible list), the channel's last error or warning, "Test now" per instance, and
   "Reload plugins". Command plugins list their tools and guides, which any case can load.
   The navigation link shows a red mark when something needs attention.
+
+- **Skills**: every skill with its version (or "off"); for the selected one, the
+  description, who first saved it and when, how many cases used it, the instructions
+  rendered and each file as highlighted code, the **history** (who saved each version
+  and who approved it, its **changes** from the version before, **Restore**), and the
+  cases that used it. **Edit** (with **Show changes** before saving), **Disable** /
+  **Enable**, **Delete** and **New skill**. In the Inbox, a `save_skill` approval shows
+  the changes from the current version (or the whole skill when it is new) instead of
+  raw arguments, and **Edit** opens the same editor.
+
 - **Prompts**: **Your prompt**, the owner's prompt (§7.6), editable with a character count
   and Save; then the effective templates and profiles, their source and hash, rejected files,
   and "Reload from disk".
@@ -1581,6 +1670,17 @@ channel_deliveries           -- outbox for channel messages (§10.3)
 
 channel_cursors              -- where each channel's poll continues
   channel, cursor (json), updated_at
+
+skills                       -- what cases saved for later cases (§9.10)
+  name, enabled, version (the current one), created_at, updated_at
+
+skill_versions               -- every version, kept
+  skill, version, description, content, files (json: [{ name, content }]),
+  saved_by (owner/agent), case_id (null once the case is deleted), approval_id,
+  created_at
+
+skill_uses                   -- which cases read or ran a skill
+  skill, case_id, uses, first_used_at, last_used_at
 ```
 
 **Planned:**
@@ -1673,6 +1773,10 @@ ______________________________________________________________________
   are never written to the database, never logged, never returned by the API, never shown
   to the LLM, and only passed to a plugin process inside its own instance config. A
   `{ secret = … }` whose name looks like a secret value is refused without echoing it.
+- **Skills (built)**: a skill reaches every later case, so one an injected instruction
+  wrote would spread. A case's `save_skill` waits for the owner's approval, which shows
+  what changed (§9.10); skills run only in the sandbox, which has no secrets, and the
+  approved files are written fresh before every run that names the skill.
 - **Plugins are trusted code (built)**: an external plugin runs with the server's user.
   It gets a minimal environment and only its own config, but nothing stops a malicious
   plugin from reading the data volume. Only install plugins you trust.

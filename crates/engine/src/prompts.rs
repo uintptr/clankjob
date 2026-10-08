@@ -152,6 +152,8 @@ pub struct PromptContext<'a> {
     pub files: &'a [crate::files::FileView],
     /// Guides plugins offer, read with `read_guide`.
     pub guides: &'a [clankjob_core::tool::Guide],
+    /// Enabled skills earlier cases saved, also read with `read_guide`.
+    pub skills: &'a [clankjob_core::skill::SkillSummary],
     /// Plugins the case can load, or has loaded, with `load_plugin`.
     pub plugins: &'a [crate::plugin_tools::PluginEntry],
     /// The owner's own prompt, when they wrote one.
@@ -320,6 +322,19 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         parameters: serde_json::json!({"type": "object"}),
     }];
     let (files, guides, instructions) = sample_material();
+    let skills = [clankjob_core::skill::SkillSummary {
+        name: "skill".to_owned(),
+        description: "When to use it.".to_owned(),
+        enabled: true,
+        version: 1,
+        files: vec!["script.py".to_owned()],
+        created_by: clankjob_core::skill::SkillAuthor::Agent,
+        created_by_case: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        cases: 0,
+        last_used_at: None,
+    }];
     let plugins = [crate::plugin_tools::PluginEntry {
         id: "plugin".to_owned(),
         tools: vec!["tool".to_owned()],
@@ -343,6 +358,7 @@ fn validate(name: &str, source: &str) -> Result<(), RenderError> {
         instructions: &instructions,
         files: &files,
         guides: &guides,
+        skills: &skills,
         plugins: &plugins,
         user_prompt: Some("Sign emails as Brad."),
         wake: None,
@@ -559,6 +575,7 @@ mod tests {
             instructions: &[],
             files: &[],
             guides: &[],
+            skills: &[],
             plugins: &[],
             user_prompt: None,
             wake: None,

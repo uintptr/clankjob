@@ -10,10 +10,12 @@ use clankjob_core::file::FileKind;
 use clankjob_core::human::Decision;
 use clankjob_core::human::HumanRequestStatus;
 use clankjob_core::ids::{CaseId, ContactId, FileId, HumanRequestId, InstructionId};
+use clankjob_core::skill::{SkillAuthor, SkillDraft};
 use clankjob_engine::{Engine, EngineError};
 use clankjob_plugin_host::{InstanceState, InstanceStatus};
 use clankjob_storage::cases::CaseFilter;
 use clankjob_storage::human::{Answer, Verdict};
+use clankjob_storage::skills::Saver;
 use clankjob_storage::{self as storage, Connection, StorageError};
 use std::io::Read;
 use std::sync::Arc;
@@ -597,6 +599,115 @@ fn delete_contact(state: &AppState, id: &ContactId) -> Handled {
     Ok(Response::empty_204())
 }
 
+/// Body of `PATCH /skills/{name}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillPatch {
+    enabled: bool,
+}
+
+/// Body of `POST /skills/diff`: two versions of a skill, `old` left out for a new one.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillDiffBody {
+    #[serde(default)]
+    old: Option<SkillDraft>,
+    new: SkillDraft,
+}
+
+fn skill_not_found(name: &str) -> AppError {
+    AppError::NotFound(format!("skill `{name}` not found"))
+}
+
+fn list_skills(state: &AppState) -> Handled {
+    let skills = storage::skills::list_skills(&state.connect()?, false)?;
+    Ok(Response::json(&json!({ "skills": skills })))
+}
+
+/// A skill: its summary, its current version in full, its history (who saved each
+/// version, who approved it) and the cases that used it.
+fn skill_json(connection: &Connection, name: &str) -> Result<Value, AppError> {
+    let summary = storage::skills::get_skill(connection, name)?.ok_or_else(|| skill_not_found(name))?;
+    let versions = storage::skills::list_versions(connection, name)?;
+    let mut history = Vec::with_capacity(versions.len());
+    for version in &versions {
+        let approval = version
+            .approval_id
+            .as_ref()
+            .map(|id| storage::human::get_request(connection, id))
+            .transpose()?
+            .flatten();
+        history.push(json!({
+            "version": version.version,
+            "description": version.draft.description,
+            "files": version.draft.files.iter().map(|file| &file.name).collect::<Vec<_>>(),
+            "saved_by": version.saved_by,
+            "case_id": version.case_id,
+            "approval_id": version.approval_id,
+            "approved_via": approval.as_ref().and_then(|request| request.answered_via.clone()),
+            "approved_by": approval.and_then(|request| request.responder),
+            "created_at": version.created_at,
+        }));
+    }
+    Ok(json!({
+        "skill": summary,
+        "current": versions.first(),
+        "versions": history,
+        "used_by": storage::skills::list_uses(connection, name)?,
+    }))
+}
+
+fn get_skill(state: &AppState, name: &str) -> Handled {
+    Ok(Response::json(&skill_json(&state.connect()?, &name.to_lowercase())?))
+}
+
+fn get_skill_version(state: &AppState, name: &str, version: u32) -> Handled {
+    let name = name.to_lowercase();
+    let found = storage::skills::get_version(&state.connect()?, &name, Some(version))?
+        .ok_or_else(|| AppError::NotFound(format!("skill `{name}` has no version {version}")))?;
+    Ok(Response::json(&found))
+}
+
+/// The owner saves a new version, or a new skill; no approval needed.
+fn save_skill(state: &AppState, request: &Request, name: &str) -> Handled {
+    let draft: SkillDraft = json_body(request)?;
+    let (name, draft) = clankjob_engine::skills::prepare(name, draft, &state.engine.plugin_tools().guides())
+        .map_err(AppError::BadRequest)?;
+    let connection = state.connect()?;
+    let owner = Saver {
+        author: SkillAuthor::Owner,
+        case_id: None,
+        approval_id: None,
+    };
+    let version = storage::skills::save_version(&connection, &name, &draft, owner, Utc::now())?;
+    let status = if version == 1 { 201 } else { 200 };
+    Ok(Response::json(&skill_json(&connection, &name)?).with_status_code(status))
+}
+
+fn update_skill(state: &AppState, request: &Request, name: &str) -> Handled {
+    let patch: SkillPatch = json_body(request)?;
+    let name = name.to_lowercase();
+    let connection = state.connect()?;
+    if !storage::skills::set_enabled(&connection, &name, patch.enabled, Utc::now())? {
+        return Err(skill_not_found(&name));
+    }
+    Ok(Response::json(&skill_json(&connection, &name)?))
+}
+
+fn delete_skill(state: &AppState, name: &str) -> Handled {
+    let name = name.to_lowercase();
+    if !storage::skills::delete_skill(&state.connect()?, &name)? {
+        return Err(skill_not_found(&name));
+    }
+    Ok(Response::empty_204())
+}
+
+fn diff_skills(request: &Request) -> Handled {
+    let body: SkillDiffBody = json_body(request)?;
+    let parts = clankjob_engine::skills::diff(body.old.as_ref(), &body.new);
+    Ok(Response::json(&json!({ "parts": parts })))
+}
+
 fn delete_case(state: &AppState, id: &CaseId) -> Handled {
     state.engine.delete_case(&mut state.connect()?, id)?;
     Ok(Response::empty_204())
@@ -822,6 +933,13 @@ fn route(state: &AppState, request: &Request) -> Handled {
         (POST) (/api/v1/contacts) => { add_contact(state, request) },
         (PUT) (/api/v1/contacts/{id: String}) => { edit_contact(state, request, &ContactId::from_string(id)) },
         (DELETE) (/api/v1/contacts/{id: String}) => { delete_contact(state, &ContactId::from_string(id)) },
+        (GET) (/api/v1/skills) => { list_skills(state) },
+        (POST) (/api/v1/skills/diff) => { diff_skills(request) },
+        (GET) (/api/v1/skills/{name: String}) => { get_skill(state, &name) },
+        (PUT) (/api/v1/skills/{name: String}) => { save_skill(state, request, &name) },
+        (PATCH) (/api/v1/skills/{name: String}) => { update_skill(state, request, &name) },
+        (DELETE) (/api/v1/skills/{name: String}) => { delete_skill(state, &name) },
+        (GET) (/api/v1/skills/{name: String}/versions/{version: u32}) => { get_skill_version(state, &name, version) },
         (GET) (/api/v1/human-requests) => { list_human_requests(state, request) },
         (POST) (/api/v1/human-requests/{id: String}/answer) => {
             answer_human_request(state, request, &HumanRequestId::from_string(id))
@@ -1222,6 +1340,51 @@ mod tests {
         assert_eq!((status, detail["case"]["approvals"].as_str()), (200, Some("always")));
         assert_eq!(unknown, 400);
         assert_eq!(default["approvals"], "default");
+    }
+
+    #[test]
+    fn skills_are_saved_listed_diffed_disabled_and_deleted_by_the_owner() {
+        // Arrange
+        let api = TestApi::new();
+        let draft = |content: &str| json!({"description": "Weather for a city.", "content": content, "files": [{"name": "f.py", "content": "print(1)"}]});
+
+        // Act
+        let (created, first) = api.call("PUT", "/api/v1/skills/Weather", Some(draft("Run f.py.")));
+        let (updated, second) = api.call("PUT", "/api/v1/skills/weather", Some(draft("Run f.py with a city.")));
+        let (_, list) = api.call("GET", "/api/v1/skills", None);
+        let (_, old) = api.call("GET", "/api/v1/skills/weather/versions/1", None);
+        let draft_of = |version: &Value| json!({"description": version["description"], "content": version["content"], "files": version["files"]});
+        let (_, diff) = api.call(
+            "POST",
+            "/api/v1/skills/diff",
+            Some(json!({"old": draft_of(&old), "new": draft_of(&second["current"])})),
+        );
+        let (_, disabled) = api.call("PATCH", "/api/v1/skills/weather", Some(json!({"enabled": false})));
+        let bad = api.call("PUT", "/api/v1/skills/bad%20name", Some(draft("x"))).0;
+        let empty = api
+            .call(
+                "PUT",
+                "/api/v1/skills/x",
+                Some(json!({"description": "d", "content": " "})),
+            )
+            .0;
+        let deleted = api.call("DELETE", "/api/v1/skills/weather", None).0;
+        let gone = api.call("GET", "/api/v1/skills/weather", None).0;
+        let no_version = api.call("GET", "/api/v1/skills/weather/versions/1", None).0;
+
+        // Assert
+        assert_eq!((created, updated), (201, 200));
+        assert_eq!(first["skill"]["name"], "weather");
+        assert_eq!(second["skill"]["version"], 2);
+        assert_eq!(second["versions"][1]["saved_by"], "owner");
+        assert_eq!(second["current"]["content"], "Run f.py with a city.");
+        assert_eq!(list["skills"][0]["files"], json!(["f.py"]));
+        assert_eq!(old["content"], "Run f.py.");
+        assert_eq!(diff["parts"][1]["status"], "changed");
+        assert_eq!(diff["parts"][2]["status"], "same");
+        assert_eq!(disabled["skill"]["enabled"], false);
+        assert_eq!((bad, empty), (400, 400));
+        assert_eq!((deleted, gone, no_version), (204, 404, 404));
     }
 
     #[test]

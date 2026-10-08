@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::llm::ToolSpec;
+use crate::skill::SkillFile;
 
 /// What a plugin tool produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +40,15 @@ pub struct CaseFileRef {
     pub media_type: String,
 }
 
+/// A skill a plugin tool call uses, with the files of its current version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillRef {
+    /// The skill's name.
+    pub name: String,
+    /// Its files.
+    pub files: Vec<SkillFile>,
+}
+
 /// What a plugin tool call can see of its case.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolContext {
@@ -48,6 +58,8 @@ pub struct ToolContext {
     pub case_url: Option<String>,
     /// The case's files, for arguments of type `file`.
     pub files: Vec<CaseFileRef>,
+    /// The skill named by the tool's skill argument, if it names an enabled one.
+    pub skills: Vec<SkillRef>,
 }
 
 /// A tool offered by a plugin.
@@ -78,6 +90,13 @@ pub trait PluginTool: Send + Sync {
     /// Returns why the check failed; the caller then asks for approval.
     fn approval_check(&self, _arguments: &Value, _trusted: &[String]) -> Result<Option<String>, String> {
         Ok(None)
+    }
+
+    /// The argument that names a skill whose files the call needs (design §9.10), e.g.
+    /// `skill` of the shell's `run_command`. The engine hands that skill's files over in
+    /// [`ToolContext::skills`] and counts the call as a use of the skill.
+    fn skill_argument(&self) -> Option<&str> {
+        None
     }
 
     /// Check the arguments without running anything, e.g. before asking for approval.

@@ -29,6 +29,7 @@ pub mod files;
 pub mod plugin_tools;
 pub mod prompts;
 mod scheduler;
+pub mod skills;
 pub mod tools;
 pub mod transitions;
 pub mod user_prompt;

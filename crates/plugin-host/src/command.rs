@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clankjob_core::llm::ToolSpec;
-use clankjob_core::tool::{CaseFileRef, CheckOutcome, PluginCondition, PluginTool, ToolContext, ToolOutput};
+use clankjob_core::tool::{CaseFileRef, CheckOutcome, PluginCondition, PluginTool, SkillRef, ToolContext, ToolOutput};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -75,6 +75,10 @@ pub enum ArgType {
     /// The name of one of the case's files; the command gets a path to it, named as in
     /// the case (e.g. `/tmp/clankjob-…/quote.pdf`).
     File,
+    /// The name of a skill (design §9.10); the command gets a directory holding the files
+    /// of its current version, named `<argument>-<skill>` (e.g. `/tmp/clankjob-…/skill-forecast`).
+    /// At most one per tool.
+    Skill,
 }
 
 /// A declared argument: `[tools.args.<name>]`.
@@ -257,9 +261,63 @@ fn find_file<'a>(context: &'a ToolContext, wanted: &str) -> Result<&'a CaseFileR
         })
 }
 
+/// Find the skill the LLM named, ignoring case. The engine only hands over an enabled
+/// skill, so any other name is unknown.
+fn find_skill<'a>(context: &'a ToolContext, wanted: &str) -> Result<&'a SkillRef, String> {
+    context
+        .skills
+        .iter()
+        .find(|skill| skill.name.eq_ignore_ascii_case(wanted))
+        .ok_or_else(|| format!("no skill named `{wanted}`; the skills are listed under Guides"))
+}
+
+impl LinkedFiles {
+    /// The call's private directory, made on first use.
+    fn dir(&mut self, argument: &str) -> Result<PathBuf, String> {
+        if let Some(dir) = &self.dir {
+            return Ok(dir.clone());
+        }
+        let number = NEXT_LINK_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("clankjob-{}-{number}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|error| format!("cannot prepare `{argument}`: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        self.dir = Some(dir.clone());
+        Ok(dir)
+    }
+}
+
+/// Whether a name is one visible path component, as skill and skill file names are
+/// checked to be when saved; kept as is, since a skill's instructions refer to them.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\', '\0'])
+}
+
+/// Write a skill's files into `<argument>-<skill>/` in the call's directory.
+fn write_skill(linked: &mut LinkedFiles, argument: &str, skill: &SkillRef) -> Result<PathBuf, String> {
+    let unusable = |name: &str| format!("skill `{}` has an unusable file name `{name}`", skill.name);
+    if !is_plain_name(&skill.name) {
+        return Err(unusable(&skill.name));
+    }
+    let target = linked.dir(argument)?.join(format!("{argument}-{}", skill.name));
+    std::fs::create_dir_all(&target).map_err(|error| format!("cannot prepare skill `{}`: {error}", skill.name))?;
+    for file in &skill.files {
+        if !is_plain_name(&file.name) {
+            return Err(unusable(&file.name));
+        }
+        std::fs::write(target.join(&file.name), &file.content)
+            .map_err(|error| format!("cannot prepare skill `{}`: {error}", skill.name))?;
+    }
+    Ok(target)
+}
+
 /// Replace the value of every `file` argument with a path to that case file, linked
 /// under its own name in a fresh private directory, since the store names files by id
-/// and many tools go by the extension.
+/// and many tools go by the extension; and the value of a `skill` argument with a
+/// directory holding that skill's files.
 fn link_files(
     args: &BTreeMap<String, ArgManifest>,
     values: &mut BTreeMap<String, String>,
@@ -267,25 +325,18 @@ fn link_files(
 ) -> Result<LinkedFiles, String> {
     let mut linked = LinkedFiles { dir: None };
     for (name, declared) in args {
-        if declared.kind != ArgType::File {
-            continue;
-        }
         let Some(value) = values.get_mut(name) else { continue };
-        let file = find_file(context, value)?;
-        let dir = if let Some(dir) = &linked.dir {
-            dir.clone()
-        } else {
-            let number = NEXT_LINK_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("clankjob-{}-{number}", std::process::id()));
-            std::fs::create_dir_all(&dir).map_err(|error| format!("cannot prepare `{name}`: {error}"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        match declared.kind {
+            ArgType::File => {}
+            ArgType::Skill => {
+                let skill = find_skill(context, value)?;
+                *value = write_skill(&mut linked, name, skill)?.to_string_lossy().into_owned();
+                continue;
             }
-            linked.dir = Some(dir.clone());
-            dir
-        };
+            ArgType::String | ArgType::Integer | ArgType::Number | ArgType::Boolean => continue,
+        }
+        let file = find_file(context, value)?;
+        let dir = linked.dir(name)?;
         // Case file names are already a single path component; stay safe regardless.
         let file_name = file_name_part(&file.name);
         let file_name = if file_name.is_empty() {
@@ -310,18 +361,18 @@ fn schema_of(args: &BTreeMap<String, ArgManifest>) -> Value {
     let mut required = Vec::new();
     for (arg, declared) in args {
         let kind = match declared.kind {
-            ArgType::String | ArgType::File => "string",
+            ArgType::String | ArgType::File | ArgType::Skill => "string",
             ArgType::Integer => "integer",
             ArgType::Number => "number",
             ArgType::Boolean => "boolean",
         };
-        let description = if declared.kind == ArgType::File {
-            format!(
+        let description = match declared.kind {
+            ArgType::File => format!(
                 "{} (the name of one of the case's files, as listed under Files)",
                 declared.description
-            )
-        } else {
-            declared.description.clone()
+            ),
+            ArgType::Skill => format!("{} (the name of a skill, as listed under Guides)", declared.description),
+            ArgType::String | ArgType::Integer | ArgType::Number | ArgType::Boolean => declared.description.clone(),
         };
         let mut schema = json!({ "type": kind, "description": description });
         if let Some(object) = schema.as_object_mut() {
@@ -388,7 +439,7 @@ fn check_values(
             Some(value) => value,
         };
         let text = match (declared.kind, value) {
-            (ArgType::String | ArgType::File, Value::String(text)) => text.trim().to_owned(),
+            (ArgType::String | ArgType::File | ArgType::Skill, Value::String(text)) => text.trim().to_owned(),
             (ArgType::Integer, Value::Number(number)) if number.is_i64() || number.is_u64() => number.to_string(),
             (ArgType::Number, Value::Number(number)) => number.to_string(),
             (ArgType::Boolean, Value::Bool(flag)) => flag.to_string(),
@@ -634,6 +685,9 @@ impl CommandTool {
         let what = format!("tool `{name}`");
         let standalone = check_command(&what, &manifest.command, &manifest.options, &manifest.args)?;
         let timeout = parse_timeout(&what, manifest.timeout.as_deref(), DEFAULT_TIMEOUT)?;
+        if manifest.args.values().filter(|arg| arg.kind == ArgType::Skill).count() > 1 {
+            return Err(format!("{what}: at most one argument can be of type `skill`"));
+        }
         let program = manifest.command.first().map(String::as_str).unwrap_or_default();
         let program = locate(program, dir).map_err(|error| format!("{what}: {error}"))?;
         let spec = ToolSpec {
@@ -713,6 +767,14 @@ impl PluginTool for CommandTool {
 
     fn spec(&self) -> &ToolSpec {
         &self.spec
+    }
+
+    fn skill_argument(&self) -> Option<&str> {
+        self.manifest
+            .args
+            .iter()
+            .find(|(_, arg)| arg.kind == ArgType::Skill)
+            .map(|(name, _)| name.as_str())
     }
 
     fn approval_summary(&self, arguments: &Value) -> Option<String> {
@@ -1265,6 +1327,56 @@ mod tests {
                 .unwrap()
                 .contains("the name of one of the case's files")
         );
+    }
+
+    #[test]
+    fn a_skill_argument_gets_a_directory_with_the_skills_files() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        script(
+            dir.path(),
+            "skill.sh",
+            "#!/bin/sh\nbasename \"$1\"\nls \"$1\"\ncat \"$1/forecast.py\"\necho\necho \"$1\" > seen_path\n",
+        );
+        let context = ToolContext {
+            skills: vec![SkillRef {
+                name: "weather-forecast".to_owned(),
+                files: vec![
+                    clankjob_core::skill::SkillFile {
+                        name: "forecast.py".to_owned(),
+                        content: "print('sunny')".to_owned(),
+                    },
+                    clankjob_core::skill::SkillFile {
+                        name: "cities.csv".to_owned(),
+                        content: "Montreal".to_owned(),
+                    },
+                ],
+            }],
+            ..ToolContext::default()
+        };
+        let text = "name = \"run\"\ndescription = \"d\"\ncommand = [\"./skill.sh\", \"{skill}\"]\n\
+                    [args.skill]\ntype = \"skill\"\ndescription = \"The skill\"\nrequired = true\n";
+        let tool = CommandTool::new("shell", dir.path(), manifest(text), BTreeMap::new()).unwrap();
+        let twice = format!("{text}[args.other]\ntype = \"skill\"\ndescription = \"Another\"\n");
+
+        // Act
+        let output = tool.run(&json!({ "skill": "Weather-Forecast" }), &context).unwrap();
+        let missing = tool.run(&json!({ "skill": "tides" }), &context).unwrap_err();
+        let refused = CommandTool::new("shell", dir.path(), manifest(&twice), BTreeMap::new()).err();
+
+        // Assert
+        let ToolOutput::Json(value) = output else {
+            unreachable!("expected inline output")
+        };
+        assert_eq!(
+            value["output"],
+            "skill-weather-forecast\ncities.csv\nforecast.py\nprint('sunny')\n"
+        );
+        let seen = std::fs::read_to_string(dir.path().join("seen_path")).unwrap();
+        assert!(!Path::new(seen.trim()).exists(), "the files are removed after the call");
+        assert_eq!(missing, "no skill named `tides`; the skills are listed under Guides");
+        assert_eq!(tool.skill_argument(), Some("skill"));
+        assert!(refused.unwrap().contains("at most one argument"));
     }
 
     #[test]

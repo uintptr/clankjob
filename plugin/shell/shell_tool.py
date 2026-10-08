@@ -3,9 +3,10 @@
 
 A command plugin (design section 9.9) that forwards `run_command` to the sandbox's exec
 service (sandbox/sandboxd.py) at SANDBOX_URL, with an optional case file, and prints the
-exit code and output. Standard library only.
+exit code and output. With a skill, its files go along and replace /work/skills/<name>/.
+Standard library only.
 
-    shell_tool.py --command=CMD [--timeout=SECONDS] [--file=PATH]
+    shell_tool.py --command=CMD [--timeout=SECONDS] [--file=PATH] [--skill=DIR]
 """
 
 import argparse
@@ -24,6 +25,8 @@ MAX_TIMEOUT = 600
 MAX_FILE = 40 * 1024 * 1024
 # The server links a `file` argument as "<argument>-<case file name>".
 LINK_PREFIX = "file-"
+# And a `skill` argument as a directory "<argument>-<skill name>" holding its files.
+SKILL_PREFIX = "skill-"
 
 
 class ToolError(Exception):
@@ -67,6 +70,14 @@ def case_file(path: Path) -> Json:
     return {"name": name, "data": base64.b64encode(path.read_bytes()).decode()}
 
 
+def skill_files(path: Path) -> Json:
+    if not path.is_dir():
+        raise ToolError(f"{path.name} is not a skill's directory")
+    files: list[Json] = [{"name": file.name, "data": base64.b64encode(file.read_bytes()).decode()}
+                         for file in sorted(path.iterdir()) if file.is_file()]
+    return {"name": path.name.removeprefix(SKILL_PREFIX), "files": files}
+
+
 def report(reply: Json, timeout: int) -> str:
     """Exit status first, then each non-empty stream."""
     if reply.get("timed_out"):
@@ -83,11 +94,14 @@ def report(reply: Json, timeout: int) -> str:
     return "\n".join(parts)
 
 
-def run(env: dict[str, str], command: str, timeout: int, file: Path | None) -> tuple[str, bool]:
+def run(env: dict[str, str], command: str, timeout: int, file: Path | None,
+        skill: Path | None = None) -> tuple[str, bool]:
     """The report, and whether the command succeeded."""
     if not 1 <= timeout <= MAX_TIMEOUT:
         raise ToolError(f"timeout must be 1 to {MAX_TIMEOUT} seconds")
     body: Json = {"command": command, "timeout": timeout, "files": [case_file(file)] if file else []}
+    if skill:
+        body["skill"] = skill_files(skill)
     reply = call(sandbox_url(env), "/run", body, timeout + 30)
     return report(reply, timeout), 0 == reply.get("exit_code")
 
@@ -97,9 +111,10 @@ def main() -> int:
     parser.add_argument("--command", required=True)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--file", type=Path)
+    parser.add_argument("--skill", type=Path)
     args = parser.parse_args()
     try:
-        text, _ = run(dict(os.environ), args.command, args.timeout, args.file)
+        text, _ = run(dict(os.environ), args.command, args.timeout, args.file, args.skill)
     except ToolError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

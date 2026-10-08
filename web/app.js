@@ -827,9 +827,21 @@ function approvalCard(request, caseLink, onAnswered) {
     const editButton = h("button", { class: "btn quiet", type: "button", onclick: () => toggleEdit() }, "Edit");
     const approveButton = h("button", { class: "btn primary", type: "button", onclick: () => decide("approve") }, "Approve");
     const inputs = new Map();
+    // A skill is reviewed as a whole (its changes, rendered), and edited in the skill editor.
+    const isSkill = request.tool === "save_skill";
 
     function renderFields() {
         inputs.clear();
+        if (isSkill) {
+            if (!editing) {
+                fields.replaceChildren(skillApprovalView(args));
+                return;
+            }
+            const editor = skillEditor(skillDraft(args));
+            inputs.set("", editor.read);
+            fields.replaceChildren(h("div", { class: "arg" }, h("span", { class: "key" }, "skill"), h("div", { class: "value mono" }, args.name)), editor.element);
+            return;
+        }
         fields.replaceChildren(
             ...Object.entries(args).map(([key, value]) => {
                 let control;
@@ -865,7 +877,10 @@ function approvalCard(request, caseLink, onAnswered) {
         if (comment.value.trim()) body.comment = comment.value.trim();
         if (decision === "approve" && editing) {
             body.args = { ...args };
-            for (const [key, read] of inputs) body.args[key] = read();
+            for (const [key, read] of inputs) {
+                if (key) body.args[key] = read();
+                else Object.assign(body.args, read());
+            }
         }
         try {
             await api(`/human-requests/${encodeURIComponent(request.id)}/answer`, { method: "POST", body });
@@ -954,7 +969,13 @@ function timelineRenderer(thread) {
                 );
             }
             case "approved_call_finished":
-                return msg("", reason.is_error ? `${reason.tool} failed` : `${reason.tool} ran`, event, richValue(reason.result));
+                return msg(
+                    "",
+                    reason.is_error ? `${reason.tool} failed` : `${reason.tool} ran`,
+                    event,
+                    richValue(reason.result),
+                    reason.tool === "save_skill" && !reason.is_error && reason.result?.skill && h("a", { class: "btn sm quiet", href: `#/skills/${encodeURIComponent(reason.result.skill)}` }, "See the skill"),
+                );
             case "condition_fired":
                 return msg("", "Woke up", event, txt(`The ${conditionName(reason.kind)} fired.`), reason.details.length > 0 && richValue(reason.details));
             case "timed_out":
@@ -1856,6 +1877,364 @@ function contactsView(view) {
     return poll(refresh, 15000);
 }
 
+// ---------------------------------------------------------------- skills
+
+const DIFF_TAGS = { added: "ok", removed: "bad", changed: "new" };
+const DIFF_LINES = { "+": "add", "-": "del", "=": "", "…": "gap" };
+
+/** Who saved a version: you, or a link to the case (gone if it was deleted). */
+function skillAuthor(savedBy, caseId) {
+    if (savedBy === "owner") return "you";
+    return caseId ? h("a", { href: `#/cases/${encodeURIComponent(caseId)}` }, "a case") : "a deleted case";
+}
+
+/** Just what a skill says, as `PUT /skills/{name}` and `POST /skills/diff` take it. */
+function skillDraft(source) {
+    return {
+        description: source.description || "",
+        content: source.content || "",
+        files: (source.files || []).map((file) => ({ name: file.name, content: file.content })),
+    };
+}
+
+/** A diff from `POST /skills/diff`, part by part; unchanged parts are only named. */
+function diffView(parts) {
+    const changed = parts.filter((part) => part.status !== "same");
+    const same = parts.filter((part) => part.status === "same").map((part) => part.part);
+    return h(
+        "div",
+        { class: "skill-diff" },
+        changed.length === 0 && h("p", { class: "hint" }, "No changes."),
+        changed.map((part) =>
+            h(
+                "div",
+                { class: "card diff-part" },
+                h("div", { class: "diff-h" }, h("span", { class: "mono" }, part.part), h("span", { class: `tag ${DIFF_TAGS[part.status]}` }, part.status)),
+                h(
+                    "pre",
+                    { class: "raw diff" },
+                    part.lines.map((line) => h("span", { class: `dl ${DIFF_LINES[line.op]}` }, line.op === "…" ? "…" : `${line.op === "=" ? " " : line.op} ${line.text}`)),
+                ),
+            ),
+        ),
+        same.length > 0 && h("p", { class: "hint" }, `Unchanged: ${same.join(", ")}`),
+    );
+}
+
+/** The diff between two drafts (`old` null for a new skill), computed by the server. */
+async function skillDiff(old, next) {
+    const { parts } = await api("/skills/diff", { method: "POST", body: { old: old && skillDraft(old), new: skillDraft(next) } });
+    return diffView(parts);
+}
+
+/** A skill's instructions, rendered, and each of its files as code. */
+function skillContent(skill) {
+    const files = skill.files || [];
+    return [
+        section("Instructions", "what a case reads with read_guide", h("div", { class: "card box skill-doc" }, richMarkdown(skill.content))),
+        files.length > 0 &&
+            section(
+                "Files",
+                "copied to skills/<name>/ in the sandbox when a command uses the skill",
+                files.map((file) =>
+                    h(
+                        "details",
+                        { class: "card skill-file", open: files.length === 1 },
+                        h("summary", {}, h("span", { class: "mono" }, file.name), h("span", { class: "hint" }, kilobytes(new Blob([file.content]).size))),
+                        codeView(file.content, file.name.split(".").pop()),
+                    ),
+                ),
+            ),
+    ];
+}
+
+/** Fields to write a skill: description, instructions and files. `read()` gives the draft. */
+function skillEditor(draft) {
+    const description = h("input", { name: "description", required: true, maxlength: 300, value: draft.description, placeholder: "Weather forecast for a city, hour by hour" });
+    const content = h("textarea", { name: "content", required: true, rows: 14, class: "mono" }, draft.content);
+    const files = h("div", { class: "skill-files" });
+
+    function fileRow(file) {
+        const row = h(
+            "div",
+            { class: "card box skill-file-edit" },
+            h(
+                "div",
+                { class: "acts" },
+                h("input", { class: "mono", "data-file-name": "", required: true, value: file.name, placeholder: "forecast.py", "aria-label": "File name" }),
+                h("div", { class: "right" }, h("button", { class: "btn sm quiet warn", type: "button", onclick: () => row.remove() }, "Remove")),
+            ),
+            h("textarea", { "data-file-content": "", class: "mono", rows: Math.min(18, file.content.split("\n").length + 2), "aria-label": "File content" }, file.content),
+        );
+        return row;
+    }
+
+    files.append(...draft.files.map(fileRow));
+    const element = h(
+        "div",
+        { class: "skill-editor" },
+        field("Description", description, "When to use it, in one sentence: every case's system prompt lists it."),
+        field("Instructions", content, "Markdown. Say when it applies, the steps, and how to run its files (from /work: python3 skills/<name>/<file>)."),
+        h("div", { class: "field" }, h("span", {}, "Files"), files, h("div", {}, h("button", { class: "btn sm", type: "button", onclick: () => files.append(fileRow({ name: "", content: "" })) }, "Add a file"))),
+    );
+    const read = () => ({
+        description: description.value.trim(),
+        content: content.value,
+        files: [...files.querySelectorAll(".skill-file-edit")].map((row) => ({
+            name: row.querySelector("[data-file-name]").value.trim(),
+            content: row.querySelector("[data-file-content]").value,
+        })),
+    });
+    return { element, read };
+}
+
+/** The current version of a skill, or null if there is none. */
+async function currentSkill(name) {
+    try {
+        return (await api(`/skills/${encodeURIComponent(name)}`)).current;
+    } catch (error) {
+        if (error.status === 404) return null;
+        throw error;
+    }
+}
+
+/** What a `save_skill` approval shows: the changes from the current version, or the new skill. */
+function skillApprovalView(args) {
+    const changes = h("div", {}, h("p", { class: "hint" }, "Comparing with the current version…"));
+    const view = h(
+        "div",
+        { class: "skill-approval" },
+        h("div", { class: "arg" }, h("span", { class: "key" }, "skill"), h("div", { class: "value mono" }, args.name)),
+        h("div", { class: "arg" }, h("span", { class: "key" }, "description"), h("div", { class: "value" }, args.description)),
+        changes,
+    );
+    currentSkill(String(args.name || "").trim().toLowerCase())
+        .then(async (current) => {
+            if (!current) {
+                changes.replaceChildren(h("p", { class: "hint" }, "A new skill. Every case will see it once approved."), ...skillContent(args));
+                return;
+            }
+            changes.replaceChildren(
+                h("p", { class: "hint" }, `Changes from version ${current.version}, the current one:`),
+                await skillDiff(current, args),
+                h("details", { class: "card skill-whole" }, h("summary", {}, "The whole new version"), skillContent(args)),
+            );
+        })
+        .catch((error) => changes.replaceChildren(h("p", { class: "hint" }, `Cannot compare: ${error.message}`), ...skillContent(args)));
+    return view;
+}
+
+function skillsView(view, selectedName) {
+    const newButton = h("button", { class: "btn sm primary", type: "button", onclick: () => edit(null) }, "New skill");
+    const body = pageFrame(
+        view,
+        "Skills",
+        "What your agents learned and saved for later cases, approved by you. Cases read a skill like a guide, and run its scripts in the sandbox.",
+        newButton,
+    );
+    const list = h("div", { class: "card prompt-list skill-list" });
+    const viewer = h("div", { class: "skill-view" });
+    body.append(h("div", { class: "prompt-layout" }, list, viewer));
+    let key = null;
+    let editing = false;
+
+    function renderList(skills) {
+        if (!skills.length) {
+            list.replaceChildren(h("div", { class: "box hint" }, "No skills yet."));
+            return;
+        }
+        list.replaceChildren(
+            ...skills.map((skill) =>
+                h(
+                    "a",
+                    { class: skill.name === selectedName ? "row sel" : "row", href: `#/skills/${encodeURIComponent(skill.name)}` },
+                    h("span", { class: "t" }, skill.name),
+                    h("span", { class: "side" }, skill.enabled ? h("span", { class: "tag" }, `v${skill.version}`) : h("span", { class: "tag bad" }, "off")),
+                ),
+            ),
+        );
+    }
+
+    async function show(name) {
+        const { skill, current, versions, used_by: usedBy } = await api(`/skills/${encodeURIComponent(name)}`);
+        const toggle = h("button", { class: "btn sm", type: "button", onclick: () => setEnabled(skill, !skill.enabled) }, skill.enabled ? "Disable" : "Enable");
+        viewer.replaceChildren(
+            h(
+                "div",
+                { class: "sec-h" },
+                h("h2", { class: "skill-name" }, skill.name),
+                h("span", { class: skill.enabled ? "tag ok" : "tag bad" }, skill.enabled ? "on" : "off"),
+                h("span", { class: "tag" }, `version ${skill.version}`),
+                h(
+                    "span",
+                    { class: "right" },
+                    h("button", { class: "btn sm", type: "button", onclick: () => edit(current) }, "Edit"),
+                    toggle,
+                    h("button", { class: "btn sm quiet warn", type: "button", onclick: () => remove(skill) }, "Delete"),
+                ),
+            ),
+            h(
+                "div",
+                { class: "card box skill-facts" },
+                h("p", {}, skill.description),
+                h(
+                    "p",
+                    { class: "hint" },
+                    "First saved by ",
+                    skillAuthor(skill.created_by, skill.created_by_case),
+                    " ",
+                    timeEl(skill.created_at),
+                    " · changed ",
+                    timeEl(skill.updated_at),
+                    " · ",
+                    skill.cases === 1 ? "used by 1 case" : `used by ${skill.cases} cases`,
+                    !skill.enabled && " · hidden from cases while off",
+                ),
+            ),
+            ...skillContent(current),
+            section("History", "every version is kept", h("div", { class: "card skill-history" }, versions.map((version, index) => historyRow(skill, version, versions[index + 1])))),
+            section(
+                "Used by",
+                "cases that read or ran it",
+                usedBy.length
+                    ? h(
+                          "div",
+                          { class: "card skill-uses" },
+                          usedBy.map((use) =>
+                              h(
+                                  "div",
+                                  { class: "row" },
+                                  h("a", { class: "t", href: `#/cases/${encodeURIComponent(use.case_id)}` }, use.title || "Untitled case"),
+                                  h("span", { class: "side hint" }, use.uses === 1 ? "once" : `${use.uses} times`, " · last ", timeEl(use.last_used_at)),
+                              ),
+                          ),
+                      )
+                    : h("p", { class: "hint" }, "No case has used it yet."),
+            ),
+        );
+    }
+
+    function historyRow(skill, version, previous) {
+        const changes = h("div");
+        const approved = version.approval_id ? ["approved", version.approved_via ? ` on ${version.approved_via}` : "", version.approved_by ? ` by ${version.approved_by}` : ""].join("") : null;
+        const showChanges = async () => {
+            if (changes.childElementCount) {
+                changes.replaceChildren();
+                return;
+            }
+            const path = (number) => `/skills/${encodeURIComponent(skill.name)}/versions/${number}`;
+            const [before, after] = await Promise.all([previous ? api(path(previous.version)) : null, api(path(version.version))]);
+            changes.replaceChildren(await skillDiff(before, after));
+        };
+        return h(
+            "div",
+            { class: "skill-version" },
+            h(
+                "div",
+                { class: "acts" },
+                h("b", {}, `v${version.version}`),
+                h("span", { class: "hint" }, "saved by ", skillAuthor(version.saved_by, version.case_id), approved && ` · ${approved}`, " · ", timeEl(version.created_at)),
+                h(
+                    "div",
+                    { class: "right" },
+                    h("button", { class: "btn sm quiet", type: "button", onclick: () => showChanges().catch(report) }, previous ? "Changes" : "Content"),
+                    version.version !== skill.version && h("button", { class: "btn sm", type: "button", onclick: () => restore(skill, version).catch(report) }, "Restore"),
+                ),
+            ),
+            changes,
+        );
+    }
+
+    /** The editor in the viewer: a new skill when `current` is null. */
+    function edit(current) {
+        editing = true;
+        const name = h("input", { name: "name", required: true, pattern: "[a-z0-9][a-z0-9-]{0,63}", placeholder: "weather-forecast", class: "mono" });
+        const editor = skillEditor(skillDraft(current || {}));
+        const changes = h("div");
+        const close = () => {
+            editing = false;
+            refresh().catch(report);
+        };
+        const form = h(
+            "form",
+            {
+                class: "card box skill-form",
+                onsubmit: async (event) => {
+                    event.preventDefault();
+                    const skillName = current ? current.skill : name.value.trim();
+                    try {
+                        await api(`/skills/${encodeURIComponent(skillName)}`, { method: "PUT", body: editor.read() });
+                        toast(current ? "Saved as a new version. Cases use it from their next turn." : "Skill added. Cases see it from their next turn.");
+                        selectedName = skillName;
+                        editing = false;
+                        key = null;
+                        if (location.hash !== `#/skills/${skillName}`) location.hash = `#/skills/${encodeURIComponent(skillName)}`;
+                        else await refresh();
+                    } catch (error) {
+                        report(error);
+                    }
+                },
+            },
+            !current && field("Name", name, "Lowercase letters, digits and dashes. Cases ask for it by this name."),
+            editor.element,
+            changes,
+            h(
+                "div",
+                { class: "acts" },
+                current && h("button", { class: "btn quiet", type: "button", onclick: () => skillDiff(current, editor.read()).then((diff) => changes.replaceChildren(diff), report) }, "Show changes"),
+                h("div", { class: "right" }, h("button", { class: "btn quiet", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn primary", type: "submit" }, current ? "Save new version" : "Add skill")),
+            ),
+        );
+        viewer.replaceChildren(h("div", { class: "sec-h" }, h("h2", {}, current ? `Edit ${current.skill}` : "New skill")), form);
+    }
+
+    async function restore(skill, version) {
+        if (!window.confirm(`Make version ${version.version} of ${skill.name} current again? It is saved as a new version.`)) return;
+        const old = await api(`/skills/${encodeURIComponent(skill.name)}/versions/${version.version}`);
+        await api(`/skills/${encodeURIComponent(skill.name)}`, { method: "PUT", body: skillDraft(old) });
+        toast(`Version ${version.version} restored as a new version.`);
+        key = null;
+        await refresh();
+    }
+
+    async function setEnabled(skill, enabled) {
+        try {
+            await api(`/skills/${encodeURIComponent(skill.name)}`, { method: "PATCH", body: { enabled } });
+            toast(enabled ? `${skill.name} is on: cases see it from their next turn.` : `${skill.name} is off: cases no longer see it.`);
+        } catch (error) {
+            report(error);
+        }
+        key = null;
+        await refresh();
+    }
+
+    async function remove(skill) {
+        if (!window.confirm(`Delete ${skill.name} and all its versions? Disabling it keeps them.`)) return;
+        try {
+            await api(`/skills/${encodeURIComponent(skill.name)}`, { method: "DELETE" });
+            toast("Skill deleted.");
+            location.hash = "#/skills";
+        } catch (error) {
+            report(error);
+        }
+    }
+
+    async function refresh() {
+        // An edit in progress is never redrawn away.
+        if (editing) return;
+        const { skills } = await api("/skills");
+        const nextKey = skills.map((skill) => `${skill.name}@${skill.updated_at}:${skill.cases}`).join(",");
+        if (nextKey === key) return;
+        key = nextKey;
+        if (!skills.some((skill) => skill.name === selectedName)) selectedName = skills[0]?.name ?? null;
+        renderList(skills);
+        if (selectedName) await show(selectedName);
+        else viewer.replaceChildren(emptyCard("No skills yet", "When an agent works out something worth keeping, it asks you to approve it as a skill. You can also write one yourself.", h("button", { class: "btn", type: "button", onclick: () => edit(null) }, "New skill")));
+    }
+
+    return poll(refresh, 15000);
+}
+
 // ---------------------------------------------------------------- prompts
 
 /** The owner's own prompt: added to every case's system prompt, saved as user_prompt.md. */
@@ -2178,6 +2557,9 @@ function route() {
             break;
         case "contacts":
             current = { section, dispose: contactsView(view), select: null };
+            break;
+        case "skills":
+            current = { section, dispose: skillsView(view, id), select: null };
             break;
         default:
             current = { section: null, dispose: null, select: null };

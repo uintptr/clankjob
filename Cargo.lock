@@ -158,6 +158,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "buf_redux"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -264,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "humantime-serde",
@@ -276,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-engine"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -291,6 +301,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "similar",
  "tempfile",
  "thiserror",
  "tracing",
@@ -298,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-llm-openai"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "clankjob-core",
  "rouille",
@@ -311,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-plugin-host"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "clankjob-core",
@@ -325,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-server"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -350,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-storage"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "clankjob-core",
@@ -1764,6 +1775,15 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+dependencies = [
+ "bstr",
+]
 
 [[package]]
 name = "siphasher"

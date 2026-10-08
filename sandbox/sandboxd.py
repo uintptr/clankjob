@@ -7,9 +7,13 @@ every program installed and the network, but cannot read an API key, the databas
 another plugin's configuration.
 
     GET  /health    {"ok": true, "user": …, "work": …}
-    POST /run       {"command": "…", "timeout": 120, "files": [{"name": …, "data": base64}]}
+    POST /run       {"command": "…", "timeout": 120, "files": [{"name": …, "data": base64}],
+                     "skill": {"name": …, "files": [{"name": …, "data": base64}]}}
                  -> {"exit_code": 0, "stdout": "…", "stderr": "…", "timed_out": false,
                      "truncated": false, "files_dir": "/work/case-files"}
+
+Case files land in /work/case-files/. A skill's files replace whatever is in
+/work/skills/<name>/, so a command always runs the version the owner approved.
 
 Commands run with `bash -c` in the work directory (a volume that persists between calls),
 in a new session so a timeout kills everything they started. Listen only on a network the
@@ -25,10 +29,13 @@ import binascii
 import json
 import os
 import pwd
+import re
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +48,10 @@ MAX_TIMEOUT = 600
 MAX_OUTPUT = 1_000_000  # bytes kept of stdout and of stderr
 MAX_REQUEST = 64 * 1024 * 1024  # case files come base64-encoded in the request
 FILES_DIR = "case-files"
+SKILLS_DIR = "skills"
+SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+# Replacing a skill's directory is a remove then a rename: one at a time.
+SKILL_LOCK = threading.Lock()
 
 
 class RequestError(Exception):
@@ -64,10 +75,11 @@ def safe_name(name: str) -> str:
     return cleaned
 
 
-def save_files(work: Path, files: object) -> None:
+def decode_files(files: object) -> list[tuple[str, bytes]]:
+    """Each file's safe name and bytes."""
     if not isinstance(files, list):
         raise RequestError("files must be a list")
-    target = work / FILES_DIR
+    decoded: list[tuple[str, bytes]] = []
     for entry in files:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) \
                 or not isinstance(entry.get("data"), str):
@@ -76,8 +88,35 @@ def save_files(work: Path, files: object) -> None:
             data = base64.b64decode(str(entry["data"]), validate=True)
         except (binascii.Error, ValueError):
             raise RequestError(f"file {entry['name']!r}: data is not base64") from None
+        decoded.append((safe_name(str(entry["name"])), data))
+    return decoded
+
+
+def save_files(work: Path, files: object) -> None:
+    target = work / FILES_DIR
+    for name, data in decode_files(files):
         target.mkdir(parents=True, exist_ok=True)
-        (target / safe_name(str(entry["name"]))).write_bytes(data)
+        (target / name).write_bytes(data)
+
+
+def save_skill(work: Path, skill: object) -> None:
+    """Write a skill's files to /work/skills/<name>/, replacing what was there."""
+    if not isinstance(skill, dict):
+        raise RequestError("a skill must be an object")
+    request: Json = skill
+    name = request.get("name")
+    if not isinstance(name, str) or not SKILL_NAME.fullmatch(name):
+        raise RequestError("a skill needs a name of lowercase letters, digits and dashes")
+    files = decode_files(request.get("files", []))
+    skills = work / SKILLS_DIR
+    skills.mkdir(parents=True, exist_ok=True)
+    fresh = Path(tempfile.mkdtemp(prefix=f".{name}-", dir=skills))
+    for file_name, data in files:
+        (fresh / file_name).write_bytes(data)
+    fresh.chmod(0o755)
+    with SKILL_LOCK:
+        shutil.rmtree(skills / name, ignore_errors=True)
+        fresh.rename(skills / name)
 
 
 def read_capped(file: IO[bytes]) -> tuple[str, bool]:
@@ -116,6 +155,8 @@ def handle_run(request: Json, work: Path) -> Json:
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_TIMEOUT:
         raise RequestError(f"timeout must be 1 to {MAX_TIMEOUT} seconds")
     save_files(work, request.get("files", []))
+    if "skill" in request:
+        save_skill(work, request["skill"])
     result = run(command, timeout, work)
     return {"exit_code": result.exit_code, "stdout": result.stdout, "stderr": result.stderr,
             "timed_out": result.timed_out, "truncated": result.truncated, "files_dir": str(work / FILES_DIR)}

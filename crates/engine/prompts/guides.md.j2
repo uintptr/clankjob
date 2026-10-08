@@ -1,8 +1,20 @@
 ## Guides
 
-Plugins offer instructions for some kinds of tasks. When the goal or a message matches
-one, read it with `read_guide` before starting, and follow it.
+{% if guides and skills %}
+Plugins offer instructions for some kinds of tasks, and earlier cases saved what they
+learned as skills.
+{% elif skills %}
+Earlier cases saved what they learned as skills: instructions for some kinds of tasks.
+{% else %}
+Plugins offer instructions for some kinds of tasks.
+{% endif %}
+When the goal or a message matches one, read it with `read_guide` before starting, and
+follow it.{% if skills %} If a skill turns out wrong or outdated, fix it with `save_skill`.{% endif %}
+
 
 {% for guide in guides %}
 - `{{ guide.name }}` ({{ guide.plugin }}): {{ guide.description }}
+{% endfor %}
+{% for skill in skills %}
+- `{{ skill.name }}` (skill{% if skill.files %}, with scripts{% endif %}): {{ skill.description }}
 {% endfor %}
