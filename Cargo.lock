@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-core"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "humantime-serde",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-engine"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-llm-openai"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "clankjob-core",
  "rouille",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-plugin-host"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clankjob-core",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-server"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "clankjob-storage"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clankjob-core",
